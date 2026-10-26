@@ -10,10 +10,71 @@ import { request } from './http.js';
 const BASE = 'https://pearlhash.xyz/api';
 export const POOL_FEE = 0.01;
 
+// 币价源：按「身份已核实」的顺序回退，任何一个挂了都不影响另一个。
+// 注意 ticker 陷阱：Gate / MEXC / Bitget / KuCoin 上的 PRLUSDT 是另一个代币（$0.09 量级，
+// 差 18 倍），绝不能按 ticker 直接接；能用的只有下面这三个带身份的源。
+//   1) Pearlhash 自己的报价（与收益同一生态）
+//   2) CoinGecko 的 pearl-2（CoinGecko id，不会串币）
+//   3) 以太坊主网 WPRL/USDT 池（包装 PRL，按 baseToken.symbol 校验）
+export const PRICE_SOURCES = [
+  {
+    id: 'pearlhash',
+    async load() {
+      const r = await request(`${BASE}/pearl-price`, { timeoutMs: 15000 });
+      if (!(typeof r?.usd === 'number' && r.usd > 0)) throw new Error('pearl-price 字段缺失');
+      return { usd: r.usd, change24h: r.usd_24h_change ?? null, vol24h: r.usd_24h_vol ?? null };
+    },
+  },
+  {
+    id: 'coingecko',
+    async load() {
+      const r = await request('https://api.coingecko.com/api/v3/simple/price?ids=pearl-2&vs_currencies=usd&include_24hr_change=true', { timeoutMs: 15000 });
+      const c = r?.['pearl-2'];
+      if (!(c?.usd > 0)) throw new Error('CoinGecko 没有 pearl-2 报价');
+      return { usd: c.usd, change24h: c.usd_24h_change ?? null, vol24h: null };
+    },
+  },
+  {
+    id: 'dexscreener',
+    async load() {
+      const r = await request('https://api.dexscreener.com/latest/dex/search?q=WPRL', { timeoutMs: 15000 });
+      // 不能按流动性挑：有些池子挂着一亿多美元的假 TVL，24h 成交额只有 $0.2，价格还是陈的（实测 $1.17）。
+      // 先按「同标的各池价格的中位数」定基准，再在中位数 ±3% 的池子里选成交额最大的那个。
+      const pairs = (r?.pairs || []).filter(p => p?.baseToken?.symbol === 'WPRL'
+        && Number(p?.priceUsd) > 0 && Number(p?.volume?.h24) > 1000);
+      if (!pairs.length) throw new Error('DexScreener 没有活跃的 WPRL 交易对');
+      const px = pairs.map(p => Number(p.priceUsd)).sort((a, b) => a - b);
+      const mid = px[Math.floor(px.length / 2)];
+      const near = pairs.filter(p => Math.abs(Number(p.priceUsd) - mid) / mid <= 0.03);
+      const best = (near.length ? near : pairs).sort((a, b) => Number(b.volume?.h24) - Number(a.volume?.h24))[0];
+      return { usd: Number(best.priceUsd), change24h: Number(best.priceChange?.h24) || null, vol24h: Number(best.volume?.h24) || null };
+    },
+  },
+];
+
+// 取两个源就停（一个是主源、一个是交叉验证），别把三个都打一遍：矿池接口有每分钟配额。
+// 两个源偏差 >25% 时仍然用靠前的那个（主源优先），但把分歧写进返回值，让面板/记录器能看见。
 export async function fetchPrice() {
-  const r = await request(`${BASE}/pearl-price`);
-  if (typeof r?.usd !== 'number') throw new Error('币价字段缺失');
-  return { usd: r.usd, change24h: r.usd_24h_change ?? null, vol24h: r.usd_24h_vol ?? null };
+  const got = [];
+  const errors = [];
+  for (const s of PRICE_SOURCES) {
+    try { got.push({ ...(await s.load()), src: s.id }); }
+    catch (e) { errors.push(`${s.id}：${e.message}`); }
+    if (got.length >= 2) break;
+  }
+  if (!got.length) throw new Error(`币价全部源失败（${errors.join('；')}）`);
+  const [main, other] = got;
+  const devPct = other ? Math.abs(other.usd - main.usd) / main.usd * 100 : null;
+  return {
+    usd: main.usd,
+    change24h: main.change24h ?? null,
+    vol24h: main.vol24h ?? null,
+    src: main.src,
+    cross: other ? { src: other.src, usd: other.usd } : null,
+    devPct,
+    disagree: devPct !== null && devPct > 25,
+    errors,
+  };
 }
 
 export async function fetchChain() {

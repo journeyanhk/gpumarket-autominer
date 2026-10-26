@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "updatedAt": "2026-10-26T06:45:00Z",
+  "note": "唯一许可的矿工二进制清单。未在此 pin 的版本不会被下载或执行；升级必须重新 pin 并 review diff。sha256 来源：GitHub Release 的 digest 字段 + 本地实际下载复算，两者一致才写入。",
+  "miners": {
+    "wr": {
+      "name": "WildRig Multi",
+      "repo": "andru-kun/wildrig-multi",
+      "version": "0.51.8",
+      "file": "wildrig-multi-linux-0.51.8.tar.gz",
+      "url": "https://github.com/andru-kun/wildrig-multi/releases/download/0.51.8/wildrig-multi-linux-0.51.8.tar.gz",
+      "sha256": "43f4071c743c922f2febf4b8ea44fc9f93dff668f5ffafcc24903dfd78f63771",
+      "exec": "wildrig-multi",
+      "pinnedAt": "2026-10-26",
+      "pinnedBy": "digest+recompute"
+    },
+    "srb": {
+      "name": "SRBMiner Multi",
+      "repo": "doktor83/SRBMiner-Multi",
+      "version": "3.8.0",
+      "file": "SRBMiner-Multi-3-8-0-Linux.tar.gz",
+      "url": "https://github.com/doktor83/SRBMiner-Multi/releases/download/3.8.0/SRBMiner-Multi-3-8-0-Linux.tar.gz",
+      "sha256": "095c3f75905ee023e8ed85ac905afefc92825cce83a528fa955cf1db456d3dd8",
+      "exec": "SRBMiner-MULTI",
+      "pinnedAt": "2026-10-26",
+      "pinnedBy": "digest+recompute"
+    }
+  }
+}

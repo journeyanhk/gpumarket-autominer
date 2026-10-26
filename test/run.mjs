@@ -9,9 +9,9 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
 let failed = 0;
-for (const t of ['logic-test.mjs', 'pool-test.mjs']) {
+for (const t of ['logic-test.mjs', 'pool-test.mjs', 'miner-test.mjs']) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'prl-test-'));
-  for (const f of ['server.js', 'package.json', 'src', 'public']) fs.cpSync(path.join(root, f), path.join(tmp, f), { recursive: true });
+  for (const f of ['server.js', 'package.json', 'src', 'public', 'miners']) fs.cpSync(path.join(root, f), path.join(tmp, f), { recursive: true });
   console.log(`\n=== ${t}（临时目录 ${tmp}）`);
   const r = spawnSync(process.execPath, ['--import', path.join(here, 'mock.mjs'), path.join(here, t), tmp], { stdio: 'inherit' });
   if (r.status !== 0) failed++;

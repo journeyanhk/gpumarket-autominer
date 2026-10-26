@@ -52,10 +52,10 @@ const ob = cap.at(-1);
 ok(/ pool=pearlhash$/.test(ob.label), `标签带默认矿池：${ob.label}`);
 ok(/pearlhash\) echo "wr --algo pearlhash --url stratum\+ssl:\/\/pool\.pearlhash\.xyz:9443 --user prl1p\S+ --worker \$W"/.test(ob.onstart), '脚本含 Pearlhash 参数（WildRig）');
 ok(new RegExp(`kryptex\\) echo "srb --disable-cpu --algorithm pearlhash --pool prl-[a-z]+\\.kryptex\\.network:7048 --wallet ${W2}\\.\\$W"`).test(ob.onstart), '脚本含 Kryptex 参数（SRBMiner，Kryptex 钱包.矿工名）');
-ok(/srb\) F=SRBMiner-MULTI; URLS="https:\/\/github\.com\/doktor83\/SRBMiner-Multi\/releases\/download\/3\.7\.9\/SRBMiner-Multi-3-7-9-Linux\.tar\.gz/.test(ob.onstart), 'SRBMiner 下载地址来自 GitHub 最新版');
+ok(/srb\) F=SRBMiner-MULTI; SHA=[a-f0-9]{64}; URLS="https:\/\/github\.com\/doktor83\/SRBMiner-Multi\/releases\/download\/3\.8\.0\/SRBMiner-Multi-3-8-0-Linux\.tar\.gz/.test(ob.onstart), 'SRBMiner 用的是清单 pin 的 3.8.0（不是「GitHub 最新版」）');
 ok(/DEF='pearlhash'/.test(ob.onstart) && /pool=\[a-z\]\*/.test(ob.onstart), '脚本默认挖 Pearlhash，并每分钟读标签');
 const mA = e.st.managed[idA];
-ok(mA.sv === 3 && mA.pools.join() === 'pearlhash,kryptex' && mA.pool === 'pearlhash', '记录了脚本版本和可切换的矿池');
+ok(mA.sv === 4 && mA.pools.join() === 'pearlhash,kryptex' && mA.pool === 'pearlhash', '记录了脚本版本（v4：带 sha256 校验）和可切换的矿池');
 
 // 让它开机并在 Pearlhash 出算力
 await wait(22000);

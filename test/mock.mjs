@@ -29,6 +29,11 @@ const machinePool = i => {
 };
 globalThis.__machinePool = machinePool;
 globalThis.__preempt = id => { const i = instances.find(x => x.id === +id); if (i) { i.actual_status = 'stopped'; i.intended_status = 'running'; } };
+// 模拟任意状态组合（vast 的真实语义还没验证过，测试要能摆出各种组合）
+globalThis.__instanceStatus = (id, actual, intended = 'running', msg = '') => {
+  const i = instances.find(x => x.id === +String(id));
+  if (i) { i.actual_status = actual; i.intended_status = intended; i.status_msg = msg; i.cur_state = actual; i.next_state = actual; }
+};
 globalThis.__kxEarned = 0;
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, opt = {}) => {
@@ -44,7 +49,8 @@ globalThis.fetch = async (url, opt = {}) => {
       globalThis.__lastLimit = body.limit;
       if (globalThis.__rateLimited) { globalThis.__rateLimited = false; return json({ error: 'rate_limited', msg: 'API requests too frequent' }, 429); }
       globalThis.__lastQuery = body;
-      const list = offers.filter(o => o.dph_total <= body.dph_total.lte && (!body.gpu_name?.in || body.gpu_name.in.includes(o.gpu_name))).slice(0, body.limit || 1000);
+      // 竞价按 min_bid 过滤、按需按挂牌价过滤（与 vast 的语义一致）
+      const list = offers.filter(o => (body.min_bid ? o.min_bid <= body.min_bid.lte : o.dph_total <= body.dph_total.lte) && (!body.gpu_name?.in || body.gpu_name.in.includes(o.gpu_name))).slice(0, body.limit || 1000);
       if (globalThis.__quotaLeft != null) {
         if (globalThis.__quotaLeft <= 0) return json({ error: 'search_quota_exceeded', msg: 'Daily search row quota exhausted' }, 429, { 'X-RateLimit-Reset': String(Math.floor(globalThis.__quotaReset / 1000)) });
         globalThis.__quotaLeft -= list.length;
@@ -61,6 +67,11 @@ globalThis.fetch = async (url, opt = {}) => {
       if (!o) return json({ success: false, error: 'no_such_ask', msg: 'not available' }, 400);
       const script = body.runtype === 'args' ? (body.onstart === 'bash' && body.args?.[0] === '-c' ? body.args[1] : '') : body.onstart;
       if (!script?.includes('wildrig') || body.client_id !== 'me') return json({ success: false, msg: 'bad body' }, 400);
+      // 出价被拒（扫描到下单之间 min_bid 涨了）
+      if (globalThis.__bidError) {
+        globalThis.__bidError = false;
+        return json({ success: false, error: 'bid_price_too_low', msg: 'Bid price is too low for this offer' }, 400);
+      }
       globalThis.__lastRentBody = body;
       offers.splice(offers.indexOf(o), 1);
       const id = nextId++;

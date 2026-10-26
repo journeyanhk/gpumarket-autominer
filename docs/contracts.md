@@ -158,9 +158,13 @@ allocate({
 | 平台表现 | 归一状态 | 处理 |
 |---|---|---|
 | `actual_status=running` 且有算力 | `mining` | 正常 |
-| `intended_status=running` 但 `actual_status=stopped`，且出过算力 | `preempted` | **按"需销毁"处理**：`stopped` 期间磁盘仍在计费；默认 5 分钟内销毁，不拉黑机器 |
-| 从没出过算力就 `stopped` | `booting` 超时路径 | 按部署失败退租 |
-| 其他非 active 状态 | `offline` | 连续 10min 才销毁 |
+| **托管记录 `spot: true` 且 `actual_status` 不在 ACTIVE 集合**（stopped / exited / offline / 其他） | `preempted` | 5 分钟内销毁、**黑名单 0**、恢复 running 自动清计时。**不看是否出过算力**：开机阶段出价被顶掉是最常见的抢占时点 |
+| 从没出过算力、且状态是 ACTIVE（loading/created/scheduling） | `booting` | 正常等部署，超时才按部署失败退租 |
+| 按需实例的其他非 active 状态 | `offline` | 连续 10min 才销毁，拉黑 6h |
+
+`spot: true` 的实例在 `offline` / `nohash` 分支销毁时同样 **`blacklistMin = 0`**：出价被顶或容器异常不该让整台机器进黑名单，否则高频抢占会把市场逐台拉黑。
+
+**状态语义尚未在真机验证**：vast 对"被 outbid"的实例到底返回 `actual_status` / `cur_state` / `next_state` / `status_msg` 的哪种组合，目前只有推断。因此 `m.spot` 的状态元组每变化一次就写一条 `info` 事件（`noteSpotStatus`），M1.5 跑完用真实数据收紧判定。竞价下单被拒（`min_bid` 在下单前上涨）同样**不拉黑**，只把该 offer 从列表移除。
 
 竞价实例被抢占**不是**机器质量问题：不进入黑名单，下轮扫描可以重新出价。
 

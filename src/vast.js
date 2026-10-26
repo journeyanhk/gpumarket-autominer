@@ -25,15 +25,18 @@ export class Vast {
   // 与官方 CLI search_offers 的默认过滤一致：verified / external=false / rentable / rented=false
   // vast 按「返回的条数」计每日搜索额度（UTC 0 点重置），所以只取每美元算力最高的前 N 条
   // names：只搜这些型号（vast 的 gpu_name 原样字符串），省掉不适合挖矿的卡占用的搜索条数
+  // 竞价（bid）时按 min_bid 过滤：挂牌价常常是入场价的 3 倍，用挂牌价过滤会把能租的机器全滤掉
   async searchOffers(f, meta, names) {
-    const q = {
+    const maxPrice = Math.max(0.01, f.maxHourlySpend);
+    const priceKey = f.useSpot && this.spotFilterOk !== false ? 'min_bid' : 'dph_total';
+    const body = {
       verified: { eq: true },
       external: { eq: false },
       rentable: { eq: true },
       rented: { eq: false },
       reliability: { gte: f.minReliability },
       num_gpus: { gte: 1, lte: f.maxGpusPerMachine },
-      dph_total: { lte: Math.max(0.01, f.maxHourlySpend) }, // 单机时租不可能超过总预算
+      [priceKey]: { lte: maxPrice }, // 单机时租不可能超过总预算
       cuda_max_good: { gte: f.minCuda },
       inet_down: { gte: f.minInetDown },
       order: [['flops_per_dphtotal', 'desc']],
@@ -42,8 +45,16 @@ export class Vast {
       allocated_storage: f.disk,
       ...(names?.length ? { gpu_name: { in: names } } : {}),
     };
-    const r = await request(`${BASE}/bundles/`, { method: 'POST', headers: this.h(), body: q, timeoutMs: 45000, meta });
-    return r?.offers || [];
+    try {
+      const r = await request(`${BASE}/bundles/`, { method: 'POST', headers: this.h(), body, timeoutMs: 45000, meta });
+      return r?.offers || [];
+    } catch (e) {
+      // 4xx（非 429）= vast 不接受这个过滤字段：退回按挂牌价过滤并记住，只多打这一次
+      if (priceKey !== 'min_bid' || e.status === 429 || !(e.status >= 400 && e.status < 500)) throw e;
+      this.spotFilterOk = false;
+      console.error('vast 不接受 min_bid 过滤，竞价搜索退回按挂牌价过滤（会漏掉挂牌贵但入场价低的机器）');
+      return this.searchOffers(f, meta, names);
+    }
   }
 
   // 租用一个 offer 并部署。cancel_unavail=true：机器已被别人租走时直接失败，不会留下排队中的实例

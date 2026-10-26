@@ -37,7 +37,7 @@ export class Vast {
       cuda_max_good: { gte: f.minCuda },
       inet_down: { gte: f.minInetDown },
       order: [['flops_per_dphtotal', 'desc']],
-      type: 'on-demand',
+      type: f.useSpot ? 'bid' : 'on-demand',
       limit: Math.max(20, Math.min(1000, f.scanRows || 100)),
       allocated_storage: f.disk,
       ...(names?.length ? { gpu_name: { in: names } } : {}),
@@ -49,12 +49,13 @@ export class Vast {
   // 租用一个 offer 并部署。cancel_unavail=true：机器已被别人租走时直接失败，不会留下排队中的实例
   // mode 'args'：跳过 vast 的 SSH 初始化（apt 装 ssh/tmux 等，慢机器要好几分钟），容器直接用 bash 运行开机脚本
   // mode 'ssh'：原来的方式，能 SSH / Jupyter 登录，脚本作为 onstart 运行
-  async rent(offerId, { image, disk, label, onstart, mode = 'ssh' }) {
+  // price：竞价实例的出价（on-demand 时必须为 null）
+  async rent(offerId, { image, disk, label, onstart, mode = 'ssh', price = null }) {
     const body = {
       client_id: 'me',
       image,
       env: {},
-      price: null,
+      price: price ?? null,
       disk,
       label,
       cancel_unavail: true,

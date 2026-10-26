@@ -12,6 +12,7 @@
 - `tools/breakeven.mjs` —— 只读盈亏线计算器：`node tools/breakeven.mjs`
 - `miners/manifest.json` —— 矿工二进制白名单（版本 + sha256），未 pin 的不执行
 - CI：`.github/workflows/ci.yml`，Node 22/24 跑全量测试（外部接口全部 mock，不会花钱）
+- 竞价实例（可抢占）默认关闭：`data/config.json` 里 `useSpot: true` 才启用，属于实验特性（见 `docs/contracts.md` §8）
 
 > 用途限定：个人小规模实验与研究。上游对 vast.ai、Pearl Research Labs、Pearlhash、Kryptex、WildRig、SRBMiner 均无关联，本仓库同样无关联。
 

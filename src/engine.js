@@ -19,6 +19,7 @@ class KeyMap extends Map {
 const MIN_GPU_PRICE = 0.04; // vast 上单卡时租基本不会低于这个价：某型号按当前币价连这个价都达不到目标，就不搜它
 const ACTIVE = new Set(['running', 'loading', 'created', 'scheduling']);
 const SWITCH_TIMEOUT_MIN = 8;   // 改标签后多久还没在新矿池出算力就判定切换失败
+const PREEMPT_DESTROY_MIN = 5;  // 竞价被抢占后，最多留多久（stopped 也在收磁盘费）
 const KX_WARMUP_MIN = 30;       // Kryptex 只有 30 分钟均值，刚切过去的前 30 分钟不判断算力偏低/止损
 const labelPool = label => (String(label || '').match(/\bpool=([a-z]+)/) || [])[1] || null;
 
@@ -98,6 +99,16 @@ export class Engine {
     const m = this.market;
     return P.usdPerHsHour({ usd: m.price, networkHs: m.networkHs, blockTime: m.blockTime, reward: m.reward, fee: this.effFee(pool) });
   }
+  // 竞价出价：收入 × 系数，但绝不超过「按目标收益率仍然划算」的上限；
+  // 入场价已经高于上限的机器直接返回 null（宁可不租，也不在亏损区抢机器）。
+  bidPrice(revenueHr, minBid = 0) {
+    if (!(revenueHr > 0)) return null;
+    const maxPay = revenueHr / (1 + this.cfg.targetProfitPct / 100);
+    if (minBid > maxPay) return null;
+    const want = revenueHr * Math.min(0.99, Math.max(0.1, Number(this.cfg.spotBidFactor) || 0.75));
+    return +Math.min(maxPay, Math.max(minBid, want)).toFixed(4);
+  }
+
   // 某个矿池每 1 H/s 每小时的总收益：PRL（扣该池手续费）+ NOCK（只有 Pearlhash 有）
   usdHsHrFor(pool) {
     const prl = this.prlRate(pool);
@@ -330,6 +341,7 @@ export class Engine {
       for (const i of this.rawInstances) {
         const m = this.st.managed[String(i.id)];
         if (m && !m.runningAt && i.actual_status === 'running') { m.runningAt = Date.now(); this.save(); }
+        if (m?.preemptedAt && i.actual_status === 'running') { delete m.preemptedAt; this.save(); }
       }
       // 已不存在的托管实例清理掉
       const ids = new Set(this.rawInstances.map(i => String(i.id)));
@@ -496,6 +508,8 @@ export class Engine {
       let phase;
       if (sw) phase = 'switching';
       else if (restarting) phase = 'restarting';
+      // 竞价被抢占：vast 只把它标成 stopped，但「想跑」=由平台抢走的，磁盘还在计费
+      else if (m && i.intended_status === 'running' && i.actual_status === 'stopped' && everSeen) phase = 'preempted';
       else if (!ACTIVE.has(i.actual_status) && i.actual_status) phase = i.intended_status === 'stopped' ? 'stopped' : 'offline';
       else if (!everSeen) phase = managed ? 'booting' : 'unmatched';
       else if (useHs === 0) phase = 'nohash';
@@ -674,7 +688,15 @@ export class Engine {
       const ref = this.thFor(o.gpuName);
       if (ref) { o.th = ref.effective * o.numGpus; o.source = ref.source; o.autoOk = ref.autoOk; }
       o.revenueHr = o.th * 1e12 * usd;
-      o.roi = (o.revenueHr - o.dph) / o.dph * 100;
+      if (o.spot) {
+        const raw = this.bidPrice(o.revenueHr, o.minBid || 0);
+        const bid = raw === null ? null : Math.min(raw, o.listDph || raw);
+        o.bid = bid;
+        o.spotSkip = bid === null;
+        if (bid !== null) { o.dph = bid; o.roi = (o.revenueHr - bid) / bid * 100; }
+      } else {
+        o.roi = (o.revenueHr - o.dph) / o.dph * 100;
+      }
       o.thPer01 = o.th / (o.dph / 0.1);
       const bl = this.st.blacklist[o.machineId];
       o.blacklisted = bl && bl.until > now ? bl.reason : null;
@@ -693,14 +715,20 @@ export class Engine {
       if (!ref) continue;
       known++;
       const th = ref.effective * (o.num_gpus || 1);
-      const dph = Number(o.dph_total) || 0;
-      if (dph <= 0) continue;
+      const listDph = Number(o.dph_total) || 0;
+      if (listDph <= 0) continue;
       const rev = th * 1e12 * usd;
+      const minBid = Number(o.min_bid ?? o.dph_total) || 0;
+      // 竞价模式下 ROI 必须按「我们实际出价」算，挂牌价只用于展示：挂牌价买不到竞价机
+      const rawBid = this.cfg.useSpot ? this.bidPrice(rev, minBid) : null;
+      const bid = rawBid === null ? null : Math.min(rawBid, listDph); // 出价高于挂牌价没有意义
+      if (this.cfg.useSpot && bid === null) continue;
+      const dph = this.cfg.useSpot ? bid : listDph;
       const roi = (rev - dph) / dph * 100;
       const bl = this.st.blacklist[o.machine_id];
       out.push({
         id: o.id, machineId: o.machine_id, gpuName: o.gpu_name, numGpus: o.num_gpus || 1, th,
-        dph, revenueHr: rev, roi, reliability: o.reliability2 ?? o.reliability,
+        dph, listDph, spot: this.cfg.useSpot, minBid, bid, revenueHr: rev, roi, reliability: o.reliability2 ?? o.reliability,
         geolocation: o.geolocation || '', inetDown: o.inet_down, cuda: o.cuda_max_good,
         source: ref.source, autoOk: ref.autoOk,
         blacklisted: bl && bl.until > now ? bl.reason : null,
@@ -762,6 +790,16 @@ export class Engine {
       const m = this.st.managed[x.id] || (this.st.managed[x.id] = { rentedAt: x.startedAt, gpuName: x.gpuName, numGpus: x.numGpus, machineId: x.machineId });
       // 0) 刚重启 / 正在换矿池：给它时间恢复，期间不做任何退租判断
       if (x.phase === 'restarting' || x.phase === 'switching') continue;
+      // 0b) 竞价被抢占：stopped 期间磁盘仍计费，别等它自己回来 —— 5 分钟内销毁，且不算机器问题（不拉黑）
+      if (x.phase === 'preempted') {
+        if (!m.preemptedAt) {
+          m.preemptedAt = now; this.save();
+          this.log('warn', `实例 ${x.id} 竞价被抢占（stopped，磁盘仍在计费），${PREEMPT_DESTROY_MIN} 分钟内销毁`);
+        } else if (now - m.preemptedAt > PREEMPT_DESTROY_MIN * MIN) {
+          await this.destroy(x.id, '竞价被抢占（stopped，磁盘仍计费）', 0);
+        }
+        continue;
+      }
       // 1a) 开机后矿工迟迟不上线（正常不到 1 分钟）：卡住超过 4 分钟就去抓机器日志，超过 minerStartTimeoutMinutes 直接退租
       if (x.phase === 'booting' && x.deploy?.runningAt) {
         const stuckMin = (now - Math.max(x.deploy.runningAt, x.restartAt || 0, m.poolSetAt || 0)) / MIN;
@@ -848,7 +886,7 @@ export class Engine {
     const spendCap = this.cfg.runwayGuard ? b.roomBalance / this.cfg.minRunwayHours : Infinity;
     const now = Date.now();
     const candidates = this.offers.filter(o =>
-      o.roi >= this.cfg.targetProfitPct && o.autoOk && !o.used &&
+      o.roi >= this.cfg.targetProfitPct && o.autoOk && !o.used && !o.spotSkip &&
       !(this.st.blacklist[o.machineId]?.until > now) &&
       o.dph <= b.roomSpend);
     const affordable = candidates.filter(o => b.spend + o.dph <= spendCap);
@@ -896,16 +934,21 @@ export class Engine {
     this.lastRentAt = Date.now();
     const tag = by === 'auto' ? '自动' : '手动';
     try {
-      const r = await this.vast.rent(offer.id, { image: this.cfg.image, disk: this.cfg.disk, label: this.rigLabel(offer.gpuName, def), onstart, mode: this.cfg.launchMode === 'args' ? 'args' : 'ssh' });
+      const r = await this.vast.rent(offer.id, {
+        image: this.cfg.image, disk: this.cfg.disk, label: this.rigLabel(offer.gpuName, def), onstart,
+        mode: this.cfg.launchMode === 'args' ? 'args' : 'ssh',
+        price: offer.spot ? offer.bid : null,
+      });
       if (!r?.success || !r.new_contract) throw new Error(r?.msg || r?.error || JSON.stringify(r).slice(0, 160));
       const id = String(r.new_contract);
       this.st.managed[id] = {
         offerId: offer.id, machineId: offer.machineId, gpuName: offer.gpuName, numGpus: offer.numGpus,
         expectedTh: offer.th, rentedAt: Date.now(), dph: offer.dph, belowSince: null, inetDown: offer.inetDown ?? null,
+        spot: !!offer.spot, listDph: offer.listDph ?? null,
         sv: SCRIPT_VERSION, pools: poolIds, pool: def, mode: this.cfg.launchMode === 'args' ? 'args' : 'ssh',
       };
       this.save();
-      this.log('success', `${tag}租用 ${offer.numGpus}×${offer.gpuName}（实例 ${id}）$${offer.dph.toFixed(3)}/h，挖 ${poolName(def)}，预计收益率 ${offer.roi.toFixed(1)}%`);
+      this.log('success', `${tag}租用 ${offer.numGpus}×${offer.gpuName}（实例 ${id}）${offer.spot ? '竞价出价' : ''}$${offer.dph.toFixed(4)}/h，挖 ${poolName(def)}，预计收益率 ${offer.roi.toFixed(1)}%`);
       setTimeout(() => this.refreshVast(), 3000);
       return id;
     } catch (e) {
@@ -1180,11 +1223,11 @@ export class Engine {
     num('maxHourlySpend', 0, 1000); num('minBalanceReserve', 0, 100000); num('stopLossMinutes', 1, 1440);
     num('bootTimeoutMinutes', 5, 120); num('hashLowPct', 30, 99); num('minerStartTimeoutMinutes', 3, 60); num('minRunwayHours', 1, 720); num('minReliability', 0, 1); num('minInetDown', 0, 100000);
     num('maxGpusPerMachine', 1, 16); num('minCuda', 0, 20); num('disk', 8, 200); num('scanIntervalSec', 60, 3600); num('scanRows', 20, 1000);
-    num('failoverMinutes', 2, 60);
+    num('failoverMinutes', 2, 60); num('spotBidFactor', 0.1, 1);
     if (next.stopLossPct >= next.targetProfitPct) throw new Error('止损线必须低于目标收益率，否则会租了马上退');
     for (const k of ['poolUrl', 'image', 'minerArgs', 'proxy']) if (typeof patch[k] === 'string') next[k] = patch[k].trim();
     if (patch.launchMode === 'args' || patch.launchMode === 'ssh') next.launchMode = patch.launchMode;
-    for (const k of ['autoRent', 'autoDestroy', 'includeNock', 'runwayGuard', 'failover']) if (typeof patch[k] === 'boolean') next[k] = patch[k];
+    for (const k of ['autoRent', 'autoDestroy', 'includeNock', 'runwayGuard', 'failover', 'useSpot']) if (typeof patch[k] === 'boolean') next[k] = patch[k];
     if (typeof patch.includeNock === 'string') next.includeNock = patch.includeNock === 'true';
     if (typeof patch.nockAddress === 'string') {
       const n = patch.nockAddress.trim();
@@ -1217,6 +1260,7 @@ export class Engine {
     }
     if (next.minerArgs && /[;&|`$<>\n]/.test(next.minerArgs)) throw new Error('矿工额外参数里不能有特殊符号');
     const changes = [];
+    if (next.useSpot !== this.cfg.useSpot) changes.push(next.useSpot ? '开启竞价实例（可被抢占）' : '关闭竞价实例，只用按需实例');
     if (next.autoRent !== this.cfg.autoRent) changes.push(next.autoRent ? '开启自动租用' : '关闭自动租用');
     if (next.autoDestroy !== this.cfg.autoDestroy) changes.push(next.autoDestroy ? '开启自动退租' : '关闭自动退租');
     if (next.runwayGuard !== this.cfg.runwayGuard) changes.push(next.runwayGuard ? `开启续航保护（${next.minRunwayHours} 小时）` : '关闭续航保护');
@@ -1258,7 +1302,7 @@ export class Engine {
     const bal = this.account.vastBalance;
     return {
       count: active.length, mining: active.filter(x => x.phase === 'mining' || x.phase === 'loss').length,
-      abnormal: list.filter(x => ['low', 'gpu'].includes(x.health) || ['nohash', 'offline'].includes(x.phase)).length,
+      abnormal: list.filter(x => ['low', 'gpu'].includes(x.health) || ['nohash', 'offline', 'preempted'].includes(x.phase)).length,
       estimatedCount: estimated.length,
       spendHr, revenueHr, profitHr: revenueHr - spendHr,
       roi: spendHr > 0 && revenueHr > 0 ? (revenueHr - spendHr) / spendHr * 100 : null,

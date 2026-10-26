@@ -427,7 +427,11 @@ export class Engine {
       }
       if (w && w.hs > 0) {
         this.everHashed.add(String(i.id));
-        if (m?.preemptedAt) { delete m.preemptedAt; this.save(); } // 真出算力了，才算恢复
+        // 清抢占计时必须同时满足：①实例本身在跑（ACTIVE）②矿池有算力。
+        // 只看矿池会踩坑：矿池算力是 5~30 分钟均值，实例被收回后仍会返回旧算力，
+        // 于是每轮采样都把 preemptedAt 清掉 → 5 分钟销毁永远不触发
+        // （实测 57826209 被收回后闲置 32 分钟、重置 3 次）。
+        if (m?.preemptedAt && ACTIVE.has(i.actual_status)) { delete m.preemptedAt; this.save(); }
         if (m && !m.hashAt) this.recordDeploy(String(i.id), m, i);
       }
     }

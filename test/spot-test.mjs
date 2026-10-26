@@ -60,6 +60,15 @@ e.repriceOffers();
 ok(e.offers.length === 1 && e.offers[0].spotSkip, 'repriceOffers 也保留它（不会上一 tick 有、这一 tick 没）');
 e.offers = scannedOffers; // 还原扫描结果，后面还要真的下单
 
+console.log('— 出价系数可以 >1（负 ROI 实验）');
+ok(e.updateConfig({ spotBidFactor: 1.05 }).restartNeeded === false, 'factor=1.05 被接受（允许高于收入出价）');
+ok((() => { try { e.updateConfig({ spotBidFactor: 1.6 }); return false; } catch { return true; } })(), 'factor=1.6 越界被拒');
+e.cfg.targetProfitPct = -5; e.cfg.spotBidFactor = 1.05; e.cfg.spotBidBuffer = 0.1;
+const bidOver = e.bidPrice(0.10, 0.09);
+ok(Math.abs(bidOver - 0.105) < 1e-6, `factor=1.05、收入 $0.10 → 出价 $${bidOver}（高于收入，ROI −5%）`);
+e.cfg.targetProfitPct = 0; e.cfg.spotBidFactor = 0.75;
+e.updateConfig({ spotBidFactor: 0.75, targetProfitPct: 0, stopLossPct: -20 }); // 一起改回：止损必须 < 目标
+
 console.log('— 下单带出价');
 const pick = e.offers.filter(o => o.roi !== null && o.roi >= 30 && o.bid < o.listDph - 1e-6)[0]
   || e.offers.filter(o => o.roi !== null && o.roi >= 30)[0];

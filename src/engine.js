@@ -109,7 +109,8 @@ export class Engine {
     const buffer = Math.min(1, Math.max(0, Number(this.cfg.spotBidBuffer ?? 0.1)));
     const floor = minBid * (1 + buffer);
     if (floor > maxPay) return null; // 加完缓冲仍超过目标 ROI 的上限 → 不租
-    const want = revenueHr * Math.min(0.99, Math.max(0.1, Number(this.cfg.spotBidFactor) || 0.75));
+    // 系数允许 >1：那就是"出价高于收入"（负 ROI），用于验证加价能否站住；上限仍受 maxPay 约束
+    const want = revenueHr * Math.min(1.5, Math.max(0.1, Number(this.cfg.spotBidFactor) || 0.75));
     return +Math.min(maxPay, Math.max(floor, want)).toFixed(4);
   }
 
@@ -1275,7 +1276,7 @@ export class Engine {
     num('maxHourlySpend', 0, 1000); num('minBalanceReserve', 0, 100000); num('stopLossMinutes', 1, 1440);
     num('bootTimeoutMinutes', 5, 120); num('hashLowPct', 30, 99); num('minerStartTimeoutMinutes', 3, 60); num('minRunwayHours', 1, 720); num('minReliability', 0, 1); num('minInetDown', 0, 100000);
     num('maxGpusPerMachine', 1, 16); num('minCuda', 0, 20); num('disk', 8, 200); num('scanIntervalSec', 60, 3600); num('scanRows', 20, 1000);
-    num('failoverMinutes', 2, 60); num('spotBidFactor', 0.1, 1); num('spotBidBuffer', 0, 1);
+    num('failoverMinutes', 2, 60); num('spotBidFactor', 0.1, 1.5); // 允许 >1：出价可以高于收入（负 ROI），用于测「加价能否站住」 num('spotBidBuffer', 0, 1);
     if (next.stopLossPct >= next.targetProfitPct) throw new Error('止损线必须低于目标收益率，否则会租了马上退');
     for (const k of ['poolUrl', 'image', 'minerArgs', 'proxy']) if (typeof patch[k] === 'string') next[k] = patch[k].trim();
     if (patch.launchMode === 'args' || patch.launchMode === 'ssh') next.launchMode = patch.launchMode;

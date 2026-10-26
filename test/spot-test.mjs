@@ -42,8 +42,9 @@ ok(e.offers.filter(o => o.spotSkip).every(o => o.bid === null && o.roi === null)
 console.log('— 出价算法边界');
 ok(e.bidPrice(0.30, 0) === 0.225, `收入 $0.30/h、系数 0.75 → 出价 $${e.bidPrice(0.30, 0)}`);
 ok(e.bidPrice(0.30, 0.5) === null, '入场价高于「目标 ROI 允许的上限」→ 不出价（宁可不租）');
-e.cfg.spotBidFactor = 0.7;
-ok(e.bidPrice(0.30, 0.222) === 0.222, '入场价高于目标出价但仍在上限内 → 按入场价出');
+e.cfg.spotBidFactor = 0.5;
+ok(e.bidPrice(0.30, 0.20) === 0.22, `入场价 $0.20 + 10% 缓冲 = $${e.bidPrice(0.30, 0.20)}（贴着地板会被秒顶）`);
+ok(e.bidPrice(0.30, 0.24) === null, '加完缓冲超过目标 ROI 上限 → 不租');
 e.cfg.spotBidFactor = 0.75;
 e.cfg.targetProfitPct = 100;
 ok(e.bidPrice(0.30, 0) === 0.15, `目标 100% 时上限收紧到 rev/2（$${e.bidPrice(0.30, 0)}）`);
@@ -110,6 +111,22 @@ e.st.managed[idB].preemptedAt = Date.now() - 6 * MIN;
 await e.decide();
 ok(!e.st.managed[idB], 'exited 的 spot 实例同样 5 分钟内销毁');
 ok(!Object.values(e.st.blacklist).length, 'exited 不拉黑机器（不是机器坏了）');
+
+console.log('— 平台 stop：actual 还是 created（实测确认的组合）');
+e.offers = []; await e.scan(true);
+const pickD = e.offers.filter(o => !o.spotSkip && o.roi !== null && o.roi >= 30)[0];
+e.lastRentAt = 0;
+const idD = await e.rent(pickD, 'manual');
+await e.refreshVast();
+globalThis.__instanceStatus(idD, 'created', 'stopped', 'Successfully loaded image');
+await e.refreshVast();
+x = e.instances().find(i => i.id === String(idD));
+ok(x?.phase === 'preempted', `intended=stopped + actual=created → phase=${x?.phase}（否则永远没有分支去销毁它，存储费一直计）`);
+await e.decide();
+ok(e.st.managed[idD]?.preemptedAt > 0, '进入 5 分钟销毁倒计时');
+e.st.managed[idD].preemptedAt = Date.now() - 6 * MIN;
+await e.decide();
+ok(!e.st.managed[idD], '已销毁，不再收存储费');
 
 console.log('— 出价被拒（min_bid 在下单前涨了，review #3）');
 e.offers = []; await e.scan(true);

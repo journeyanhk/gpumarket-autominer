@@ -105,9 +105,12 @@ export class Engine {
   bidPrice(revenueHr, minBid = 0) {
     if (!(revenueHr > 0)) return null;
     const maxPay = revenueHr / (1 + this.cfg.targetProfitPct / 100);
-    if (minBid > maxPay) return null;
+    // 不能贴着 min_bid 出：那是最低价，任何一个更高出价都会把你顶掉（实测 1 秒）。
+    const buffer = Math.min(1, Math.max(0, Number(this.cfg.spotBidBuffer ?? 0.1)));
+    const floor = minBid * (1 + buffer);
+    if (floor > maxPay) return null; // 加完缓冲仍超过目标 ROI 的上限 → 不租
     const want = revenueHr * Math.min(0.99, Math.max(0.1, Number(this.cfg.spotBidFactor) || 0.75));
-    return +Math.min(maxPay, Math.max(minBid, want)).toFixed(4);
+    return +Math.min(maxPay, Math.max(floor, want)).toFixed(4);
   }
 
   // 某个矿池每 1 H/s 每小时的总收益：PRL（扣该池手续费）+ NOCK（只有 Pearlhash 有）
@@ -518,7 +521,9 @@ export class Engine {
       // 竞价被收回：spot 实例只要不在 ACTIVE 状态（stopped / exited / offline / …）就按「被平台收回」处理。
       // 不要求 everSeen —— 开机阶段（拉镜像/下载矿工）出价被顶掉是最常见的抢占时点；
       // 也不写死 actual_status === 'stopped' —— vast 的真实状态组合还没被真机验证过（见 noteSpotStatus）。
-      else if (m?.spot && i.actual_status && !ACTIVE.has(i.actual_status)) phase = 'preempted';
+      // intended=stopped 也要算：本程序从不主动 stop 实例，出现这个组合就是平台停的（出价被顶）。
+      // 实测这种实例 actual_status 还是 'created'（不是 stopped），只有 intended 变成 stopped。
+      else if (m?.spot && (i.intended_status === 'stopped' || (i.actual_status && !ACTIVE.has(i.actual_status)))) phase = 'preempted';
       else if (!ACTIVE.has(i.actual_status) && i.actual_status) phase = i.intended_status === 'stopped' ? 'stopped' : 'offline';
       else if (!everSeen) phase = managed ? 'booting' : 'unmatched';
       else if (useHs === 0) phase = 'nohash';
@@ -1244,7 +1249,7 @@ export class Engine {
     num('maxHourlySpend', 0, 1000); num('minBalanceReserve', 0, 100000); num('stopLossMinutes', 1, 1440);
     num('bootTimeoutMinutes', 5, 120); num('hashLowPct', 30, 99); num('minerStartTimeoutMinutes', 3, 60); num('minRunwayHours', 1, 720); num('minReliability', 0, 1); num('minInetDown', 0, 100000);
     num('maxGpusPerMachine', 1, 16); num('minCuda', 0, 20); num('disk', 8, 200); num('scanIntervalSec', 60, 3600); num('scanRows', 20, 1000);
-    num('failoverMinutes', 2, 60); num('spotBidFactor', 0.1, 1);
+    num('failoverMinutes', 2, 60); num('spotBidFactor', 0.1, 1); num('spotBidBuffer', 0, 1);
     if (next.stopLossPct >= next.targetProfitPct) throw new Error('止损线必须低于目标收益率，否则会租了马上退');
     for (const k of ['poolUrl', 'image', 'minerArgs', 'proxy']) if (typeof patch[k] === 'string') next[k] = patch[k].trim();
     if (patch.launchMode === 'args' || patch.launchMode === 'ssh') next.launchMode = patch.launchMode;

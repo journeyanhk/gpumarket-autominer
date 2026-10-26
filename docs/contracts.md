@@ -73,6 +73,10 @@ effectiveCost(offer) = (dphTotal + expectedBandwidthUsd) / P(deployOk) + expecte
 ```
 
 `P(deployOk)` 与 `expectedWasteHours` 来自 `deployStats`（已有字段：total/pull/miner 用时）。
+
+**当前账本口径（M2 之前，明确写死，避免误读 ROI）**：`accrue()` 只按 `dph`（GPU 挂牌价）记租金，
+**不含存储费与出网带宽费**；`stopped` 期间的磁盘费也不计入；ROI 里同样没有 `inet_down_cost × 镜像 GB`。
+所以现在所有"收益率"都是「不含存储/带宽」的口径，真实 ROI 只会比它低。
 **按挂牌价排序是错的**：便宜但 30% 部署失败的机器，有效成本比它贵 40% 的邻居更高。
 
 ## 2. MinerPlan 与控制通道

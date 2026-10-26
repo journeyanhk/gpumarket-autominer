@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# 零依赖项目：不跑 npm install，直接跑自带的测试套件。
+# 所有外部接口（vast / 矿池 / GitHub / 行情）都在 test/mock.mjs 里被模拟，CI 不会花钱、也不会碰真实账户。
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+    name: node ${{ matrix.node }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: 语法检查
+        run: |
+          set -e
+          for f in $(git ls-files '*.js' '*.mjs'); do node --check "$f"; done
+      - name: 测试
+        run: npm test

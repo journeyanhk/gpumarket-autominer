@@ -80,6 +80,54 @@ ok(run(hex) === 'ok', 'bash 用同样的写法能认出正确的包');
 ok(run('0'.repeat(64)) === 'bad', 'bash 用同样的写法会拒绝错误的包');
 fs.rmSync(sh);
 
+console.log('— 端到端：真实 bash + 真包（review #8）');
+{
+  const rig = path.join(dir, 'rig');
+  const build = (name, body) => {
+    const d = path.join(dir, `pkg-${name}`);
+    fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(path.join(d, 'wildrig-multi'), body);
+    const tar = path.join(dir, `${name}.tar.gz`);
+    execFileSync('tar', ['czf', tar, '-C', d, 'wildrig-multi']);
+    return tar;
+  };
+  const goodTar = build('good', '#!/bin/sh\necho good-miner\n');
+  const badTar = build('bad', '#!/bin/sh\necho TAMPERED\n');
+  const goodSha = crypto.createHash('sha256').update(fs.readFileSync(goodTar)).digest('hex');
+
+  const full = O.buildOnstart({ pools, def: 'pearlhash', miners: man.miners, foreground: true });
+  // 从生成的脚本里抽出 ensure() 和日志函数，原样跑（只把 /root/prl 换成临时目录）
+  const i0 = full.indexOf('ensure(){');
+  const i1 = full.indexOf('"; }', i0);
+  const ensureFn = full.slice(i0, i1 + 4).replaceAll('/root/prl', () => '$RIG');
+  const logFns = [...new Set(full.split('\n').filter(l => /^\s*(out|log)\(\)\{/.test(l)))]
+    .map(l => l.replaceAll('/root/prl', () => '$RIG')); // 日志也要写到临时目录，否则会去写 /root
+  const harness = (urls) => [
+    `RIG=${JSON.stringify(rig)}`,
+    ...logFns,
+    ensureFn.replace(/^\s+wr\) F=.*$/m, `  wr) F=wildrig-multi; SHA=${goodSha}; URLS="${urls}";;`),
+    'ensure wr; echo "EXIT=$?"',
+  ].join('\n');
+
+  const clean = () => fs.rmSync(rig, { recursive: true, force: true });
+  clean();
+
+  // 1) 镜像先返回被篡改的包、后返回真包：只能接受真包
+  const out1 = execFileSync('bash', ['-c', harness(`file://${badTar} file://${goodTar}`)], { cwd: dir, encoding: 'utf8' });
+  ok(/EXIT=0/.test(out1), '混合源（先篡改后真包）→ 最终成功');
+  ok(fs.existsSync(path.join(rig, 'wr')), '产出了 wr 软链');
+  ok(fs.readFileSync(path.join(rig, 'wr'), 'utf8').includes('good-miner'), '软链指向真包里的二进制（不是被篡改的那个）');
+  ok(!fs.readFileSync(path.join(rig, 'wr'), 'utf8').includes('TAMPERED'), '被篡改的包没有被解压使用');
+
+  // 2) 只有被篡改的包：必须失败，而且不留下任何可执行文件
+  clean();
+  const out2 = execFileSync('bash', ['-c', harness(`file://${badTar}`)], { cwd: dir, encoding: 'utf8' });
+  ok(/EXIT=1/.test(out2), '只有篡改包 → ensure 返回 1');
+  const bootLog = fs.existsSync(path.join(rig, 'boot.log')) ? fs.readFileSync(path.join(rig, 'boot.log'), 'utf8') : '';
+  ok(/没有下载源通过 sha256 校验/.test(bootLog + out2), '失败原因写进 boot.log：没有下载源通过 sha256 校验');
+  ok(!fs.existsSync(path.join(rig, 'wr')), '没有产出 wr 软链（不会执行来路不明的二进制）');
+}
+
 console.log('— 引擎在清单不可用时不租');
 const { Engine } = await import(U('src/engine.js'));
 const e = new Engine();

@@ -101,6 +101,8 @@ export async function fetchPoolStats() {
 }
 
 // 账户：矿工列表 + PRL 余额/待结算 + 矿池里登记的 NOCK 收款地址
+// 2026-10-26 实测：接口已精简，不再返回 pending_rewards / nock_payout_address，
+// 所以 pending 与 nockBonus 会退化为 0（fail-closed，不会虚高 ROI）。见 docs/m1.5-experiment.md §6。
 // workers: Map<worker_name, { hs, gpus:[{name, hs}] }>
 export async function fetchAccount(wallet) {
   let r;

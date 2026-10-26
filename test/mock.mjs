@@ -124,6 +124,7 @@ globalThis.fetch = async (url, opt = {}) => {
     if (p === '/api/stats') return json({ hashrate: 1.39e19, total_workers: 57327 });
     if (p === '/api/pool-wallet-txs') return json({ transactions: [{ type: 'coinbase', receivedGrains: 224524935191, blockHeight: 129635 }] });
     if (p.startsWith('/api/account/')) {
+      if (globalThis.__account404) return json({ error: 'not found' }, 404);
       if (globalThis.__pearlDown) return json({ error: 'down' }, 503);
       const w = [];
       if (!rebooted[10000001]) w.push({ worker_name: '5080', gpu_info: [{ name: 'NVIDIA GeForce RTX 5080', hashrate: globalThis.__5080 }] });

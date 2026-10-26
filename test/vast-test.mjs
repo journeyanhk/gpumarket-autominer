@@ -39,5 +39,13 @@ const list = e.instances();
 ok(list.length === 1 && list[0].phase, `实例快照可用（phase=${list[0]?.phase}）`);
 ok(e.instancesOk, 'instancesOk=true —— decide() 不会提前 return，止损/退租这条链是通的');
 
+console.log('— 新地址的 404 不算错误');
+globalThis.__account404 = true;
+await e.refreshMarket();
+ok(e.workersOk === true, '矿池对新地址返回 404 时，worker 数据仍标记为"可信"（否则样本被跳过、机器被误判掉线）');
+ok(e.poolDataOk('pearlhash') === true, 'poolDataOk(pearlhash)=true，样本会照常记录');
+ok(!String(e.market.error || '').includes('矿工数据'), `market.error 里没有"矿工数据"错误（${e.market.error || '无'}）`);
+globalThis.__account404 = false;
+
 console.log(`\n${pass} 通过，${fail} 失败`);
 process.exit(fail ? 1 : 0);

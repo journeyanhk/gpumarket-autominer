@@ -128,6 +128,40 @@ e.st.managed[idD].preemptedAt = Date.now() - 6 * MIN;
 await e.decide();
 ok(!e.st.managed[idD], '已销毁，不再收存储费');
 
+console.log('— 抖动不能重置抢占计时（实测 bug：5 分钟销毁永不触发）');
+e.offers = []; await e.scan(true);
+const pickE = e.offers.filter(o => !o.spotSkip && o.roi !== null && o.roi >= 30)[0];
+e.lastRentAt = 0;
+const idE = await e.rent(pickE, 'manual');
+await e.refreshVast();
+globalThis.__preempt(idE);
+await e.refreshVast();
+await e.decide();
+ok(e.st.managed[idE]?.preemptedAt > 0, '检测到抢占并开始计时');
+const t0 = e.st.managed[idE].preemptedAt;
+// 宿主把容器拉起来（但没有算力）：计时必须保留
+globalThis.__instanceStatus(idE, 'running', 'running');
+await e.refreshVast();
+ok(e.st.managed[idE]?.preemptedAt === t0, '短暂 running 不清计时（清了下一次抖动就白等 5 分钟）');
+// 再抖回 exited：计时仍是旧的，且应立刻销毁
+globalThis.__instanceStatus(idE, 'exited', 'running');
+await e.refreshVast();
+e.st.managed[idE].preemptedAt = Date.now() - 6 * MIN;
+await e.decide();
+ok(!e.st.managed[idE], '计时已过 → 立刻销毁（不用再等 5 分钟）');
+
+console.log('— 台数上限要算上"抢占待销毁"');
+{
+  const f = new Engine(); f.log = () => {};
+  f.rawInstances = [{ id: 1, actual_status: 'running', label: '', gpu_name: 'RTX 3080', num_gpus: 1, dph_total: 0.1, machine_id: 1 },
+                    { id: 2, actual_status: 'exited', label: '', gpu_name: 'RTX 3080', num_gpus: 1, dph_total: 0.1, machine_id: 2 }];
+  f.st.managed = { 1: { rentedAt: Date.now(), spot: false, pool: 'kryptex', hashAt: Date.now() }, 2: { rentedAt: Date.now(), spot: true, pool: 'pearlhash', preemptedAt: Date.now() } };
+  f.everHashed.add('1'); f.everHashed.add('2');
+  const b = f.budget(f.instances());
+  ok(b.count === 2, `预算把抢占待销毁的实例也计入台数（count=${b.count}）`);
+  ok(b.roomCount === (f.cfg.maxInstances - 2), `剩余额度 = 上限 - 2（roomCount=${b.roomCount}）`);
+}
+
 console.log('— 出价被拒（min_bid 在下单前涨了，review #3）');
 e.offers = []; await e.scan(true);
 const pickC = e.offers.filter(o => !o.spotSkip && o.roi >= 30)[0];

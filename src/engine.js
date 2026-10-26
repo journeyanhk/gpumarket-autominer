@@ -339,7 +339,10 @@ export class Engine {
       for (const i of this.rawInstances) {
         const m = this.st.managed[String(i.id)];
         if (m && !m.runningAt && i.actual_status === 'running') { m.runningAt = Date.now(); this.save(); }
-        if (m?.preemptedAt && i.actual_status === 'running') { delete m.preemptedAt; this.save(); }
+        // 注意：不要因为 actual_status 短暂回到 running 就清掉抢占计时。
+        // 实测竞价实例会在 running/stopped 之间抖动（宿主重启容器），
+        // 每抖一次就重置计时 → 5 分钟销毁永远不会触发，实例长期挂着收存储费。
+        // 只有真正恢复出算力（见 recordSamples）才清计时。
         if (m?.spot) this.noteSpotStatus(i, m);
       }
       // 已不存在的托管实例清理掉
@@ -424,6 +427,7 @@ export class Engine {
       }
       if (w && w.hs > 0) {
         this.everHashed.add(String(i.id));
+        if (m?.preemptedAt) { delete m.preemptedAt; this.save(); } // 真出算力了，才算恢复
         if (m && !m.hashAt) this.recordDeploy(String(i.id), m, i);
       }
     }
@@ -880,7 +884,9 @@ export class Engine {
   }
 
   budget(list) {
-    const active = list.filter(x => ACTIVE.has(x.status) || x.phase === 'booting');
+    // 抢占待销毁的实例仍然占着账户额度（还要付存储费），必须计进台数上限，
+    // 否则一次抢占风暴会连租好几台，实测出现过 5 台（上限 3）的情况。
+    const active = list.filter(x => ACTIVE.has(x.status) || x.phase === 'booting' || x.phase === 'preempted');
     const spend = active.reduce((a, x) => a + x.dph, 0);
     return {
       count: active.length, spend,

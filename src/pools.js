@@ -103,12 +103,3 @@ export function minerTarget(pool, { wallet, nockAddress, geo, pearlUrl }) {
   }
   throw new Error('未知矿池 ' + pool);
 }
-
-// SRBMiner 最新 Linux 包（在控制端解析，拿不到就用已知版本）
-export const SRB_FALLBACK = { version: '3.7.9', name: 'SRBMiner-Multi-3-7-9-Linux.tar.gz', url: 'https://github.com/doktor83/SRBMiner-Multi/releases/download/3.7.9/SRBMiner-Multi-3-7-9-Linux.tar.gz' };
-export async function resolveSrbUrl() {
-  const r = await request('https://api.github.com/repos/doktor83/SRBMiner-Multi/releases/latest', { headers: { Accept: 'application/vnd.github+json' } });
-  const a = (r?.assets || []).find(x => /Linux\.tar\.(gz|xz)$/i.test(x.name) && !/hive|custom/i.test(x.name));
-  if (!a) throw new Error('GitHub 最新版里没找到 SRBMiner Linux 包');
-  return { url: a.browser_download_url, version: r.tag_name, name: a.name };
-}

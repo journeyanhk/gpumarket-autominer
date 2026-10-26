@@ -78,7 +78,7 @@ function render() {
   const m = S.market, a = S.account, s = S.summary, c = S.config;
   $('#swRent').checked = c.autoRent;
   $('#swDestroy').checked = c.autoDestroy;
-  $('#meta-wr').textContent = S.wildrig?.version || '—';
+  $('#meta-wr').textContent = S.miners?.wr?.version || '—';
   $('#meta-port').textContent = location.port || '—';
 
   // 侧边栏：数据源 & 连接状态

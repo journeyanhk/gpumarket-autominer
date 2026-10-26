@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PEARL RIG — vast × Pearlhash 自动矿场</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23080b10'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%23b6f36b' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='3.5' fill='%23b6f36b'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div class="noise"></div>
+<div class="app-shell">
+  <aside class="sidebar" id="sidebar">
+    <a class="brand" href="/">
+      <span class="brand-mark"><i></i></span>
+      <span><b>PEARL RIG</b><small>VAST × PEARLHASH</small></span>
+    </a>
+    <nav class="nav" aria-label="主导航">
+      <button class="nav-item active" data-page="overview">
+        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+        <span>矿场总览</span><em id="nav-inst">0</em>
+      </button>
+      <button class="nav-item" data-page="pools">
+        <svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>
+        <span>矿池</span><em id="nav-pools">—</em>
+      </button>
+      <button class="nav-item" data-page="market">
+        <svg viewBox="0 0 24 24"><path d="M3 17l6-6 4 4 7-7"/><path d="M14 8h6v6"/></svg>
+        <span>市场机会</span><em id="nav-offers">0</em>
+      </button>
+      <button class="nav-item" data-page="ref">
+        <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9zM9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
+        <span>显卡算力</span>
+      </button>
+      <button class="nav-item" data-page="log">
+        <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+        <span>运行日志</span><em id="nav-log">0</em>
+      </button>
+    </nav>
+    <div class="sidebar-bottom">
+      <div class="gauge-card">
+        <div class="gauge-head"><span>综合收益率</span><em id="gauge-target">目标 —</em></div>
+        <svg class="gauge" viewBox="0 0 220 130" role="img" aria-label="当前综合收益率与目标">
+          <path class="gauge-track" d="M 20 110 A 90 90 0 0 1 200 110" pathLength="100" />
+          <path class="gauge-fill" id="gauge-fill" d="M 20 110 A 90 90 0 0 1 200 110" pathLength="100" stroke-dasharray="0 100" />
+          <line class="gauge-mark" id="gauge-mark" x1="110" y1="14" x2="110" y2="30" />
+          <g id="gauge-needle" transform="rotate(-90 110 110)"><line class="gauge-needle" x1="110" y1="110" x2="110" y2="32" /></g>
+          <circle class="gauge-hub" cx="110" cy="110" r="5" />
+        </svg>
+        <div class="gauge-value"><b id="gauge-roi">—</b><small id="gauge-sub">利润 ÷ 租金</small></div>
+      </div>
+      <div class="connection-card" id="conn-card">
+        <span class="pulse-dot"></span>
+        <div><b id="conn-title">连接中</b><small id="conn-sub">正在拉取数据</small></div>
+      </div>
+      <div class="sources" id="chips"></div>
+      <div class="mini-meta"><span>WILDRIG</span><b id="meta-wr">—</b></div>
+      <div class="mini-meta"><span>端口</span><b id="meta-port">—</b></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <button class="icon-button menu-button" id="menu-button" aria-label="菜单">
+        <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+      <div class="page-heading">
+        <span class="eyebrow" id="page-eyebrow">MINING FARM</span>
+        <h1 id="page-title">矿场总览</h1>
+      </div>
+      <div class="topbar-actions">
+        <label class="switch" title="达到目标收益率的机器自动租下并部署挖矿">
+          <input type="checkbox" id="swRent"><span class="slider"></span><b>自动租用</b>
+        </label>
+        <label class="switch" title="部署失败、掉线、跌破止损线时自动退租">
+          <input type="checkbox" id="swDestroy"><span class="slider"></span><b>自动退租</b>
+        </label>
+        <div class="mode-pill" id="mode-pill"><span></span><b>连接中</b></div>
+        <span class="clock" id="clock">—</span>
+        <button class="icon-button" id="btnSettings" aria-label="设置" title="设置">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="content">
+      <div id="banner"></div>
+
+      <!-- 总览 -->
+      <div class="page active" id="page-overview">
+        <section class="stats-grid" id="kpis"></section>
+        <section class="telemetry" id="strip"></section>
+        <section class="panel">
+          <header class="panel-header">
+            <div><span class="kicker">RENTED RIGS</span><h2>已租显卡 <span class="count" id="instCount"></span></h2></div>
+            <span class="hint" id="instHint"></span>
+          </header>
+          <div class="rig-grid" id="cards"></div>
+        </section>
+      </div>
+
+      <!-- 矿池 -->
+      <div class="page" id="page-pools">
+        <section class="pool-grid" id="poolCards"></section>
+        <section class="panel">
+          <header class="panel-header">
+            <div><span class="kicker">EARNINGS COMPARISON</span><h2>收益对比 <span class="count" id="cmpRange"></span></h2></div>
+            <div class="panel-tools">
+              <div class="seg" id="cmpSeg">
+                <button data-w="h24">24 小时</button><button data-w="d7">7 天</button><button data-w="all" class="on">全部</button>
+              </div>
+            </div>
+          </header>
+          <p class="assumption-note">「实际到账」直接读矿池接口里的累计收益（只统计程序运行期间的增长，打款不算负数），「租金」按每台机器当时在哪个池挖来分摊。
+            Pearlhash 按小时结算、有 1~2 小时延迟，Kryptex 实时入账；两边比较至少看 <b>2~3 天</b>，最好放同型号的显卡。</p>
+          <div class="table-scroll">
+            <table class="data-table" id="cmpTable">
+              <thead><tr><th>矿池</th><th class="r">实际到账 PRL</th><th class="r">NOCK</th><th class="r">折合美元</th><th class="r">租金</th><th class="r">净利</th><th class="r">收益率</th><th class="r" title="按实测算力和链上数据算出的应得收益，和实际到账对比可以看出运气和手续费的影响">理论收益</th><th class="r">机时</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="panel">
+          <header class="panel-header">
+            <div><span class="kicker">FAILOVER</span><h2>矿池故障自动切换</h2></div>
+            <div class="panel-tools">
+              <label class="check">故障持续 <input type="number" id="foMin" min="2" max="60" step="1" class="inline-num"> 分钟才切</label>
+              <label class="switch"><input type="checkbox" id="swFailover"><span class="slider"></span><b>自动切换</b></label>
+            </div>
+          </header>
+          <p class="assumption-note" id="foNote"></p>
+          <div class="fo-list" id="foList"></div>
+        </section>
+      </div>
+
+      <!-- 市场 -->
+      <div class="page" id="page-market">
+        <section class="panel">
+          <header class="panel-header">
+            <div><span class="kicker">VAST.AI OFFERS</span><h2>市场机会 <span class="count" id="offerCount"></span></h2></div>
+            <div class="panel-tools">
+              <span class="hint" id="scanInfo"></span>
+              <label class="check"><input type="checkbox" id="onlyGood" checked> 只看达标</label>
+              <button class="small-button" id="btnScan">立即扫描</button>
+            </div>
+          </header>
+          <p class="assumption-note">收益率 = (预计收益 − 时租) ÷ 时租。预计收益用<b>实时币价 + 链上全网算力</b>计算，算力优先用你租过的实测值；标<span class="tag est">估算</span>的型号不会被自动租用。</p>
+          <div class="table-scroll">
+            <table class="data-table" id="offers">
+              <thead><tr>
+                <th>显卡</th><th class="r">算力</th><th class="r">时租</th><th class="r">预计收益/h</th>
+                <th class="roi-col">收益率</th><th class="r" title="每花 $0.1/小时能买到多少算力">TH / $0.1</th>
+                <th class="r">可靠性</th><th>地区</th><th></th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- 算力参考 -->
+      <div class="page" id="page-ref">
+        <section class="panel">
+          <header class="panel-header">
+            <div><span class="kicker">HASHRATE REFERENCE</span><h2>显卡算力参考</h2></div>
+            <span class="hint">租过的型号跑稳后自动换成实测值</span>
+          </header>
+          <div class="table-scroll">
+            <table class="data-table" id="hashTable">
+              <thead><tr><th>型号</th><th class="r">单卡 TH/s</th><th>来源</th><th class="r">保本时租</th><th class="r">达标时租上限</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- 日志 -->
+      <div class="page" id="page-log">
+        <section class="panel">
+          <header class="panel-header">
+            <div><span class="kicker">EVENT LOG</span><h2>运行日志</h2></div>
+            <span class="hint">完整记录在 data/events.log</span>
+          </header>
+          <div class="log" id="log"></div>
+        </section>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="modal" id="settings" hidden>
+  <div class="modal-box">
+    <div class="modal-header">
+      <div><span class="kicker">CONFIGURATION</span><h2>设置</h2><p>密钥只保存在本机 data/config.json</p></div>
+      <button class="modal-close" data-close>×</button>
+    </div>
+    <form id="settingsForm" autocomplete="off">
+      <div class="form-section">
+        <h3>账户</h3>
+        <div class="form-grid">
+          <label class="span-2">vast.ai API Key<input name="vastApiKey" type="password" placeholder="vast 网页左侧 Keys → 创建"></label>
+          <p class="field-help span-2" style="margin:0">每个矿池的钱包地址、NOCK 地址、默认矿池在左侧「矿池」页设置。</p>
+        </div>
+      </div>
+      <div class="form-section">
+        <h3>策略</h3>
+        <div class="form-grid">
+          <label>目标收益率 %<input name="targetProfitPct" type="number" step="1"><small class="field-help">利润 ÷ 租金，达到才租</small></label>
+          <label>止损线 %<input name="stopLossPct" type="number" step="1"><small class="field-help">实测低于它持续一段时间就退租</small></label>
+          <label>最多同时租几台<input name="maxInstances" type="number" step="1" min="0"><small class="field-help">包括你手动租的机器</small></label>
+          <label>每小时最多花费 $<input name="maxHourlySpend" type="number" step="0.1" min="0"><small class="field-help">所有机器时租加起来</small></label>
+          <label class="check"><input type="checkbox" name="runwayGuard"> 续航保护</label>
+          <label>最少续航小时<input name="minRunwayHours" type="number" step="1"><small class="field-help">开启后，余额不够所有机器再跑这么久就停止新租（测试小额时可关闭）</small></label>
+        </div>
+      </div>
+      <details class="adv">
+        <summary>高级设置（一般不用改）</summary>
+        <div class="form-section">
+          <div class="form-grid">
+            <label>余额保留 $<input name="minBalanceReserve" type="number" step="0.5"><small class="field-help">低于它停止新租</small></label>
+            <label>止损持续分钟<input name="stopLossMinutes" type="number" step="1"></label>
+            <label>部署超时分钟<input name="bootTimeoutMinutes" type="number" step="1"><small class="field-help">租下或重启后超时无算力自动退租</small></label>
+            <label>矿工启动超时分钟<input name="minerStartTimeoutMinutes" type="number" step="1"><small class="field-help">机器开机后矿工迟迟不上线就提前退租</small></label>
+            <label>算力异常线 %<input name="hashLowPct" type="number" step="1"><small class="field-help">实测低于预期的这个比例就标红</small></label>
+            <label>最短扫描间隔（秒）<input name="scanIntervalSec" type="number" step="10"><small class="field-help">vast 每日搜索额度按条数计，程序会按额度自动放慢</small></label>
+            <label>每次搜索条数<input name="scanRows" type="number" step="10"><small class="field-help">只取每美元算力最高的前 N 台，越小越省额度</small></label>
+            <label>最低可靠性<input name="minReliability" type="number" step="0.01"></label>
+            <label>最低下行带宽 Mbps<input name="minInetDown" type="number" step="1"></label>
+            <label>单机最多 GPU 数<input name="maxGpusPerMachine" type="number" step="1"></label>
+            <label>最低 CUDA 版本<input name="minCuda" type="number" step="0.1"></label>
+            <label>磁盘 GB<input name="disk" type="number" step="1"></label>
+            <label>矿工额外参数<input name="minerArgs" placeholder="50 系自动加 kernel 2"></label>
+            <label class="span-2">Pearlhash 矿池地址<input name="poolUrl"><small class="field-help">Kryptex 按机器所在地区自动选最近的服务器（SSL 8048 端口）</small></label>
+            <label class="span-2">启动方式<select name="launchMode"><option value="args">快速启动（推荐）：跳过 vast 的 SSH 初始化，开机就挖</option><option value="ssh">SSH 模式：可以 SSH / Jupyter 登录，但开机要先装一堆软件，慢机器多等几分钟</option></select><small class="field-help">只影响之后新租的机器</small></label>
+            <label class="span-2">Docker 镜像<input name="image"></label>
+            <label class="span-2">代理（可选）<input name="proxy" placeholder="http://127.0.0.1:7890"><small class="field-help">改了需要重启程序</small></label>
+          </div>
+        </div>
+      </details>
+      <div class="modal-footer">
+        <span class="modal-status error" id="settingsErr"></span>
+        <button type="button" class="secondary-button" data-close>取消</button>
+        <button type="submit" class="primary-button">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="modal" id="confirm" hidden>
+  <div class="modal-box small">
+    <div class="modal-header"><div><span class="kicker">CONFIRM</span><h2 id="cfTitle"></h2></div></div>
+    <div class="cf-body" id="cfBody"></div>
+    <div class="modal-footer">
+      <button class="secondary-button" id="cfNo">取消</button>
+      <button class="primary-button" id="cfYes">确定</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="logModal" hidden>
+  <div class="modal-box wide">
+    <div class="modal-header"><div><span class="kicker">INSTANCE LOG</span><h2 id="logTitle">机器日志</h2><p>vast 返回的机器输出，[prl] 开头的是开机脚本的进度</p></div><button class="modal-close" data-close-log>×</button></div>
+    <div class="log-hint" id="logHint"></div>
+    <pre class="log-pre" id="logBody"></pre>
+    <div class="modal-footer"><button class="secondary-button" data-close-log>关闭</button></div>
+  </div>
+</div>
+
+<div class="toast-stack" id="toasts"></div>
+<script src="/app.js"></script>
+</body>
+</html>

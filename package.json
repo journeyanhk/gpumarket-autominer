@@ -1,0 +1,15 @@
+{
+  "name": "prl-vast-autominer",
+  "version": "1.1.0",
+  "description": "vast.ai 自动租显卡挖 Pearl (PRL)：按利润率自动租用部署、实时收益监控、多矿池（Pearlhash / Kryptex）切换的本地网页控制台",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/run.mjs"
+  },
+  "engines": { "node": ">=22" },
+  "author": "X:@zaijin338191 (https://x.com/zaijin338191)",
+  "license": "MIT",
+  "keywords": ["pearl", "prl", "vast.ai", "gpu", "mining", "pearlhash", "kryptex", "nockchain"]
+}

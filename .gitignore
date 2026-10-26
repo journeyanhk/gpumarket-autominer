@@ -1,0 +1,8 @@
+# 个人数据：API Key、钱包、运行记录（绝对不要提交）
+data/
+# 一键启动自动下载的便携 Node.js
+runtime/
+node_modules/
+*.log
+.DS_Store
+Thumbs.db

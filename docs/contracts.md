@@ -163,3 +163,5 @@ allocate({
 | 其他非 active 状态 | `offline` | 连续 10min 才销毁 |
 
 竞价实例被抢占**不是**机器质量问题：不进入黑名单，下轮扫描可以重新出价。
+
+开关：`useSpot`（默认 `false`）与 `spotBidFactor`（默认 0.75）。M1 阶段只做了最小闭环——搜索 `type=bid`、下单带 `price`、`stopped` 按需销毁；**自动补位与更聪明的出价策略属于 M2**。

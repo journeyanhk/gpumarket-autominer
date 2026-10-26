@@ -10,7 +10,7 @@ for (let i = 0; i < 60; i++) {
   const [name, th, base] = gpus[i % gpus.length];
   const n = i % 7 === 0 ? 2 : 1;
   const price = +(base * n * (0.62 + ((i * 37) % 60) / 100)).toFixed(3);
-  offers.push({ id: 10000 + i, machine_id: 5000 + i, gpu_name: name, num_gpus: n, dph_total: price, reliability2: 0.95 + (i % 5) / 100, geolocation: ['Tokyo, JP', 'Hong Kong, HK', 'Texas, US', 'Bavaria, DE', 'Guangdong, CN'][i % 5], inet_down: 300 + i * 10, cuda_max_good: 12.8 });
+  offers.push({ id: 10000 + i, machine_id: 5000 + i, gpu_name: name, num_gpus: n, dph_total: price, min_bid: +(price * 0.7).toFixed(3), reliability2: 0.95 + (i % 5) / 100, geolocation: ['Tokyo, JP', 'Hong Kong, HK', 'Texas, US', 'Bavaria, DE', 'Guangdong, CN'][i % 5], inet_down: 300 + i * 10, cuda_max_good: 12.8 });
 }
 const instances = [{ id: 10000001, label: '', gpu_name: 'RTX 5080', num_gpus: 1, dph_total: 0.266, actual_status: 'running', intended_status: 'running', start_date: Date.now() / 1000 - 3600, geolocation: 'Guangdong, CN', machine_id: 100001, gpu_temp: 61 }];
 const born = {};
@@ -28,6 +28,7 @@ const machinePool = i => {
   return i._pool;
 };
 globalThis.__machinePool = machinePool;
+globalThis.__preempt = id => { const i = instances.find(x => x.id === +id); if (i) { i.actual_status = 'stopped'; i.intended_status = 'running'; } };
 globalThis.__kxEarned = 0;
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, opt = {}) => {
@@ -38,7 +39,8 @@ globalThis.fetch = async (url, opt = {}) => {
     if (opt.headers?.Authorization !== 'Bearer test-key') return json({ error: 'unauthorized', msg: 'bad key' }, 401);
     if (u.pathname === '/api/v0/users/current/') return json({ credit: 9.98 - sec() * 0.0003, email: 'demo@example.com' });
     if (u.pathname === '/api/v0/bundles/' && m === 'POST') {
-      if (!body.order || body.type !== 'on-demand') return json({ error: 'bad query' }, 400);
+      if (!body.order || !['on-demand', 'bid'].includes(body.type)) return json({ error: 'bad query' }, 400);
+      globalThis.__lastType = body.type;
       globalThis.__lastLimit = body.limit;
       if (globalThis.__rateLimited) { globalThis.__rateLimited = false; return json({ error: 'rate_limited', msg: 'API requests too frequent' }, 429); }
       globalThis.__lastQuery = body;

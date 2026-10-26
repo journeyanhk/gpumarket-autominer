@@ -16,6 +16,8 @@ export const DEFAULT_CONFIG = {
   includeNock: true,        // 矿池已登记 NOCK 地址时，把 NOCK 收益计入利润
   // —— 核心 4 项 ——
   targetProfitPct: 30,      // 达到这个收益率（利润÷租金）才租
+  useSpot: false,           // 竞价实例（可被抢占）。开之前先读 docs/contracts.md §8
+  spotBidFactor: 0.75,      // 出价 = 该机器每小时收入 × 这个系数（越低越赚，但越抢不到）
   stopLossPct: 0,           // 已租机器实时收益率低于它并持续一段时间就退租
   maxInstances: 5,          // 最多同时租几台
   maxHourlySpend: 2,        // 所有机器加起来每小时最多花多少美元

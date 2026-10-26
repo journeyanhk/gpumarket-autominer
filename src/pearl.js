@@ -103,7 +103,17 @@ export async function fetchPoolStats() {
 // 账户：矿工列表 + PRL 余额/待结算 + 矿池里登记的 NOCK 收款地址
 // workers: Map<worker_name, { hs, gpus:[{name, hs}] }>
 export async function fetchAccount(wallet) {
-  const r = await request(`${BASE}/account/${encodeURIComponent(wallet)}`);
+  let r;
+  try {
+    r = await request(`${BASE}/account/${encodeURIComponent(wallet)}`);
+  } catch (e) {
+    // 新地址（还没在本池挖过）矿池返回 404，这是正常状态不是错误。
+    // 若当成错误：workersOk=false → 这台机器的算力样本被跳过 → 10 分钟后被判「掉线」退租。
+    if (e.status === 404) {
+      return { workers: new Map(), prlBalance: 0, prlCredited: 0, prlPending: 0, prlEpochs: [], nockPayoutAddress: null, newAccount: true };
+    }
+    throw e;
+  }
   const workers = new Map();
   for (const w of r?.connected_workers || []) {
     const gpus = (w.gpu_info || []).map(g => ({ name: g.name, hs: Number(g.hashrate) || 0 }));
@@ -124,6 +134,7 @@ export async function fetchAccount(wallet) {
     prlPending: r?.pending_rewards?.total_pending_prl ?? 0,
     prlEpochs: (r?.pending_rewards?.epochs || []).filter(e => (e.coin_type || 'pearl') === 'pearl'),
     nockPayoutAddress: nockAddr && !/please set/i.test(nockAddr) ? nockAddr : null,
+    newAccount: false,
   };
 }
 

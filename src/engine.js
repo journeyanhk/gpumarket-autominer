@@ -20,6 +20,8 @@ const MIN_GPU_PRICE = 0.04; // vast 上单卡时租基本不会低于这个价�
 const ACTIVE = new Set(['running', 'loading', 'created', 'scheduling']);
 const SWITCH_TIMEOUT_MIN = 8;   // 改标签后多久还没在新矿池出算力就判定切换失败
 const PREEMPT_DESTROY_MIN = 5;  // 竞价被抢占后，最多留多久（stopped 也在收磁盘费）
+// 真正「平台已收走」的终态：出现这些才允许立刻判 preempted
+const TERMINAL_STATUS = new Set(['exited', 'stopped', 'offline', 'failed']);
 const KX_WARMUP_MIN = 30;       // Kryptex 只有 30 分钟均值，刚切过去的前 30 分钟不判断算力偏低/止损
 const labelPool = label => (String(label || '').match(/\bpool=([a-z]+)/) || [])[1] || null;
 
@@ -532,7 +534,16 @@ export class Engine {
       // 也不写死 actual_status === 'stopped' —— vast 的真实状态组合还没被真机验证过（见 noteSpotStatus）。
       // intended=stopped 也要算：本程序从不主动 stop 实例，出现这个组合就是平台停的（出价被顶）。
       // 实测这种实例 actual_status 还是 'created'（不是 stopped），只有 intended 变成 stopped。
-      else if (m?.spot && (i.intended_status === 'stopped' || (i.actual_status && !ACTIVE.has(i.actual_status)))) phase = 'preempted';
+      // 竞价被收回的判定，必须区分「平台真的收走了」和「刚创建时的状态噪音」：
+      // 实测实例刚租下的几十秒内，vast 会短暂返回 intended=stopped / actual=loading，
+      // 老规则据此判 preempted，5 分钟后把一台正在拉镜像的健康机器销毁了（57884732）。
+      // 现在：① actual 处于终态（exited/stopped/offline/failed）→ 立刻算收回；
+      //       ② intended=stopped 但还在 loading/created 等过渡态 → 只有租下超过 3 分钟才算。
+      else if (m?.spot && (
+        TERMINAL_STATUS.has(String(i.actual_status)) ||
+        (i.intended_status === 'stopped' && String(i.actual_status) !== 'running'
+          && Date.now() - (m.rentedAt || 0) > 3 * MIN)
+      )) phase = 'preempted';
       else if (!ACTIVE.has(i.actual_status) && i.actual_status) phase = i.intended_status === 'stopped' ? 'stopped' : 'offline';
       else if (!everSeen) phase = managed ? 'booting' : 'unmatched';
       else if (useHs === 0) phase = 'nohash';

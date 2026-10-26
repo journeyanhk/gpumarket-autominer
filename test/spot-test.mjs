@@ -121,12 +121,32 @@ await e.decide();
 ok(!e.st.managed[idB], 'exited 的 spot 实例同样 5 分钟内销毁');
 ok(!Object.values(e.st.blacklist).length, 'exited 不拉黑机器（不是机器坏了）');
 
+console.log('— 刚租下的状态噪音不能判成抢占（实测误杀 2×3070）');
+e.offers = []; await e.scan(true);
+const pickG = e.offers.filter(o => !o.spotSkip && o.roi !== null && o.roi >= 30)[0];
+e.lastRentAt = 0;
+const idG = await e.rent(pickG, 'manual');
+await e.refreshVast();
+// 刚租下 30 秒：intended 短暂变 stopped、actual 还是 loading
+e.st.managed[idG].rentedAt = Date.now() - 0.5 * MIN;
+globalThis.__instanceStatus(idG, 'loading', 'stopped');
+await e.refreshVast();
+let xG = e.instances().find(i => i.id === String(idG));
+ok(xG?.phase !== 'preempted', `租下 30 秒 + intended=stopped + actual=loading → phase=${xG?.phase}（不能判抢占）`);
+// 4 分钟后仍是这个组合 → 才是真的被收回
+e.st.managed[idG].rentedAt = Date.now() - 4 * MIN;
+await e.refreshVast();
+xG = e.instances().find(i => i.id === String(idG));
+ok(xG?.phase === 'preempted', `同样的组合但已过 3 分钟 → phase=${xG?.phase}（这才算收回）`);
+delete e.st.managed[idG];
+
 console.log('— 平台 stop：actual 还是 created（实测确认的组合）');
 e.offers = []; await e.scan(true);
 const pickD = e.offers.filter(o => !o.spotSkip && o.roi !== null && o.roi >= 30)[0];
 e.lastRentAt = 0;
 const idD = await e.rent(pickD, 'manual');
 await e.refreshVast();
+e.st.managed[idD].rentedAt = Date.now() - 4 * MIN;   // 新规则：intended=stopped 要在租下 3 分钟后才算
 globalThis.__instanceStatus(idD, 'created', 'stopped', 'Successfully loaded image');
 await e.refreshVast();
 x = e.instances().find(i => i.id === String(idD));

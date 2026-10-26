@@ -5,6 +5,7 @@ import { gpuKey, hashrateTable } from './gpus.js';
 import { buildOnstart, workerName, SCRIPT_VERSION } from './onstart.js';
 import { POOLS, POOL_IDS, poolName, minerTarget, fetchKryptexInfo, fetchKryptexWorkers, fetchKryptexEarned, resolveSrbUrl, SRB_FALLBACK } from './pools.js';
 import { loadConfig, saveConfig, loadState, saveState, appendLog, DEFAULT_CONFIG } from './store.js';
+import { loadManifest } from './miners.js';
 
 const MIN = 60_000;
 const LABEL = 'prl-auto';
@@ -54,6 +55,10 @@ export class Engine {
     this.rigLogs = new Map(); // instanceId -> { t, text }
     this.wildrig = this.st.wildrig || null;
     this.srb = this.st.srb || null;
+    // 矿工白名单：清单缺失/不合法时不租用（宁可停，也不执行来路不明的二进制）
+    this.minerManifest = null;
+    this.minerError = null;
+    try { this.minerManifest = loadManifest(); } catch (e) { this.minerError = e.message; }
     // Kryptex：矿工列表（30 秒）、矿池信息（1 分钟）、累计收益（5 分钟）
     this.kx = { workers: new Map(), ok: false, okAt: 0, failSince: null, error: null, info: null, infoAt: 0, earned: null, earnedAt: 0 };
     this.phOkAt = 0; this.phFailSince = null;     // Pearlhash 矿工接口最近一次成功 / 连续失败开始时间
@@ -206,7 +211,12 @@ export class Engine {
   async refreshWildrig() {
     try {
       const w = await P.resolveWildrigUrl();
-      if (!this.wildrig || this.wildrig.url !== w.url) this.log('info', `WildRig 最新版 ${w.version}（${w.name}）`);
+      // 只用来发现新版本：真正部署的永远是 miners/manifest.json 里 pin 的那一份
+      const pin = this.minerManifest?.miners?.wr;
+      const behind = pin && pin.version !== w.version;
+      if (!this.wildrig || this.wildrig.url !== w.url) {
+        this.log('info', `WildRig 最新版 ${w.version}（${w.name}）${behind ? `；当前 pin 的是 ${pin.version}，升级请跑 node tools/pin-miners.mjs` : ''}`);
+      }
       this.wildrig = w; this.st.wildrig = w; this.save();
     } catch (e) {
       this.log('warn', `获取 WildRig 下载地址失败：${e.message}${this.wildrig ? '，继续用上次的地址' : ''}`);
@@ -807,7 +817,7 @@ export class Engine {
     if (!this.configuredPools().length) why.push('还没填矿池钱包地址');
     else if (!this.poolConfigured(this.cfg.defaultPool)) why.push(`默认矿池 ${poolName(this.cfg.defaultPool)} 没填钱包`);
     if (!this.marketFresh) why.push('PRL 行情数据不新鲜');
-    if (!this.wildrig) why.push('还没拿到 WildRig 下载地址');
+    if (!this.minerManifest) why.push(`矿工清单不可用：${this.minerError || '未知原因'}`);
     if (this.account.vastBalance === null) why.push('还没读到 vast 余额');
     return why;
   }
@@ -877,7 +887,7 @@ export class Engine {
         // 填了 NOCK 地址时 Pearlhash 用户名为 prl地址@nock=NOCK地址（Pearlhash 规定的格式）
         nockAddress: id === 'pearlhash' ? this.cfg.nockAddress : '',
       }) })),
-      def, minerUrls: { wr: this.wildrig.url, srb: (this.srb || SRB_FALLBACK).url },
+      def, miners: this.minerManifest.miners,
       cnFirst: /(^|[\s,])(CN|China)\s*$/i.test(offer.geolocation || ''),
       extraArgs: this.minerArgsFor(offer.gpuName),
       foreground: this.cfg.launchMode === 'args',
@@ -1320,6 +1330,7 @@ export class Engine {
       history: this.st.history.slice(-288),
       events: this.events.slice(0, 120),
       wildrig: this.wildrig,
+      miners: this.minerManifest?.miners || null,      // 已 pin 的矿工（版本+sha256）
       blacklist: Object.entries(this.st.blacklist).filter(([, v]) => v.until > now).length,
       deployAvg: this.deployAverage(),
       pools: this.poolsSnapshot(list),

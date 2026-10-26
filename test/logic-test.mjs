@@ -291,14 +291,15 @@ ok(snap.market.nockPerThDay > 0 && snap.account.nockPending === 0.0295, `面板�
 
   const O = await import(U('src/onstart.js'));
   const PL = [{ id: 'pearlhash', bin: 'wr', cmd: '--algo pearlhash --url stratum+ssl://p:1 --user w --worker $W' }];
-  const cn = O.buildOnstart({ pools: PL, def: 'pearlhash', wildrigUrl: 'https://github.com/x.tar.xz', cnFirst: true });
-  const us = O.buildOnstart({ pools: PL, def: 'pearlhash', wildrigUrl: 'https://github.com/x.tar.xz', cnFirst: false });
+  const PIN = { wr: { url: 'https://github.com/x/releases/download/1/x.tar.xz', sha256: 'a'.repeat(64), exec: 'wildrig-multi' } };
+  const cn = O.buildOnstart({ pools: PL, def: 'pearlhash', miners: PIN, cnFirst: true });
+  const us = O.buildOnstart({ pools: PL, def: 'pearlhash', miners: PIN, cnFirst: false });
   ok(/URLS="https:\/\/ghfast/.test(cn) && /URLS="https:\/\/github/.test(us), '国内机器先走镜像源，海外机器先走 GitHub');
   // 租用时按地区选择
   let cap = null; e5.vast.rent = async (oid, b) => { cap = b; return { success: true, new_contract: 9600 }; };
   e5.lastRentAt = 0;
   await e5.rent({ ...e5.offers[0], geolocation: 'Guangdong, CN', used: false }, 'manual');
-  ok(/wr\) F=wildrig-multi; URLS="https:\/\/ghfast/.test(cap.onstart), '「Guangdong, CN」被识别为国内机器');
+  ok(/wr\) F=wildrig-multi; SHA=[a-f0-9]{64}; URLS="https:\/\/ghfast/.test(cap.onstart), '「Guangdong, CN」被识别为国内机器，且脚本带 pin 的 sha256');
 }
 
 // ---- vast 每日搜索额度（按条数计）

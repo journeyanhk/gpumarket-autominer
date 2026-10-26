@@ -4,6 +4,17 @@
 
 *An open-source local dashboard that rents GPUs on vast.ai when Pearl (PRL) mining is profitable, deploys the miner automatically, tracks real-time profit per rig, and lets you switch rigs between the Pearlhash and Kryptex pools. Documentation is in Chinese.*
 
+## 关于这个仓库（二次开发）
+
+本仓库是 `ZAIJIN88/PRL-Vast-AutoMiner` v1.1.0 的二次开发，保留上游 MIT 许可与署名（见 [LICENSE](LICENSE)）。`main` 的第一个提交是**未经修改的上游源码**，之后每个分支都对应一个可独立评审的改动。
+
+- `docs/contracts.md` —— 先于代码的契约（单位、接口、失败语义、竞价状态归一）
+- `tools/breakeven.mjs` —— 只读盈亏线计算器：`node tools/breakeven.mjs`
+- `miners/manifest.json` —— 矿工二进制白名单（版本 + sha256），未 pin 的不执行
+- CI：`.github/workflows/ci.yml`，Node 22/24 跑全量测试（外部接口全部 mock，不会花钱）
+
+> 用途限定：个人小规模实验与研究。上游对 vast.ai、Pearl Research Labs、Pearlhash、Kryptex、WildRig、SRBMiner 均无关联，本仓库同样无关联。
+
 ![矿场总览](docs/images/overview.png)
 
 ## 功能
@@ -41,7 +52,7 @@
 
 - 打开自动租用后会**真实扣除** vast.ai 余额。先小额测试。
 - 挖矿收益随币价、全网算力、矿池运气和租金变化，**可能亏损**。本项目不构成任何投资建议，作者不对任何收益或损失负责。
-- 请自行确认 vast.ai 服务条款和当地法规是否允许挖矿。
+- 请自行确认 vast.ai 服务条款和当地法规是否允许挖矿。**已知条款约束**：vast.ai 条款明文规定，用**信用卡充值**的账户不得进行任何加密货币挖矿（"If you purchase credits ... using a credit card, you may not engage in any cryptocurrency mining"）。这意味着信用卡充值的账户挖矿属于违约，风险是账号终止与余额损失，而不是收益高低。用加密货币充值时该条不适用，但其他条款（自动化访问、平台裁量权）仍然生效。
 - 矿工软件：WildRig Multi（挖 PRL 0 开发费）、SRBMiner-MULTI（约 2% 开发费，仅 Kryptex 使用），均从其 GitHub 官方发布页下载。
 
 ## 运行测试

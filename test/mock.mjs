@@ -58,8 +58,18 @@ globalThis.fetch = async (url, opt = {}) => {
       return json({ offers: list }, 200, globalThis.__sendQuotaHeaders ? { 'X-RateLimit-Limit': '5000', 'X-RateLimit-Remaining': String(globalThis.__quotaLeft ?? 4000) } : {});
     }
     if (u.pathname === '/api/v0/instances/' && m === 'GET') {
+      // 2026-10 起真实平台已下架这个端点，这里如实复现（客户端必须走 v1）
+      return json({ success: false, error: 'deprecated_endpoint', msg: '/api/v0/instances/ is deprecated. Use /api/v1/instances/ instead.' }, 410);
+    }
+    if (u.pathname === '/api/v1/instances/' && m === 'GET') {
+      globalThis.__v1Calls = (globalThis.__v1Calls || 0) + 1;
       for (const i of instances) if (born[i.id] && sec() - born[i.id] > 8) i.actual_status = 'running';
-      return json({ instances });
+      if (!globalThis.__paginate) return json({ success: true, total_instances: instances.length, instances, next_token: null });
+      const tok = u.searchParams.get('next_token');
+      const half = Math.ceil(instances.length / 2);
+      if (!tok) return json({ success: true, instances: instances.slice(0, half), next_token: 'p2' });
+      if (tok === 'p2') return json({ success: true, instances: instances.slice(half), next_token: null });
+      return json({ success: false, msg: 'bad token' }, 400);
     }
     let mm;
     if ((mm = u.pathname.match(/^\/api\/v0\/asks\/(\d+)\/$/)) && m === 'PUT') {

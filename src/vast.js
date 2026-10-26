@@ -7,6 +7,7 @@
 import { request } from './http.js';
 
 const BASE = 'https://console.vast.ai/api/v0';
+const BASE_V1 = 'https://console.vast.ai/api/v1';
 
 export class Vast {
   constructor(apiKey) { this.apiKey = apiKey; }
@@ -17,9 +18,19 @@ export class Vast {
     return request(`${BASE}/users/current/`, { headers: this.h() });
   }
 
+  // 2026-10：v0 的 /instances/ 已被下架（HTTP 410 deprecated_endpoint），列表必须走 v1。
+  // v1 用 next_token 分页，这里最多翻 5 页（正常账户几台机器，一页就够）。
   async instances() {
-    const r = await request(`${BASE}/instances/?owner=me`, { headers: this.h() });
-    return r?.instances || [];
+    const pages = [];
+    let token = null;
+    for (let i = 0; i < 5; i++) {
+      const q = token ? `?owner=me&next_token=${encodeURIComponent(token)}` : '?owner=me';
+      const r = await request(`${BASE_V1}/instances/${q}`, { headers: this.h() });
+      pages.push(...(r?.instances || []));
+      token = r?.next_token || null;
+      if (!token) return pages;
+    }
+    return pages;
   }
 
   // 与官方 CLI search_offers 的默认过滤一致：verified / external=false / rentable / rented=false

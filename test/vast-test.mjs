@@ -47,5 +47,12 @@ ok(e.poolDataOk('pearlhash') === true, 'poolDataOk(pearlhash)=true，样本会�
 ok(!String(e.market.error || '').includes('矿工数据'), `market.error 里没有"矿工数据"错误（${e.market.error || '无'}）`);
 globalThis.__account404 = false;
 
+console.log('— 竞价标记要暴露给面板/策略');
+e.st.managed[String(e.rawInstances[0].id)] = { rentedAt: Date.now(), gpuName: 'RTX 3080', numGpus: 1, spot: true, listDph: 0.11 };
+const snap = e.instances();
+ok(snap[0]?.spot === true, 'instances() 输出里有 spot=true（否则 swap-policy 认不出竞价机）');
+ok(snap[0]?.listDph === 0.11, '同时带出挂牌价，便于计算折扣');
+delete e.st.managed[String(e.rawInstances[0].id)];
+
 console.log(`\n${pass} 通过，${fail} 失败`);
 process.exit(fail ? 1 : 0);

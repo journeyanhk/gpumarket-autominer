@@ -549,6 +549,8 @@ export class Engine {
         startedAt, ageMin, worker: this.st.aliases[id] || workerName(id),
         liveHs: w && !restarting ? w.hs : 0, avgHs, expectedHs, firstHashAt, revenueHr, expRevenueHr, roi, expRoi, phase,
         belowSince: m?.belowSince || null, refSource: ref?.source || '未知型号',
+        // 竞价/按需必须暴露给面板与策略脚本：缺了它，swap-policy 会把竞价机当成按需机
+        spot: !!m?.spot, listDph: m?.listDph ?? null,
         deploy: m ? { rentedAt: m.rentedAt, runningAt: m.runningAt || null, hashAt: m.hashAt || null, inetDown: m.inetDown ?? i.inet_down ?? null } : null,
         logHint: this.logHint(id),
       };

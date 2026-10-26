@@ -947,6 +947,12 @@ export class Engine {
       extraArgs: this.minerArgsFor(offer.gpuName),
       foreground: this.cfg.launchMode === 'args',
     });
+    // 下单前按最新行情重算出价：扫描结果可能是几分钟前的，行情一动就会出价偏低、刚租到就被顶
+    if (offer.spot) {
+      const fresh = this.bidPrice(offer.revenueHr, offer.minBid || 0);
+      if (fresh !== null) offer.bid = Math.min(fresh, offer.listDph || fresh);
+      offer.dph = offer.bid ?? offer.dph;
+    }
     offer.used = true;
     this.lastRentAt = Date.now();
     const tag = by === 'auto' ? '自动' : '手动';

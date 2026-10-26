@@ -150,6 +150,29 @@ e.st.managed[idE].preemptedAt = Date.now() - 6 * MIN;
 await e.decide();
 ok(!e.st.managed[idE], '计时已过 → 立刻销毁（不用再等 5 分钟）');
 
+console.log('— 矿池旧算力不能清掉抢占计时（实测第二次踩坑）');
+e.offers = []; await e.scan(true);
+const pickF = e.offers.filter(o => !o.spotSkip && o.roi !== null && o.roi >= 30)[0];
+e.lastRentAt = 0;
+const idF = await e.rent(pickF, 'manual');
+await e.refreshVast();
+globalThis.__preempt(idF);
+await e.refreshVast();
+await e.decide();
+const tF = e.st.managed[idF]?.preemptedAt;
+ok(tF > 0, '开始计时');
+// 实例已被收回（exited），但矿池仍有旧算力样本：计时不能清
+e.workers.set('v' + idF, { hs: 130e12, gpus: [{ name: 'RTX 3090', hs: 130e12 }] });
+e.workersOk = true;
+e.recordSamples();
+ok(e.st.managed[idF]?.preemptedAt === tF, '实例已 exited 时，矿池报的旧算力不清计时');
+// 实例真的回到 running：才清（先 refreshVast 让 rawInstances 反映新状态）
+globalThis.__instanceStatus(idF, 'running', 'running');
+await e.refreshVast();
+e.recordSamples();
+ok(!e.st.managed[idF]?.preemptedAt, '实例回到 running 且矿池有算力 → 清计时（真恢复）');
+delete e.st.managed[idF];
+
 console.log('— 台数上限要算上"抢占待销毁"');
 {
   const f = new Engine(); f.log = () => {};

@@ -98,12 +98,17 @@ const usdPerThDay = ({ price, networkHs, blockTime, reward, fee }) => {
   return (3600 / blockTime) * reward / networkHs * (1 - fee) * price * 1e12 * 24;
 };
 
-// 价格：默认用 Pearlhash 的报价（它在净值里是最保守的一个），可以用 --price 覆盖
+// 价格：主源 Pearlhash，挂了自动退到 CoinGecko / WPRL 池（见 src/pearl.js 的 PRICE_SOURCES）。
+// 三路都失败时**不退出**：链上数据照常输出，只是不折算 $ —— 记录器不能因为一个价格源断掉就停摆。
 async function resolvePrice() {
   const fixed = num('price');
-  if (fixed) return { usd: fixed, src: '手动' };
-  const p = await fetchPrice();
-  return { usd: p.usd, src: 'Pearlhash' };
+  if (fixed) return { usd: fixed, src: '手动', cross: null, devPct: null };
+  try {
+    const p = await fetchPrice();
+    return { usd: p.usd, src: p.src, cross: p.cross || null, devPct: p.devPct ?? null };
+  } catch (e) {
+    return { usd: null, src: '不可用', error: e.message, cross: null, devPct: null };
+  }
 }
 
 // 手动模式：只算一个源
@@ -129,7 +134,7 @@ async function collect() {
       else { errors.push(`${s.label}：${r.reason?.message || r.reason}`); rows.push({ id: s.id, label: s.label, ok: false, error: r.reason?.message }); }
     });
   }
-  for (const r of rows) if (r.ok) r.usdPerThDay = usdPerThDay({ price: price.usd, fee: FEE, ...r, fee: FEE });
+  for (const r of rows) if (r.ok && price.usd > 0) r.usdPerThDay = usdPerThDay({ price: price.usd, fee: FEE, ...r, fee: FEE });
   const good = rows.filter(r => r.ok && r.usdPerThDay > 0);
   const densities = good.map(r => r.usdPerThDay);
   const med = median(densities);
@@ -150,18 +155,28 @@ function gpuRows(densityPerDay) {
 
 function printReport({ price, rows, med, spread, errors, good }) {
   console.log('');
-  console.log(`PRL 盈亏线 · ${new Date().toISOString().replace('T', ' ').slice(0, 16)} UTC · 价格 $${fmt(price.usd, 3)}（${price.src}）· 统一按 ${(FEE * 100).toFixed(1)}% 池费折算`);
+  const priceLine = price.usd > 0
+    ? `价格 $${fmt(price.usd, 3)}（${price.src}${price.cross ? ` · 交叉 ${price.cross.src} $${fmt(price.cross.usd, 3)}${price.devPct != null ? ` · 偏差 ${price.devPct.toFixed(1)}%` : ''}` : ''}）· 统一按 ${(FEE * 100).toFixed(1)}% 池费折算`
+    : `价格不可用（${price.error || '全部源失败'}）—— 只输出链上数据，不做 $ 折算`;
+  console.log(`PRL 盈亏线 · ${new Date().toISOString().replace('T', ' ').slice(0, 16)} UTC · ${priceLine}`);
   console.log('');
   console.log('  数据源            全网算力      出块    区块奖励    $/TH·天   相对中位数');
   for (const r of rows) {
     if (!r.ok) { console.log(`  ${r.label.padEnd(16)} 不可用：${String(r.error).slice(0, 60)}`); continue; }
-    console.log(`  ${r.label.padEnd(16)} ${(r.networkHs / 1e18).toFixed(2).padStart(6)} EH/s ${fmt(r.blockTime, 1).padStart(7)}s ${fmt(r.reward, 2).padStart(10)} ${fmt(r.usdPerThDay, 5).padStart(9)}   ${r.vsMedianPct == null ? '' : (r.vsMedianPct >= 0 ? '+' : '') + r.vsMedianPct.toFixed(1) + '%'}`);
+    const density = r.usdPerThDay > 0 ? fmt(r.usdPerThDay, 5).padStart(9) : '        —';
+    const rel = r.usdPerThDay > 0 && r.vsMedianPct != null ? `${r.vsMedianPct >= 0 ? '+' : ''}${r.vsMedianPct.toFixed(1)}%` : '';
+    console.log(`  ${r.label.padEnd(16)} ${(r.networkHs / 1e18).toFixed(2).padStart(6)} EH/s ${fmt(r.blockTime, 1).padStart(7)}s ${fmt(r.reward, 2).padStart(10)} ${density}   ${rel}`);
   }
   if (good.length > 1) console.log(`\n  三路分歧 ${fmt(spread, 1)}%（${good.length} 个源）；中位数 $${fmt(med, 5)} / TH·天`);
   else if (good.length === 1) console.log(`\n  只有一个源可用，无法交叉验证：$${fmt(med, 5)} / TH·天`);
   if (errors.length) for (const e of errors) console.log(`  警告：${e}`);
 
-  const density = med || 0;
+  if (!med) {
+    console.log('');
+    console.log('  没有可用价格，算不出盈亏线；链上数据已打印在上表。');
+    return;
+  }
+  const density = med;
   const rowsGpu = gpuRows(density);
   console.log('');
   console.log('  型号                TH/s   收入$/天   盈亏线$/h  来源');
@@ -176,6 +191,7 @@ function printReport({ price, rows, med, spread, errors, good }) {
 }
 
 function csvLine({ price, rows, med, spread }) {
+  if (!(price.usd > 0)) return null;
   const cols = [new Date().toISOString(), price.usd.toFixed(6)];
   for (const s of SOURCES) {
     const r = rows.find(x => x.id === s.id);
@@ -187,11 +203,20 @@ function csvLine({ price, rows, med, spread }) {
 
 async function once() {
   const res = await collect();
-  if (!res.med) {
-    console.error('三路都拿不到数据，算不出收入密度。');
+  const onchain = res.rows.filter(r => r.ok);
+  if (!onchain.length) {
+    console.error('三路链上数据都拿不到，算不出收入密度。');
     for (const e of res.errors) console.error(`  - ${e}`);
     console.error('可以用 --price / --network / --reward / --blocktime 手填后再算。');
     process.exitCode = 1;
+    return;
+  }
+  if (!res.med) {
+    // 链上有数据、价格挂了：照常打印链上表（记录器不能停），但明确标成不可折算
+    if (json) console.log(JSON.stringify({ generatedAt: new Date().toISOString(), ...res }, null, 2));
+    else printReport(res);
+    if (res.price.error) console.error(`  价格源不可用：${res.price.error}`);
+    process.exitCode = 3;
     return;
   }
   if (json) console.log(JSON.stringify({ generatedAt: new Date().toISOString(), ...res, gpus: gpuRows(res.med) }, null, 2));
@@ -201,8 +226,9 @@ async function once() {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const header = `ts,price_usd,${SOURCES.map(s => s.id).join(',')},median,spread_pct\n`;
     if (!fs.existsSync(file)) fs.writeFileSync(file, header);
-    fs.appendFileSync(file, csvLine(res) + '\n');
-    if (!json) console.log(`  已追加一行到 ${file}`);
+    const line = csvLine(res);
+    if (line) { fs.appendFileSync(file, line + '\n'); if (!json) console.log(`  已追加一行到 ${file}`); }
+    else if (!json) console.log('  价格不可用，本轮不写 CSV（避免出现一整行空值）');
   }
   if (res.errors.length && !json) process.exitCode = 3;
 }

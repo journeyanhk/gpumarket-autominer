@@ -1245,6 +1245,14 @@ export class Engine {
       this.log('warn', `已退租实例 ${id}（${inst ? `${inst.num_gpus}×${inst.gpu_name}` : ''}）：${reason}`);
       setTimeout(() => this.refreshVast(), 2000);
     } catch (e) {
+      // 404 = 平台已经收走了（竞价被收回后常见）：这不是失败，只是本地记录没清。
+      // 当成失败会让巡检每小时报一次假异常，也让人误以为退租链路坏了。
+      if (e.status === 404) {
+        delete this.st.managed[id];
+        this.save();
+        this.log('info', `实例 ${id} 在平台侧已不存在（此前已被收回），清理本地记录`);
+        return;
+      }
       this.log('error', `退租实例 ${id} 失败：${e.message}`);
       throw e;
     } finally { this.busy.delete(id); }

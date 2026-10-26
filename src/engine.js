@@ -342,6 +342,7 @@ export class Engine {
         const m = this.st.managed[String(i.id)];
         if (m && !m.runningAt && i.actual_status === 'running') { m.runningAt = Date.now(); this.save(); }
         if (m?.preemptedAt && i.actual_status === 'running') { delete m.preemptedAt; this.save(); }
+        if (m?.spot) this.noteSpotStatus(i, m);
       }
       // 已不存在的托管实例清理掉
       const ids = new Set(this.rawInstances.map(i => String(i.id)));
@@ -356,6 +357,17 @@ export class Engine {
       this.vastFailSince ||= Date.now();
       this._warnOnce('instfail', `读取实例列表失败：${e.message}（连不上 vast 期间止损和自动退租暂停）`);
     }
+  }
+
+  // spot 实例的真实状态语义还没在真机上验证过：每次元组变化记一条，
+  // M1.5 跑完就能用真实数据收紧 preempted 的判定（而不是靠猜 vast 会返回什么）。
+  noteSpotStatus(i, m) {
+    const tuple = [i.intended_status, i.actual_status, i.cur_state, i.next_state, i.is_bid].join('|');
+    if (m.spotStatus === tuple) return;
+    m.spotStatus = tuple;
+    this.save();
+    const msg = String(i.status_msg || '').slice(0, 80);
+    this.log('info', `spot 状态变化 实例 ${i.id}：intended=${i.intended_status} actual=${i.actual_status} cur=${i.cur_state ?? '-'} next=${i.next_state ?? '-'} bid=${i.is_bid ?? '-'}${msg ? ' msg=' + msg : ''}`);
   }
 
   // 这台机器「应该」挖哪个池（标签/记录），以及「实际」在哪个池出算力
@@ -508,8 +520,10 @@ export class Engine {
       let phase;
       if (sw) phase = 'switching';
       else if (restarting) phase = 'restarting';
-      // 竞价被抢占：vast 只把它标成 stopped，但「想跑」=由平台抢走的，磁盘还在计费
-      else if (m && i.intended_status === 'running' && i.actual_status === 'stopped' && everSeen) phase = 'preempted';
+      // 竞价被收回：spot 实例只要不在 ACTIVE 状态（stopped / exited / offline / …）就按「被平台收回」处理。
+      // 不要求 everSeen —— 开机阶段（拉镜像/下载矿工）出价被顶掉是最常见的抢占时点；
+      // 也不写死 actual_status === 'stopped' —— vast 的真实状态组合还没被真机验证过（见 noteSpotStatus）。
+      else if (m?.spot && i.actual_status && !ACTIVE.has(i.actual_status)) phase = 'preempted';
       else if (!ACTIVE.has(i.actual_status) && i.actual_status) phase = i.intended_status === 'stopped' ? 'stopped' : 'offline';
       else if (!everSeen) phase = managed ? 'booting' : 'unmatched';
       else if (useHs === 0) phase = 'nohash';
@@ -680,29 +694,37 @@ export class Engine {
     this.st.rateLimitHeaders = { limit, remaining, seenAt: Date.now() };
   }
 
+  // 统一定价：spot 用「实际出价」、按需用挂牌价。出价上限已高于目标线的机器**保留**并标 spotSkip，
+  // 否则同一台机器会在「扫描结果」和「每 20 秒重算」之间反复出现/消失（review #7）。
+  priceOffer(o, usd) {
+    const ref = this.thFor(o.gpuName);
+    if (ref) { o.th = ref.effective * o.numGpus; o.source = ref.source; o.autoOk = ref.autoOk; }
+    o.revenueHr = o.th * 1e12 * usd;
+    if (!o.spot) {
+      o.spotSkip = false;
+      o.roi = o.dph > 0 ? (o.revenueHr - o.dph) / o.dph * 100 : null;
+      return o;
+    }
+    const raw = this.bidPrice(o.revenueHr, o.minBid || 0);
+    o.bid = raw === null ? null : Math.min(raw, o.listDph || raw); // 出价高于挂牌价没有意义
+    o.spotSkip = o.bid === null;
+    o.dph = o.bid ?? o.listDph;
+    o.roi = o.spotSkip ? null : (o.revenueHr - o.bid) / o.bid * 100;
+    return o;
+  }
+
   // 用最新行情重算每台机器的收益率（扫描结果可能是几分钟前的，币价/全网算力随时在变）
   repriceOffers() {
     const usd = this.usdHsHr;
     const now = Date.now();
     for (const o of this.offers) {
-      const ref = this.thFor(o.gpuName);
-      if (ref) { o.th = ref.effective * o.numGpus; o.source = ref.source; o.autoOk = ref.autoOk; }
-      o.revenueHr = o.th * 1e12 * usd;
-      if (o.spot) {
-        const raw = this.bidPrice(o.revenueHr, o.minBid || 0);
-        const bid = raw === null ? null : Math.min(raw, o.listDph || raw);
-        o.bid = bid;
-        o.spotSkip = bid === null;
-        if (bid !== null) { o.dph = bid; o.roi = (o.revenueHr - bid) / bid * 100; }
-      } else {
-        o.roi = (o.revenueHr - o.dph) / o.dph * 100;
-      }
+      this.priceOffer(o, usd);
       o.thPer01 = o.th / (o.dph / 0.1);
       const bl = this.st.blacklist[o.machineId];
       o.blacklisted = bl && bl.until > now ? bl.reason : null;
     }
-    this.offers.sort((a, b) => b.roi - a.roi);
-    this.offerStats.profitable = this.offers.filter(x => x.roi >= this.cfg.targetProfitPct).length;
+    this.offers.sort((a, b) => (b.roi ?? -Infinity) - (a.roi ?? -Infinity));
+    this.offerStats.profitable = this.offers.filter(x => x.roi !== null && x.roi >= this.cfg.targetProfitPct).length;
   }
 
   evaluateOffers(raw) {
@@ -714,31 +736,25 @@ export class Engine {
       const ref = this.thFor(o.gpu_name);
       if (!ref) continue;
       known++;
-      const th = ref.effective * (o.num_gpus || 1);
       const listDph = Number(o.dph_total) || 0;
       if (listDph <= 0) continue;
-      const rev = th * 1e12 * usd;
-      const minBid = Number(o.min_bid ?? o.dph_total) || 0;
-      // 竞价模式下 ROI 必须按「我们实际出价」算，挂牌价只用于展示：挂牌价买不到竞价机
-      const rawBid = this.cfg.useSpot ? this.bidPrice(rev, minBid) : null;
-      const bid = rawBid === null ? null : Math.min(rawBid, listDph); // 出价高于挂牌价没有意义
-      if (this.cfg.useSpot && bid === null) continue;
-      const dph = this.cfg.useSpot ? bid : listDph;
-      const roi = (rev - dph) / dph * 100;
       const bl = this.st.blacklist[o.machine_id];
-      out.push({
-        id: o.id, machineId: o.machine_id, gpuName: o.gpu_name, numGpus: o.num_gpus || 1, th,
-        dph, listDph, spot: this.cfg.useSpot, minBid, bid, revenueHr: rev, roi, reliability: o.reliability2 ?? o.reliability,
+      const offer = this.priceOffer({
+        id: o.id, machineId: o.machine_id, gpuName: o.gpu_name, numGpus: o.num_gpus || 1,
+        th: ref.effective * (o.num_gpus || 1), dph: listDph, listDph, bid: null, spotSkip: false,
+        spot: this.cfg.useSpot, minBid: Number(o.min_bid ?? o.dph_total) || 0,
+        reliability: o.reliability2 ?? o.reliability,
         geolocation: o.geolocation || '', inetDown: o.inet_down, cuda: o.cuda_max_good,
         source: ref.source, autoOk: ref.autoOk,
         blacklisted: bl && bl.until > now ? bl.reason : null,
-        thPer01: th / (dph / 0.1),
-      });
+      }, usd);
+      offer.thPer01 = offer.th / (offer.dph / 0.1);
+      out.push(offer);
     }
-    out.sort((a, b) => b.roi - a.roi);
+    out.sort((a, b) => (b.roi ?? -Infinity) - (a.roi ?? -Infinity));
     this.offers = out.slice(0, 150);
     this.offerStats = {
-      total: raw.length, known, profitable: out.filter(x => x.roi >= this.cfg.targetProfitPct).length,
+      total: raw.length, known, profitable: out.filter(x => x.roi !== null && x.roi >= this.cfg.targetProfitPct).length,
       scannedAt: now, error: null,
     };
   }
@@ -814,7 +830,8 @@ export class Engine {
       if (x.phase === 'offline') { if (!m.offlineSince) { m.offlineSince = now; this.save(); } }
       else if (m.offlineSince) { delete m.offlineSince; this.save(); }
       if (x.phase === 'offline' && (m.hashAt || this.everHashed.has(x.id))) {
-        if (now - m.offlineSince >= 10 * MIN) await this.destroy(x.id, `机器离线超过 10 分钟（vast 状态 ${x.status}${x.statusMsg ? '：' + x.statusMsg : ''}）`, 6 * 60);
+        // spot 的「离线」多半是被收回/出价被顶，不是机器坏了：销毁但不拉黑，下轮可以重新出价
+        if (now - m.offlineSince >= 10 * MIN) await this.destroy(x.id, `机器离线超过 10 分钟（vast 状态 ${x.status}${x.statusMsg ? '：' + x.statusMsg : ''}）`, m.spot ? 0 : 6 * 60);
         continue;
       }
       // 1) 部署失败：超时仍无算力（从租下或最近一次重启算起），只针对从没出过算力的机器
@@ -830,7 +847,7 @@ export class Engine {
         const zeros = arr.filter(s => s.t >= (zeroSince ?? now));
         // 连续为 0 的时间真的超过 10 分钟，且这段时间里至少采到 10 个样本（避免程序刚启动/断网恢复时误判）
         if (zeroSince && now - zeroSince >= 10 * MIN && zeros.length >= 10 && zeros.every(s => s.hs === 0)) {
-          await this.destroy(x.id, x.restartAt ? `重启后 ${this.cfg.bootTimeoutMinutes} 分钟仍无算力` : '矿工掉线超过 10 分钟', 6 * 60);
+          await this.destroy(x.id, x.restartAt ? `重启后 ${this.cfg.bootTimeoutMinutes} 分钟仍无算力` : '矿工掉线超过 10 分钟', m.spot ? 0 : 6 * 60);
           continue;
         }
       }
@@ -971,6 +988,15 @@ export class Engine {
           this.save();
         }
         const err = new Error('这台机器刚被别人租走了，换一台试试');
+        err.gone = true;
+        throw err;
+      }
+      // 竞价：扫描到下单之间 min_bid 涨了 → 出价被拒。这是出价问题，不是机器问题，不能拉黑
+      if (offer.spot && /bid|price|too low|min_bid/i.test(e.message)) {
+        this.offers = this.offers.filter(o => o.id !== offer.id);
+        this.lastRentAt = 0;
+        this.log('info', `${offer.numGpus}×${offer.gpuName} 竞价出价 $${(offer.bid ?? 0).toFixed(4)}/h 低于当前最低价${by === 'auto' ? '，换下一台' : ''}（${e.message.slice(0, 80)}）`);
+        const err = new Error('出价低于当前最低价，换一台试试');
         err.gone = true;
         throw err;
       }

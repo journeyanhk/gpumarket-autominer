@@ -3,7 +3,7 @@ import { Vast } from './vast.js';
 import * as P from './pearl.js';
 import { gpuKey, hashrateTable } from './gpus.js';
 import { buildOnstart, workerName, SCRIPT_VERSION } from './onstart.js';
-import { POOLS, POOL_IDS, poolName, minerTarget, fetchKryptexInfo, fetchKryptexWorkers, fetchKryptexEarned, resolveSrbUrl, SRB_FALLBACK } from './pools.js';
+import { POOLS, POOL_IDS, poolName, minerTarget, fetchKryptexInfo, fetchKryptexWorkers, fetchKryptexEarned } from './pools.js';
 import { loadConfig, saveConfig, loadState, saveState, appendLog, DEFAULT_CONFIG } from './store.js';
 import { loadManifest } from './miners.js';
 
@@ -54,8 +54,9 @@ export class Engine {
     this.busy = new Set();
     this.everHashed = new Set();
     this.rigLogs = new Map(); // instanceId -> { t, text }
-    this.wildrig = this.st.wildrig || null;
-    this.srb = this.st.srb || null;
+    // 部署用的是 miners/manifest.json 的 pin；这里只保存「上次看到的最新版」用于日志去重，不落盘
+    this.wrSeen = null;
+    delete this.st.wildrig; delete this.st.srb; // 老版本留下的字段，已经没用了
     // 矿工白名单：清单缺失/不合法时不租用（宁可停，也不执行来路不明的二进制）
     this.minerManifest = null;
     this.minerError = null;
@@ -219,24 +220,18 @@ export class Engine {
     this.save();
   }
 
+  // 只做一件事：发现上游新版本并提示重新 pin。部署永远用清单里的版本。
   async refreshWildrig() {
     try {
       const w = await P.resolveWildrigUrl();
-      // 只用来发现新版本：真正部署的永远是 miners/manifest.json 里 pin 的那一份
+      if (this.wrSeen?.url === w.url) return;
+      this.wrSeen = w;
       const pin = this.minerManifest?.miners?.wr;
       const behind = pin && pin.version !== w.version;
-      if (!this.wildrig || this.wildrig.url !== w.url) {
-        this.log('info', `WildRig 最新版 ${w.version}（${w.name}）${behind ? `；当前 pin 的是 ${pin.version}，升级请跑 node tools/pin-miners.mjs` : ''}`);
-      }
-      this.wildrig = w; this.st.wildrig = w; this.save();
+      this.log('info', `WildRig 最新版 ${w.version}${behind ? `；当前部署的是 pin 的 ${pin.version}，升级请跑 node tools/pin-miners.mjs` : '（与当前 pin 一致）'}`);
     } catch (e) {
-      this.log('warn', `获取 WildRig 下载地址失败：${e.message}${this.wildrig ? '，继续用上次的地址' : ''}`);
+      this.log('warn', `获取 WildRig 最新版本失败：${e.message}`);
     }
-    try {
-      const s = await resolveSrbUrl();
-      if (!this.srb || this.srb.url !== s.url) this.log('info', `SRBMiner 最新版 ${s.version}（${s.name}，挖 Kryptex 用）`);
-      this.srb = s; this.st.srb = s; this.save();
-    } catch { if (!this.srb) this.srb = SRB_FALLBACK; }
   }
 
   // ---------- Kryptex ----------
@@ -1399,7 +1394,6 @@ export class Engine {
       table: this.table,
       history: this.st.history.slice(-288),
       events: this.events.slice(0, 120),
-      wildrig: this.wildrig,
       miners: this.minerManifest?.miners || null,      // 已 pin 的矿工（版本+sha256）
       blacklist: Object.entries(this.st.blacklist).filter(([, v]) => v.until > now).length,
       deployAvg: this.deployAverage(),

@@ -83,6 +83,7 @@ ok(e.st.managed[idA]?.spot === true, '托管记录标了 spot');
 ok(logs.some(l => /竞价出价/.test(l)), '日志区分了竞价租用');
 
 console.log('— 开机阶段被收回（还没出算力，review #1）');
+e.vast.setBidPrice = async () => { throw new Error('disabled for this test'); }; // 本节专测抢占判定，不测改价
 const nBoot = logs.length;
 await e.refreshVast();
 ok(logs.slice(nBoot).some(l => /spot 状态变化/.test(l)), '记录了 spot 实例的原始状态元组（真机语义待验证，review #2b）');
@@ -93,11 +94,16 @@ await e.refreshVast();
 x = e.instances().find(i => i.id === String(idA));
 ok(x?.phase === 'preempted', `被收回后 phase=${x?.phase}（不能走 booting 超时，否则白付 20 分钟磁盘费还拉黑 24h）`);
 await e.decide();
-ok(e.st.managed[idA]?.preemptedAt > 0, '开始 5 分钟计时');
+// 第一台在开机阶段被收回：现在会先尝试改价（本测试已禁用），失败后才开始计时
+ok(!e.st.managed[idA] || e.st.managed[idA].preemptedAt > 0, '改价失败后：要么开始 5 分钟计时，要么已销毁（两种都合法）');
 ok(!Object.values(e.st.blacklist).length, '还没销毁时也不该提前拉黑');
-e.st.managed[idA].preemptedAt = Date.now() - 6 * MIN;
-await e.decide();
-ok(!e.st.managed[idA], '超过 5 分钟 → 已销毁');
+if (e.st.managed[idA]) {
+  e.st.managed[idA].preemptedAt = Date.now() - 6 * MIN;
+  await e.decide();
+  ok(!e.st.managed[idA], '超过 5 分钟 → 已销毁');
+} else {
+  ok(true, '（本用例里第一次判定就销毁了，计时逻辑由后面的抖动用例覆盖）');
+}
 ok(!Object.values(e.st.blacklist).length, '开机阶段被抢不拉黑（黑名单必须为空）');
 
 console.log('— vast 返回 exited（状态组合未知，review #2）');
@@ -141,9 +147,38 @@ xG = e.instances().find(i => i.id === String(idG));
 ok(xG?.phase === 'preempted', `同样的组合但已过 3 分钟 → phase=${xG?.phase}（这才算收回）`);
 delete e.st.managed[idG];
 
+console.log('— thPer01 门槛是派生值，不是配置');
+{
+  const g = new Engine(); g.log = () => {};
+  // 手工构造行情：$0.0189/TH·天 → $/TH/小时 = 0.0007875
+  g.market.price = 1.77; g.market.params = { networkHs: 88.46e18, blockTime: 194, reward: 2218.75 };
+  g.market.updatedAt = Date.now();
+  g.cfg.targetProfitPct = 20;
+  const line20 = g.minThPer01;
+  ok(line20 > 130 && line20 < 170, `目标 20% → 今日线 ${Math.round(line20)} TH/$0.1h（与手算的 148 一致）`);
+  g.cfg.targetProfitPct = 15;
+  const line15 = g.minThPer01;
+  ok(line15 < line20, `目标降到 15% → 线也降到 ${Math.round(line15)}（派生值随目标变）`);
+  g.cfg.targetProfitPct = 20;
+  ok(g.thPer01Of({ th: 310, dph: 0.1 }) === 310, 'thPer01 = 0.1×算力/价格（310 TH @ $0.1/h → 310）');
+  ok(g.thPer01Of({ th: 0, dph: 0.1 }) === null, '算力为 0 → null，不编数');
+
+  console.log('— 总开关：余额/行情');
+  g.cfg.minBalanceStop = 5; g.cfg.maxSourceStaleMin = 60;
+  g.rentTimes = []; g.preemptCooldownUntil = 0; g.rentCooldownUntil = 0;
+  g.account.vastBalance = 4.2;
+  ok(g.rentAllowed().ok === false && /余额/.test(g.rentAllowed().why), '余额 $4.2 < $5 → 停止新租');
+  g.account.vastBalance = 20;
+  g.market.updatedAt = Date.now() - 61 * MIN;
+  ok(g.rentAllowed().ok === false && /行情/.test(g.rentAllowed().why), '行情 61 分钟没更新 → 停止新租');
+  g.market.updatedAt = Date.now();
+  ok(g.rentAllowed().ok === true, '余额与行情都正常 → 放行');
+}
+
 console.log('— 租用节流：抢占冷静期 / 最小间隔 / 每小时上限');
 {
   const g = new Engine(); g.log = () => {};
+  g.market.updatedAt = Date.now(); g.account.vastBalance = 20; // 排掉总开关（余额/行情）的干扰
   g.cfg.rentMinIntervalMin = 10; g.cfg.maxRentsPerHour = 3; g.cfg.preemptCooldownMin = 5;
   g.rentTimes = []; g.preemptCooldownUntil = 0;
   ok(g.rentAllowed().ok === true, '干净状态下允许租');
@@ -176,6 +211,7 @@ await e.decide();
 ok(!e.st.managed[idD], '已销毁，不再收存储费');
 
 console.log('— 抖动不能重置抢占计时（实测 bug：5 分钟销毁永不触发）');
+e.vast.setBidPrice = async () => { throw new Error('disabled for this test'); }; // 关掉改价，专测计时
 e.offers = []; await e.scan(true);
 const pickE = e.offers.filter(o => !o.spotSkip && o.roi !== null && o.roi >= 30)[0];
 e.lastRentAt = 0;

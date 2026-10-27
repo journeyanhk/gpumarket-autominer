@@ -58,7 +58,12 @@ ok(script.includes('没有下载源通过 sha256 校验'), '全部源都不对�
 ok(script.includes('command -v sha256sum'), '机器上没有 sha256sum 时拒绝执行（fail-closed）');
 ok(/while true; do sleep 300; stats/.test(script) && script.includes('http://127.0.0.1:21555/'), 'v7：每 5 分钟采样一次（SRBMiner API 21555）');
 ok(script.includes('tr -d "\\n\\r"'), 'v7：JSON 压成单行，保证一行可解析');
-ok(O.SCRIPT_VERSION === 7, '脚本版本号 7（v7：stats 把 JSON 压成单行，否则日志里只有 "{"）');
+ok(O.SCRIPT_VERSION === 8, '脚本版本号 8（v8：stats 只挑 shares/hashrate/difficulty 等字段，避免被日志接口截断）');
+// vast 的日志接口会把单行截在 500 字符，SRBMiner 的完整 JSON 有 2~4KB：
+// 整段 echo 出去，shares/hashrate 永远落在截断点之后（实测 stats 行只剩 500 字符、没有 accepted）
+ok(!/stats srb \$RTT :: \$J/.test(script), 'v8：不再整段回显 JSON（否则会被 500 字符截断吃掉 shares）');
+ok(/grep -oE .*shares\|hashrate/.test(script), 'v8：只挑 shares/hashrate/gpu_compute_errors/difficulty/uptime/pool');
+ok(script.includes('cut -c1-420'), 'v8：挑完的字段时间还留了余量（<500 截断线）');
 
 console.log('— 没 pin 就不许租');
 ok(throws(() => O.buildOnstart({ pools, def: 'pearlhash', miners: { wr: man.miners.wr } }), /srb.*没有 pin|没有 pin/), '缺 srb 的 pin → 直接抛错（不会降级）');

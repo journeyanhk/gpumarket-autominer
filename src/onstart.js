@@ -9,7 +9,7 @@
 // 脚本版本 4：每个矿池可以用不同的矿工（Pearlhash 用 WildRig，Kryptex 用 SRBMiner），用到时才下载。
 // 与 v3 的区别：每个候选包在解压前必须通过 miners/manifest.json 里 pin 的 sha256；
 // 所有源都失败就拒绝启动矿工（宁可挖不到，也不执行来路不明的二进制）。
-export const SCRIPT_VERSION = 4;
+export const SCRIPT_VERSION = 5;
 
 const SAFE = /^[A-Za-z0-9@=.:/_$+,-]+$/; // 写进脚本的参数只允许这些字符，防止注入
 
@@ -93,13 +93,13 @@ export function buildOnstart({ pools, def, miners, extraArgs = '', cnFirst = fal
     'dump(){ { echo "[prl] $(date +%T) miner exited, last output:"; tail -n 8 /root/prl/miner.log; echo "[prl] restart in 10s"; } | out; }',
     // 每次启动 90 秒后把矿工最近的输出打到机器日志里（能看到是否连上矿池、有没有提交份额）
     'peek(){ ( sleep 90; { echo "[prl] $(date +%T) miner output ($1):"; tail -n 14 /root/prl/miner.log | grep -v "^ *#*$" | cut -c1-200; } | out ) & }',
-    'start(){ echo "$cur" > pool.cur; log "mining on $cur ($(pool_bin "$cur"))"; ( while true; do ensure "$(pool_bin "$cur")" || { sleep 30; continue; }; /root/prl/$(pool_cmd "$cur") >> /root/prl/miner.log 2>&1; dump; sleep 10; done ) & MP=$!; peek "$cur"; }',
+    'start(){ echo "$cur" > pool.cur; log "mining on $cur ($(pool_bin "$cur"))"; ( while true; do ensure "$(pool_bin "$cur")" || { sleep 30; continue; }; /root/prl/$(pool_cmd "$cur") >> /root/prl/miner.log 2>&1; dump; sleep 10; done ) & MP=$!; peek "$cur"; ( while true; do sleep 600; peek "$cur"; done ) & PP=$!; }',
     'cur=$(want); [ -n "$cur" ] || cur=$(cat pool.cur 2>/dev/null); pool_cmd "$cur" >/dev/null 2>&1 || cur=$DEF',
     'start',
     'while true; do',
     '  sleep 60',
     '  w=$(want)',
-    '  if [ -n "$w" ] && [ "$w" != "$cur" ]; then log "switch pool $cur -> $w"; kill $MP 2>/dev/null; killminers; sleep 2; cur=$w; start; fi',
+    '  if [ -n "$w" ] && [ "$w" != "$cur" ]; then log "switch pool $cur -> $w"; kill $MP $PP 2>/dev/null; killminers; sleep 2; cur=$w; start; fi',
     'done',
     'EOF',
     ...(foreground ? ['log "started (args mode)"', 'exec bash run.sh'] : ['nohup bash run.sh > /dev/null 2>&1 &', 'log "started"']),

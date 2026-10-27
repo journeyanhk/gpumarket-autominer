@@ -55,7 +55,7 @@ ok(new RegExp(`kryptex\\) echo "srb --disable-cpu --algorithm pearlhash --pool p
 ok(/srb\) F=SRBMiner-MULTI; SHA=[a-f0-9]{64}; URLS="https:\/\/github\.com\/doktor83\/SRBMiner-Multi\/releases\/download\/3\.8\.0\/SRBMiner-Multi-3-8-0-Linux\.tar\.gz/.test(ob.onstart), 'SRBMiner 用的是清单 pin 的 3.8.0（不是「GitHub 最新版」）');
 ok(/DEF='pearlhash'/.test(ob.onstart) && /pool=\[a-z\]\*/.test(ob.onstart), '脚本默认挖 Pearlhash，并每分钟读标签');
 const mA = e.st.managed[idA];
-ok(mA.sv === 4 && mA.pools.join() === 'pearlhash,kryptex' && mA.pool === 'pearlhash', '记录了脚本版本（v4：带 sha256 校验）和可切换的矿池');
+ok(mA.sv === 5 && mA.pools.join() === 'pearlhash,kryptex' && mA.pool === 'pearlhash', '记录了脚本版本（v5：带 sha256 校验 + 定期输出矿工状态）和可切换的矿池');
 
 // 让它开机并在 Pearlhash 出算力
 await wait(22000);

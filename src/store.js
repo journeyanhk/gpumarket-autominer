@@ -30,6 +30,7 @@ export const DEFAULT_CONFIG = {
   // —— 高级（一般不用改）——
   rentMinIntervalMin: 10,   // 两次自动租用之间至少隔多久（分钟）——避免"被顶→秒补→再被顶"的拉锯
   maxRentsPerHour: 3,       // 每小时最多自动租几台
+  maxBidRaises: 0,          // 被顶后最多加价几次（0 = 不追价：20 次改价 0 次救活，见 docs/contracts.md §8）
   preemptCooldownMin: 5,    // 竞价被收回后，冷静多久再补（分钟）
   minBalanceStop: 5,        // 总开关：余额低于此值，一切新租停止
   maxSourceStaleMin: 60,    // 总开关：行情三源全部失效超过这么久，停止新租
@@ -94,6 +95,7 @@ export function loadState() {
     blacklist: {},   // machineId -> { until, reason }
     calib: {},       // gpuKey -> { th, samples }
     history: [],     // [{ t, price, netEh, usdPerThDay, spend, revenue }]
+    leases: [],      // 租约台账：一台机器一条完整生命周期记录（见 src/leases.js）
     ...readJson(stateFile, {}),
   };
 }

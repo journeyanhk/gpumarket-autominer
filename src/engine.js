@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { loadManifest } from './miners.js';
 import { pickDensity } from './sources.js';
 import { request } from './http.js';
+import { newLease, closeLease, endReasonOf, preemptKindOf, summarize } from './leases.js';
 
 const MIN = 60_000;
 const LABEL = 'prl-auto';
@@ -69,6 +70,10 @@ export class Engine {
     this.busy = new Set();
     this.everHashed = new Set();
     this.rigLogs = new Map(); // instanceId -> { t, text }
+    // 租约台账：每台机器一份完整生命周期记录，用来回答「哪个型号/哪个房东值得租」。
+    // 决策口径是每机时净收益（见 src/leases.js），不是 ROI 均值。
+    this.leases = this.st.leases ||= [];
+    this.trimLeases();
     // 部署用的是 miners/manifest.json 的 pin；这里只保存「上次看到的最新版」用于日志去重，不落盘
     this.wrSeen = null;
     delete this.st.wildrig; delete this.st.srb; // 老版本留下的字段，已经没用了
@@ -355,6 +360,8 @@ export class Engine {
   track(pool, coin, value) {
     if (!Number.isFinite(value)) return;
     const c = this.ledgerOf(pool)[coin];
+    const delta = (c.last != null && value > c.last) ? value - c.last : 0;
+    if (delta > 0 && coin === 'prl') this.allocateCredit(pool, delta);
     if (c.last != null && value > c.last) c.acc += value - c.last;
     c.last = value;
   }
@@ -448,6 +455,34 @@ export class Engine {
           } else if (m.priceDeviationPct) {
             delete m.priceDeviationPct;
           }
+          // 台账：实付价、出价轨迹、五个时间戳都在这里补齐
+          {
+            const l = this.leaseOf(i.id, m, i);
+            l.dphBaseActual = refBase;
+            l.dphTotalActual = now;
+            l.bidFinal = Number(m.bid) || l.bidFinal;
+            l.raises = (m.bidRaises || []).length;
+            l.geo ||= i.geolocation || '';
+            l.hostId ??= i.host_id ?? m.hostId ?? null;
+            if (String(i.actual_status) === 'running' && !l.tRunning) l.tRunning = Date.now();
+            const lh = this.localHsOf(i.id);
+            if (lh) {
+              l.lastHs = lh;
+              l.localThAvg = l.localThAvg ? +(l.localThAvg * 0.7 + (lh / 1e12) * 0.3).toFixed(2) : +(lh / 1e12).toFixed(2);
+              // 矿工已经报出算力 = 矿工起来了（和「矿池开始计酬」是两件事，分开记）
+              l.tMinerUp ||= Date.now();
+            }
+            const sh = this.sharesOf(i.id);
+            if (sh) {
+              l.sharesAccepted = Math.max(l.sharesAccepted || 0, sh.accepted || 0);
+              l.sharesRejected = Math.max(l.sharesRejected || 0, sh.rejected || 0);
+              if (sh.accepted > 0) l.tFirstShare ||= Date.now();
+            }
+            if (m.hashAt && !l.tFirstShare) l.tFirstShare = m.hashAt;
+            // 矿池已经报到算力 = 矿工一定已经起来了（日志还没抓到时的兜底）
+            if (m.hashAt && !l.tMinerUp) l.tMinerUp = m.hashAt;
+            l.pool = m.pool || l.pool || null;
+          }
           this.save();
         }
         // spot 的真实状态元组每次变化都记一条（真机语义待验证，见 docs/contracts.md §8）
@@ -458,6 +493,7 @@ export class Engine {
       for (const id of Object.keys(this.st.managed)) {
         if (!ids.has(id) && Date.now() - this.st.managed[id].rentedAt > 3 * MIN) {
           this.log('warn', `实例 ${id} 已不在 vast 列表中（可能被手动销毁或被平台回收）`);
+          this.closeLeaseFor(id, { reason: '已不在 vast 列表中（平台侧已回收）' });
           delete this.st.managed[id]; this.save();
         }
       }
@@ -591,6 +627,87 @@ export class Engine {
     return { health: 'ok', ratio, hs5, gpus, healthMsg: '' };
   }
 
+  // 台账里的份额与本地算力只能从矿工日志里取，而脚本 v6+ 每 5 分钟才打一行 stats——
+  // 所以这里按同样节奏取一次日志。不取的话租约记录里 shares_accepted / local_th_avg 永远是空，
+  // 型号排名就只能靠「有没有出算力」这种粗指标。
+  async pollStats(list, now = Date.now()) {
+    for (const x of list) {
+      if (!['mining', 'loss'].includes(x.phase)) continue;
+      const m = this.st.managed[x.id];
+      if (!m) continue;
+      if ((m.sv || x.scriptVer || 0) < 6) continue;
+      if (now - (m.lastLogAt || 0) < 5 * MIN) continue;
+      m.lastLogAt = now;
+      this.save();
+      await this.fetchLogs(x.id, false).catch(() => {});
+    }
+  }
+
+  // ---------- 租约台账 ----------
+  // 一台机器一条记录，从租下跟到销毁。refreshVast 每轮补字段，destroy 时定终局。
+  trimLeases() {
+    const KEEP = 800;
+    if (this.leases.length > KEEP) this.leases.splice(0, this.leases.length - KEEP);
+  }
+
+  leaseOf(id, m, inst) {
+    id = String(id);
+    let l = this.leases.find(x => x.id === id && !x.tEnd);
+    if (!l) {
+      l = newLease(id, m || this.st.managed[id] || {}, inst || {});
+      this.leases.push(l);
+      this.trimLeases();
+    }
+    return l;
+  }
+
+  leaseFor(id) {
+    id = String(id);
+    for (let i = this.leases.length - 1; i >= 0; i--) if (this.leases[i].id === id && !this.leases[i].tEnd) return this.leases[i];
+    return null;
+  }
+
+  closeLeaseFor(id, { reason = '', now = Date.now(), preemptKind = null, opponentRatio = null } = {}) {
+    const l = this.leaseFor(id);
+    if (!l) return null;
+    closeLease(l, {
+      endReason: endReasonOf(reason),
+      now,
+      priceUsd: this.market.price || 0,
+      preemptKind: l.preemptKind || preemptKind,
+      opponentRatio: l.opponentRatio ?? opponentRatio,
+    });
+    this.save();
+    return l;
+  }
+
+  // 被顶时的对手价位：用同一台机器在扫描结果里的 min_bid ≈ 现在的竞价地板。
+  // 拿它和我们的出价比，才能验证「24GB 卡被 AI 租户抢」到底是机制还是猜测。
+  opponentInfo(x, m) {
+    const mid = Number(m?.machineId) || null;
+    const offer = mid ? (this.offers || []).find(o => Number(o.machineId) === mid) : null;
+    const minBid = Number(offer?.minBid ?? x?.minBid ?? 0) || null;
+    const ourBid = Number(m?.bid ?? x?.dph ?? 0) || null;
+    const kind = preemptKindOf({ statusMsg: x?.statusMsg || '', minBid, ourBid });
+    const ratio = minBid && ourBid ? +(minBid / ourBid).toFixed(3) : null;
+    return { minBid, ourBid, ratio, kind };
+  }
+
+  leaseReport() {
+    return summarize(this.leases, { priceUsd: this.market.price || 0 });
+  }
+
+  // 矿池到账按「本矿池在跑的机器」的瞬时算力比例分账。
+  // 这是分摊不是真相：真正能对到单机的只有份额，所以 creditedSrc 明确标成 pool_alloc。
+  allocateCredit(pool, deltaPrl) {
+    if (!(deltaPrl > 0)) return;
+    const open = this.leases.filter(l => !l.tEnd && l.pool === pool && (Number(l.lastHs) > 0));
+    const wsum = open.reduce((a, l) => a + Number(l.lastHs), 0);
+    if (!(wsum > 0)) return;
+    for (const l of open) l.creditedPrl = +((Number(l.creditedPrl) || 0) + deltaPrl * (Number(l.lastHs) / wsum)).toFixed(8);
+    this.save();
+  }
+
   // 从矿工日志里抠出「GPU 本地算力」：矿池口径是按份额换算的，PPS+ 下拿它当分母会变成同义反复。
   // 日志里 SRBMiner/WildRig 都会打 "Hashrate  136.89 TH/s"，取最后一条即可。
   localHsOf(id) {
@@ -602,6 +719,17 @@ export class Engine {
     const n = Number(last[1]);
     const mult = { T: 1e12, G: 1e9, M: 1e6, '': 1 }[String(last[2] || '').toUpperCase()] || 1;
     return Number.isFinite(n) && n > 0 ? n * mult : null;
+  }
+
+  // 从 stats 日志里取份额计数：这个比矿池均值可靠（矿池 30 分钟均值会把爬坡期算进去）
+  sharesOf(id) {
+    const v = this.rigLogs.get(String(id));
+    if (!v?.text) return null;
+    const acc = [...v.text.matchAll(/"accepted"\s*:\s*(\d+)/g)];
+    const rej = [...v.text.matchAll(/"rejected"\s*:\s*(\d+)/g)];
+    if (!acc.length && !rej.length) return null;
+    const last = a => (a.length ? Number(a[a.length - 1][1]) : 0);
+    return { accepted: last(acc), rejected: last(rej) };
   }
 
   // 把 vast 实例 + 矿池算力 + 行情 合成面板要的数据
@@ -918,6 +1046,7 @@ export class Engine {
     await this.failover(list);
     list = this.instances();
     if (this.cfg.autoDestroy) await this.autoDestroy(list);
+    await this.pollStats(list);
     if (this.cfg.autoRent) await this.autoRent(list);
   }
 
@@ -959,8 +1088,15 @@ export class Engine {
       if (x.phase === 'preempted') {
         if (await this.tryRaiseBid(x, m, now)) continue;
         if (!m.preemptedAt) {
-          m.preemptedAt = now; this.save();
-          this.log('warn', `实例 ${x.id} 竞价被抢占（stopped，磁盘仍在计费），${PREEMPT_DESTROY_MIN} 分钟内销毁`);
+          m.preemptedAt = now;
+          // 台账：记下被收回的成因与对手价位（临时评测，回答「24GB 卡被谁抢」）
+          const info = this.opponentInfo(x, m);
+          const l = this.leaseOf(x.id, m, null);
+          l.preemptKind ||= info.kind;
+          if (info.ratio != null && l.opponentRatio == null) l.opponentRatio = info.ratio;
+          m.preemptInfo = info;
+          this.save();
+          this.log('warn', `实例 ${x.id} 竞价被抢占（stopped，磁盘仍在计费），${PREEMPT_DESTROY_MIN} 分钟内销毁｜成因推断 ${info.kind}${info.ratio != null ? `，对手价位/我方出价 ${info.ratio}×` : ''}`);
         } else if (now - m.preemptedAt > PREEMPT_DESTROY_MIN * MIN) {
           await this.destroy(x.id, '竞价被抢占（stopped，磁盘仍计费）', 0);
         }
@@ -1162,6 +1298,12 @@ export class Engine {
         spot: !!offer.spot, listDph: offer.listDph ?? null,
         sv: SCRIPT_VERSION, pools: poolIds, pool: def, mode: this.cfg.launchMode === 'args' ? 'args' : 'ssh',
       };
+      // 台账从下单这一刻开始记：t_rent 必须是我们真正付钱的起点，不是部署成功那刻
+      {
+        const l = this.leaseOf(id, this.st.managed[id], { geolocation: offer.geolocation, host_id: offer.hostId ?? null });
+        l.geo ||= offer.geolocation || '';
+        l.pool = def;
+      }
       this.save();
       if (by === 'auto') { this.rentTimes.push(Date.now()); this.save(); }
       // 出价/收入比要进日志：spot 的"清算比例"就是靠这批样本的中位数算出来的
@@ -1235,17 +1377,32 @@ export class Engine {
   rigLabel(gpuName, pool) { return `${LABEL}-${gpuKey(gpuName)} pool=${pool}`; }
 
   // 被顶时先提高出价保活：目标是「当前出价×1.1」与「入场价×1.1」的较大者，
-  // 但不得超过 revenue/(1+目标ROI)；每实例每小时最多 3 次，避免无限加价。
+  // 但不得超过 revenue/(1+目标ROI)；每实例每小时最多 maxBidRaises 次（默认 0 = 不追价）。
+  //
+  // 为什么默认 0：2026-10-27 复盘 20 次改价、9 台机器，**追价后恢复出算力的是 0 台**。
+  // interruptible 是「房东随时可收回」，不是价高者得——容器被收回后加价不会复活。
+  // 代码路径保留，是等 (c) 的对手价位数据攒够后能回放验证这条结论。
   async tryRaiseBid(x, m, now) {
     if (!x.spot) return false;
     m.bidRaises = (m.bidRaises || []).filter(t => now - t < 60 * MIN);
-    if (m.bidRaises.length >= 3) return false;
+    const maxRaises = Number.isFinite(Number(this.cfg.maxBidRaises)) ? Number(this.cfg.maxBidRaises) : 0;
     // 刚租下还没出算力时 revenueHr=0，用"预期收入"算上限，否则永远无法改价
     const rev = Math.max(Number(x.revenueHr) || 0, Number(x.expRevenueHr) || 0);
     const upper = rev / (1 + this.cfg.targetProfitPct / 100);
     const cur = Number(x.dph) || 0;
     const target = Math.max(cur * 1.1, Number(x.minBid || 0) * 1.1);
-    if (!(upper > 0) || !(target > cur) || target > upper) return false;
+    const viable = upper > 0 && target > cur && target <= upper;
+    // 即使不追价也把「如果追会出什么价」算出来记下：以后有对手价位数据可以回放，
+    // 不用为了验证再拿真钱去试。
+    m.wouldRaise = { at: now, cur: +cur.toFixed(4), target: +target.toFixed(4), upper: +upper.toFixed(4), viable, maxRaises };
+    if (m.bidRaises.length >= maxRaises || !viable) {
+      if (maxRaises === 0 && !m.raiseOffLogged) {
+        m.raiseOffLogged = true;
+        this.save();
+        this.log('info', `实例 ${x.id} 被顶：按当前开关不追价（若追会出 $${target.toFixed(4)}，上限 $${upper.toFixed(4)}），直接走销毁换下一台`);
+      }
+      return false;
+    }
     try {
       await this.vast.setBidPrice(x.id, +target.toFixed(4));
       m.bidRaises.push(now);
@@ -1482,6 +1639,8 @@ export class Engine {
       const inst = this.rawInstances.find(i => String(i.id) === id);
       await this.vast.destroy(id);
       if (blacklistMin && inst?.machine_id) this.st.blacklist[inst.machine_id] = { until: Date.now() + blacklistMin * MIN, reason };
+      // 台账定终局（要在删 managed 之前：租约里有出价/份额等细节）
+      this.closeLeaseFor(id, { reason });
       delete this.st.managed[id];
       // 竞价被收回 → 进入冷静期，别立刻再去同一个市场抢
       if (/竞价被抢占|竞价被收回/.test(reason)) {
@@ -1494,6 +1653,7 @@ export class Engine {
       // 404 = 平台已经收走了（竞价被收回后常见）：这不是失败，只是本地记录没清。
       // 当成失败会让巡检每小时报一次假异常，也让人误以为退租链路坏了。
       if (e.status === 404) {
+        this.closeLeaseFor(id, { reason: '平台侧已不存在（此前已被收回）' });
         delete this.st.managed[id];
         this.save();
         this.log('info', `实例 ${id} 在平台侧已不存在（此前已被收回），清理本地记录`);
@@ -1521,6 +1681,7 @@ export class Engine {
     num('spotBidFactor', 0.1, 1.5); // 允许 >1：出价可以高于收入（负 ROI），用于测「加价能否站住」
     num('spotBidBuffer', 0, 1); num('spotBidMultiplier', 1, 3); num('spotBidFloorRatio', 0, 1);
     num('rentMinIntervalMin', 1, 180); num('maxRentsPerHour', 1, 20); num('preemptCooldownMin', 0, 120);
+    num('maxBidRaises', 0, 10);   // 0 = 不追价（默认）；>0 才允许被顶后加价保活
     num('minBalanceStop', 0, 1000); num('maxSourceStaleMin', 5, 1440);
     if (next.stopLossPct >= next.targetProfitPct) throw new Error('止损线必须低于目标收益率，否则会租了马上退');
     for (const k of ['poolUrl', 'image', 'minerArgs', 'proxy']) if (typeof patch[k] === 'string') next[k] = patch[k].trim();
@@ -1691,6 +1852,8 @@ export class Engine {
       miners: this.minerManifest?.miners || null,      // 已 pin 的矿工（版本+sha256）
       blacklist: Object.entries(this.st.blacklist).filter(([, v]) => v.until > now).length,
       deployAvg: this.deployAverage(),
+      // 租约台账：按型号/按房东的每机时净收益（决策口径，不是 ROI 均值）
+      leases: this.leaseReport(),
       pools: this.poolsSnapshot(list),
       compare: { h24: this.compare(24), d7: this.compare(24 * 7), all: this.compare(null) },
       failovers: this.st.failovers.slice(-10).reverse(),

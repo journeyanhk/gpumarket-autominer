@@ -312,9 +312,11 @@ await e.autoDestroy(e.instances());
 ok(!e.st.managed[idJ], '取消钉住后，ROI −40% 立刻按止损退租');
 e.instances = realInstancesJ;
 
-console.log('— 被顶先改价保活（不立刻销毁）');
+console.log('— 被顶先改价保活（显式打开 maxBidRaises；默认是 0 = 不追价）');
 e.offers = []; await e.scan(true);
 e.cfg.targetProfitPct = 20;
+// 追价默认关闭（20 次改价 0 次救活），这里显式打开 3 次，专门验证代码路径还在、并且有上限
+e.cfg.maxBidRaises = 3;
 // 必须挑一台「加价 10% 之后仍在利润带内」的机器，否则按设计就不该加价
 const pickK = e.offers.filter(o => !o.spotSkip && o.roi !== null && o.roi >= 40)[0]
   || e.offers.filter(o => !o.spotSkip && o.roi !== null).sort((a,b)=>b.roi-a.roi)[0];

@@ -178,3 +178,37 @@ allocate({
 必须先在 `managed` 里记一个 `manualStop` 标记并把这条判定让开。
 
 开关：`useSpot`（默认 `false`）与 `spotBidFactor`（默认 0.75）。M1 阶段只做了最小闭环——搜索 `type=bid`、下单带 `price`、`stopped` 按需销毁；**自动补位与更聪明的出价策略属于 M2**。
+### 8.1 追价（改价保活）默认关闭的实证（2026-10-27）
+
+`PUT /api/v0/instances/bid_price/{id}/` 确实存在且可用，但用它救机器在实测里**零收益**：
+
+- 20 次改价、9 台机器，**追价后恢复出算力的是 0 台**；其中 2 台是出过算力后才被顶，各追 3 次仍然被收回。
+- 机制原因与 §8 一致：interruptible 是「房东随时可收回」，不是价高者得；容器一旦被收，
+  抬高 `bid_price` 不会让它复活，只会把这一小时的出价上限和账单一起抬高。
+- 因此 `maxBidRaises` 默认 **0**（不追价）。代码路径保留，等 §8.2 的对手价位样本攒够后可以回放验证。
+- 不追价之后必须保证「被顶 → 计时 → 销毁」这条链不再被重置：旧实现在 `tryRaiseBid` 成功时
+  `delete m.preemptedAt`，每追一次就重置一次 5 分钟销毁计时（一台机器最多能白挂 20 分钟）。
+  默认 0 次之后这条路径不再触发，但**任何把 `maxBidRaises` 调回 >0 的人必须知道这个副作用**。
+
+### 8.2 租约台账（`src/leases.js`、`tools/lease-report.mjs`）
+
+一台机器一条记录，回答「该屏蔽哪个型号 / 该优先哪个房东」。决策口径是**每机时净收益**
+= `(入账 PRL × 币价 − 实付租金) ÷ 计费小时`，不是 ROI 均值——短命机器 ROI 是 null 或极端值，
+但租金是实付的，只有摊进机时才不会被拉歪。
+
+关键字段与用途：
+
+| 字段 | 用途 |
+|---|---|
+| `tRent / tRunning / tMinerUp / tFirstShare / tEnd` | 五个时间戳，把「出算力前被顶」「矿工启动慢」「部署失败」分开算 |
+| `bidEntry / bidFinal / raises` | 出价轨迹（抬过几次、抬到多少） |
+| `dphBaseActual / dphTotalActual` | 实付价，净收益只用实付价 |
+| `endReason` | 枚举：`preempted_outbid` / `host_reclaim` / `our_stoploss` / `our_gate` / `deploy_fail` / `market_end` / … |
+| `preemptKind` | 被收回成因推断：`outbid`（min_bid 明显高于我方出价）/ `host_reclaim`（价格没动）/ `deploy_fail`（容器起不来） |
+| `opponentRatio` | 被顶时 `min_bid ÷ 我方出价`。这是检验「24GB 卡被 AI 租户抢」的唯一可用证据，不靠机制猜测 |
+| `hostId` | 同一房东反复收回是比型号更强的信号 |
+| `creditedPrl` + `creditedSrc` | 入账分摊。目前是 `pool_alloc`（按本矿池在跑机器的瞬时算力比例分摊）——**分摊不是真相**，单机能对上的只有份额 |
+
+判据（写死在流程里，避免反复讨论）：型号屏蔽要等「3 天或该型号 ≥10 个干净租约」，到期按
+`tools/lease-report.mjs` 的每机时净收益排名决定。2026-10-27 之前的历史样本受已删除的
+「核价偏差直接销毁」误杀污染（13 台，4060 Ti 4 / 3070 3 / 3080 2 …），**不能用于型号取舍**。

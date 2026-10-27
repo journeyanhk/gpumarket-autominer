@@ -557,6 +557,19 @@ export class Engine {
     return { health: 'ok', ratio, hs5, gpus, healthMsg: '' };
   }
 
+  // 从矿工日志里抠出「GPU 本地算力」：矿池口径是按份额换算的，PPS+ 下拿它当分母会变成同义反复。
+  // 日志里 SRBMiner/WildRig 都会打 "Hashrate  136.89 TH/s"，取最后一条即可。
+  localHsOf(id) {
+    const v = this.rigLogs.get(String(id));
+    if (!v?.text) return null;
+    const m = [...v.text.matchAll(/Hashrate\s+([\d.]+)\s*([TGM]?)H\/s/gi)];
+    if (!m.length) return null;
+    const last = m[m.length - 1];
+    const n = Number(last[1]);
+    const mult = { T: 1e12, G: 1e9, M: 1e6, '': 1 }[String(last[2] || '').toUpperCase()] || 1;
+    return Number.isFinite(n) && n > 0 ? n * mult : null;
+  }
+
   // 把 vast 实例 + 矿池算力 + 行情 合成面板要的数据
   instances() {
     const now = Date.now();
@@ -642,6 +655,13 @@ export class Engine {
         belowSince: m?.belowSince || null, refSource: ref?.source || '未知型号',
         // 竞价/按需必须暴露给面板与策略脚本：缺了它，swap-policy 会把竞价机当成按需机
         spot: !!m?.spot, listDph: m?.listDph ?? null, pinned: !!m?.pinned, minBid: Number(i.min_bid) || 0,
+        // 本地算力（矿工自报）与「按本地算力算的 ROI」：判断"租来的算力有多少真的变成了钱"
+        localHs: this.localHsOf(id),
+        localRoi: (() => {
+          const lh = this.localHsOf(id);
+          const rev = lh ? lh * this.usdHsHrFor(rp.actual) : 0;
+          return rev > 0 && dph > 0 ? (rev - dph) / dph * 100 : null;
+        })(),
         deploy: m ? { rentedAt: m.rentedAt, runningAt: m.runningAt || null, hashAt: m.hashAt || null, inetDown: m.inetDown ?? i.inet_down ?? null } : null,
         logHint: this.logHint(id),
       };

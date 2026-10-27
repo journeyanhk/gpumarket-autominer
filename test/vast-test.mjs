@@ -39,6 +39,17 @@ const list = e.instances();
 ok(list.length === 1 && list[0].phase, `实例快照可用（phase=${list[0]?.phase}）`);
 ok(e.instancesOk, 'instancesOk=true —— decide() 不会提前 return，止损/退租这条链是通的');
 
+console.log('— 从矿工日志解析本地算力');
+{
+  const id0 = String(e.rawInstances[0].id);
+  e.rigLogs.set(id0, { t: Date.now(), text: '一些日志\n[2026-10-27 03:14:28] Hashrate 136.89 TH/s 345.6W\n' });
+  ok(Math.abs(e.localHsOf(id0) - 136.89e12) / 136.89e12 < 1e-6, `解析出 ${(e.localHsOf(id0)/1e12).toFixed(2)} TH/s`);
+  e.rigLogs.set(id0, { t: Date.now(), text: 'Hashrate  980.5 GH/s' });
+  ok(Math.abs(e.localHsOf(id0) - 980.5e9) < 1e6, '支持 GH/s 单位');
+  e.rigLogs.set(id0, { t: Date.now(), text: '没有算力字样' });
+  ok(e.localHsOf(id0) === null, '没有可解析内容 → null（不编数）');
+}
+
 console.log('— 实际租金校正');
 {
   const id0 = String(e.rawInstances[0].id);

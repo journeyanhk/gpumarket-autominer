@@ -793,7 +793,10 @@ export class Engine {
       const avgHs = win.length ? win.reduce((a, s) => a + s.hs, 0) / win.length : (w && !restarting ? w.hs : 0);
       // 出过算力的机器（记录里有出算力时间）不再算「部署中」：程序重启后内存里的记录丢了也一样
       const everSeen = !!m?.hashAt || this.everHashed.has(id) || arr.some(s => s.hs > 0) || (w ? w.hs > 0 : false);
-      const firstHashAt = arr.find(s => s.hs > 0 && s.t > resetAt)?.t ?? null;
+      // 首次出算力时间：内存样本只能覆盖本次进程启动之后。重启后样本清空 → firstHashAt 变 null，
+      // 而低算力/止损两条规则都靠它算「跑了多久」，于是每重启一次就要重新等 30 分钟预热。
+      // m.hashAt 是落盘的，样本没了就用它兜底。
+      const firstHashAt = arr.find(s => s.hs > 0 && s.t > resetAt)?.t ?? (m?.hashAt ?? null);
       const dph = Number(i.dph_total) || 0;
       const startedAt = (m?.rentedAt) || (i.start_date ? i.start_date * 1000 : now);
       const ageMin = (now - startedAt) / MIN;

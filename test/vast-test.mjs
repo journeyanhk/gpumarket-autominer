@@ -17,6 +17,7 @@ fs.writeFileSync('data/config.json', JSON.stringify({
 
 const { Engine } = await import(U('src/engine.js'));
 let pass = 0, fail = 0;
+const MIN_ = 60_000;
 const ok = (c, m) => { if (c) { pass++; console.log('  ✓', m); } else { fail++; console.log('  ✗', m); } };
 
 const e = new Engine();
@@ -59,6 +60,17 @@ console.log('— 实际租金校正');
   ok(!e.st.managed[id0].priceMismatch, '不再用"固定阈值 → 直接销毁"的旧机制');
   ok(!e.st.managed[id0].priceDeviationPct, '按「GPU 价+存储」算预期后，正常存储费不产生偏差告警');
   ok(e.st.managed[id0].dphBase === 0.2596, '记录 GPU 单价（不含存储/出网），用于识别真正的平台改价');
+  delete e.st.managed[id0];
+}
+
+console.log('— 重启后「跑了多久」不能归零');
+{
+  const id0 = String(e.rawInstances[0].id);
+  const hashedAt = Date.now() - 40 * MIN_;
+  e.st.managed[id0] = { rentedAt: Date.now() - 60 * MIN_, gpuName: 'RTX 5080', numGpus: 1, spot: true, bid: 0.2, dph: 0.2, hashAt: hashedAt };
+  e.samples.clear();   // 模拟进程刚重启：内存样本没了
+  const snap = e.instances().find(x => x.id === id0);
+  ok(snap?.firstHashAt === hashedAt, '样本清空后回退到落盘的 m.hashAt（否则每次重启都要重新等预热）');
   delete e.st.managed[id0];
 }
 

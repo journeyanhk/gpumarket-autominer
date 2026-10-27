@@ -189,7 +189,7 @@ export class Engine {
 
   // ---------- 启动 ----------
   start() {
-    this.log('info', '程序启动');
+    this.log('info', `程序启动（脚本版本 v${SCRIPT_VERSION}；若与 src/onstart.js 不一致说明进程未重载）`);
     this.loop(() => this.refreshMarket(), 15_000);
     this.loop(() => this.refreshKryptex(), 30_000, 3000);
     this.loop(() => this.refreshVast(), 30_000);
@@ -426,22 +426,21 @@ export class Engine {
         // 用平台的实际 dph_total 校正托管记录：搜索页的 dph 有时是"当前竞价价"而不是成交的按需价
         // （实测 3090：日志写 $0.0865，真实扣费 $0.1533 —— 不校正的话 ROI/止损全按错价算）
         if (m && Number(i.dph_total) > 0) {
-          // 比对要用 GPU 单价（dph_base），不能用 dph_total：后者含存储与出网，
-          // 一台 $0.0647 的机器加上 10GB 存储就变成 $0.0684（+5.7%），会把正常机器判成"平台改价"。
+          // 核价：先用「GPU 单价 + 存储」算出预期总价，再和平台实际扣费比。
+          // 动作不挂阈值，而是"记差异 → 账本按实际价 → ROI/止损决定去留"（复盘意见）：
+          // 15% 的固定阈值在 20% 目标 ROI 下只剩 5% 利润，再乘 realizedFactor 就是负的。
           const base = Number(i.dph_base) > 0 ? Number(i.dph_base) : Number(i.dph_total);
           const now = Number(i.dph_total);
+          const storageHr = (Number(i.storage_cost) || 0) * (Number(this.cfg.disk) || 10) / 730;
+          const expected = base + storageHr;
           const prev = Number(m.dph) || 0;
-          const baseOld = Number(m.dphBase) || 0;
-          // 实际扣费永远按平台口径记（ROI 要准）
-          if (prev && Math.abs(now - prev) / Math.max(now, prev) > 0.05) {
-            m.dphListed = prev;
-            this.log('info', `实例 ${i.id} 实际扣费 $${now.toFixed(4)}/h（GPU $${base.toFixed(4)} + 存储/出网），已按实际值计算 ROI`);
-          }
-          m.dph = now;
-          // 只有「GPU 单价」涨了 15% 以上才算平台改价/竞价被抬价 → 需销毁
-          if (baseOld > 0 && Math.abs(base - baseOld) / Math.max(base, baseOld) > 0.15) {
-            m.priceMismatch = Date.now();
-            this.log('warn', `实例 ${i.id} 的 GPU 单价 $${base.toFixed(4)} 比下单价 $${baseOld.toFixed(4)} 高 ${(Math.abs(base - baseOld) / Math.max(base, baseOld) * 100).toFixed(0)}%，标记为需销毁`);
+          if (prev && Math.abs(now - prev) / Math.max(now, prev) > 0.05) m.dphListed = prev;
+          m.dph = now; m.dphBase = base;
+          if (expected > 0 && now / expected - 1 > 0.05) {
+            m.priceDeviationPct = +((now / expected - 1) * 100).toFixed(1);
+            this.log('warn', `实例 ${i.id} 实际扣费 $${now.toFixed(4)}/h 比预期 $${expected.toFixed(4)}（GPU $${base.toFixed(4)}+存储 $${storageHr.toFixed(4)}）高 ${m.priceDeviationPct}%，按实际价计 ROI，由止损决定去留`);
+          } else if (m.priceDeviationPct) {
+            delete m.priceDeviationPct;
           }
           m.dphBase = base;
           this.save();
@@ -951,11 +950,6 @@ export class Engine {
       const m = this.st.managed[x.id] || (this.st.managed[x.id] = { rentedAt: x.startedAt, gpuName: x.gpuName, numGpus: x.numGpus, machineId: x.machineId });
       // 0) 刚重启 / 正在换矿池：给它时间恢复，期间不做任何退租判断
       if (x.phase === 'restarting' || x.phase === 'switching') continue;
-      // 0a) 租后核价不符（平台实际价 > 预期 5%）的竞价机：不划算，直接退
-      if (m.priceMismatch) {
-        await this.destroy(x.id, `实际租金 $${Number(x.dph).toFixed(4)}/h 高于下单价（平台改价），不划算`, 0);
-        continue;
-      }
       // 0b) 竞价被抢占：先试"改价保活"（一次改价零成本，一次重部署 3 分钟），改不动再销毁
       if (x.phase === 'preempted') {
         if (await this.tryRaiseBid(x, m, now)) continue;

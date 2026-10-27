@@ -43,6 +43,7 @@ export const DEFAULT_CONFIG = {
   disk: 10,
   scanIntervalSec: 300,     // 最短扫描间隔；有剩余额度信息时会自动放慢，把额度均匀用到重置前
   scanRows: 100,            // 每次搜索取多少条（vast 按条数计每日额度）
+  revenueSource: 'min',    // 收入密度取哪一路：min（默认，最保守）/ median / pearlhash / kryptex / whattomine / max
   poolUrl: 'stratum+ssl://pool.pearlhash.xyz:9443',
   image: 'vastai/base-image:cuda-12.4.1-auto',
   launchMode: 'args',       // args = 快速启动（跳过 SSH 初始化，不能 SSH 登录）；ssh = 可以 SSH 登录但开机慢

@@ -6,6 +6,8 @@ import { buildOnstart, workerName, SCRIPT_VERSION } from './onstart.js';
 import { POOLS, POOL_IDS, poolName, minerTarget, fetchKryptexInfo, fetchKryptexWorkers, fetchKryptexEarned } from './pools.js';
 import { loadConfig, saveConfig, loadState, saveState, appendLog, DEFAULT_CONFIG } from './store.js';
 import { loadManifest } from './miners.js';
+import { pickDensity } from './sources.js';
+import { request } from './http.js';
 
 const MIN = 60_000;
 const LABEL = 'prl-auto';
@@ -36,6 +38,8 @@ export class Engine {
     this.market = {
       price: null, change24h: null, networkHs: null, blockTime: null, reward: null, height: null, poolHs: null, updatedAt: 0, error: null,
       nockPrice: null, nockChange24h: null, nockSrc: null, nockPerPrl: this.st.nockPerPrl ?? null,
+      // 多源收入密度：默认取三者最小值（保守），避免用乐观源把负收益看成正收益
+      sources: null, sourceName: null, density: 0, params: null,
     };
     this.account = {
       vastBalance: null, vastEmail: null, prlBalance: null, prlPending: null,
@@ -102,7 +106,9 @@ export class Engine {
   get usdHsHrPrl() { return this.prlRate('pearlhash'); }
   prlRate(pool) {
     const m = this.market;
-    return P.usdPerHsHour({ usd: m.price, networkHs: m.networkHs, blockTime: m.blockTime, reward: m.reward, fee: this.effFee(pool) });
+    // 用 revenueSource 选中的那一路参数算收入（默认三者最保守）
+    const p = m.params || { networkHs: m.networkHs, blockTime: m.blockTime, reward: m.reward };
+    return P.usdPerHsHour({ usd: m.price, networkHs: p.networkHs, blockTime: p.blockTime, reward: p.reward, fee: this.effFee(pool) });
   }
   // 竞价出价：收入 × 系数，但绝不超过「按目标收益率仍然划算」的上限；
   // 入场价已经高于上限的机器直接返回 null（宁可不租，也不在亏损区抢机器）。
@@ -202,6 +208,37 @@ export class Engine {
         Object.assign(this.market, { nockPrice: n.usd, nockChange24h: n.change24h, nockSrc: n.src });
         this._nockPriceAt = Date.now();
       } catch (e) { if (!this._nockWarned) { this._nockWarned = true; this.log('warn', `NOCK 价格获取失败（不影响 PRL 计算）：${e.message}`); } }
+    }
+    // 多源交叉：Kryptex 与 WhatToMine 各自独立算一遍收入密度（缓存 5 分钟，别每 15 秒打一次）
+    if (Date.now() - (this._srcAt || 0) > 5 * MIN) {
+      const [kx, wtm] = await Promise.allSettled([
+        request('https://pool.kryptex.com/prl/api/v1/pool/info', { timeoutMs: 15000 }),
+        request('https://whattomine.com/coins.json', { timeoutMs: 20000 }),
+      ]);
+      this._srcCache = this._srcCache || {};
+      if (kx.status === 'fulfilled' && Number(kx.value?.net_hashrate) > 0) {
+        this._srcCache.kryptex = { networkHs: Number(kx.value.net_hashrate), blockTime: Number(kx.value.block_time) || 194, reward: Number(kx.value.block_reward) || 0 };
+      }
+      if (wtm.status === 'fulfilled' && Number(wtm.value?.coins?.Pearl?.nethash) > 0) {
+        const c = wtm.value.coins.Pearl;
+        this._srcCache.whattomine = { networkHs: Number(c.nethash), blockTime: Number(c.block_time) || 154, reward: Number(c.block_reward) || 0 };
+      }
+      this._srcAt = Date.now();
+    }
+    if (this.market.price > 0 && this.market.networkHs > 0) {
+      const sources = {
+        pearlhash: { usd: this.market.price, networkHs: this.market.networkHs, blockTime: this.market.blockTime, reward: this.market.reward },
+        ...Object.fromEntries(Object.entries(this._srcCache || {}).map(([k, v]) => [k, { usd: this.market.price, ...v }])),
+      };
+      let pick;
+      try { pick = pickDensity(sources, this.cfg.revenueSource || 'min'); } catch { pick = { density: 0, src: null, all: {} }; }
+      this.market.sources = pick.all;
+      this.market.sourceName = pick.src;
+      this.market.density = pick.density;
+      if (pick.src && sources[pick.src]) {
+        const s2 = sources[pick.src];
+        this.market.params = { networkHs: s2.networkHs, blockTime: s2.blockTime, reward: s2.reward };
+      }
     }
     if (price.status === 'fulfilled' && chain.status === 'fulfilled' && this.market.reward) this.market.updatedAt = Date.now();
     // 偶尔一次超时很正常（数据 15 秒后会再拉），连续 3 次失败才记日志，恢复时再记一条
@@ -1359,6 +1396,11 @@ export class Engine {
       if (w && !P.validWallet(w)) throw new Error('Kryptex 钱包地址校验失败，请从 Pearl 钱包里复制完整地址（prl1 开头）');
       next.kryptexWallet = w;
     }
+    if (typeof patch.revenueSource === 'string') {
+      const ok = ['min', 'median', 'pearlhash', 'kryptex', 'whattomine', 'max'];
+      if (!ok.includes(patch.revenueSource)) throw new Error(`revenueSource 只能是 ${ok.join(' / ')}`);
+      next.revenueSource = patch.revenueSource;
+    }
     if (typeof patch.defaultPool === 'string') {
       if (!POOLS[patch.defaultPool]) throw new Error('未知矿池');
       next.defaultPool = patch.defaultPool;
@@ -1470,6 +1512,7 @@ export class Engine {
       market: {
         ...this.market, usdPerThDay: usd * 1e12 * 24, fresh: this.marketFresh,
         defaultPool: this.defaultPool, defaultFee: this.effFee(this.defaultPool),
+        revenueSource: this.cfg.revenueSource || 'min', sourceName: this.market.sourceName, sources: this.market.sources,
         prlPerThDay: this.market.price ? this.prlRate(this.defaultPool) * 1e12 * 24 / this.market.price : 0,
         nockPerThDay: this.market.price && this.market.nockPerPrl ? this.usdHsHrPrl * 1e12 * 24 / this.market.price * this.market.nockPerPrl : 0,
         nockBonusPct: POOLS[this.defaultPool]?.nock ? this.nockBonus * 100 : 0,

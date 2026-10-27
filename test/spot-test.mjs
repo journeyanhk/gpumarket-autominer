@@ -214,6 +214,44 @@ console.log('— 台数上限要算上"抢占待销毁"');
   ok(b.roomCount === (f.cfg.maxInstances - 2), `剩余额度 = 上限 - 2（roomCount=${b.roomCount}）`);
 }
 
+console.log('— 下单异常分类：GPU conflict / 429 都不该拉黑');
+e.offers = []; await e.scan(true);
+const pickH = e.offers.filter(o => !o.spotSkip && o.roi !== null)[0];
+const realRentH = e.vast.rent.bind(e.vast);
+e.lastRentAt = 0;
+e.vast.rent = async () => { const err = new Error('HTTP 400：GPU conflict: requesting already rented gpus {1}'); err.status = 400; throw err; };
+let errH = null;
+try { await e.rent(pickH, 'manual'); } catch (x2) { errH = x2; }
+ok(errH?.gone === true, 'GPU conflict → 当作"被别人租走"（gone），不重试同一台');
+ok(!Object.values(e.st.blacklist).length, 'GPU conflict 不拉黑机器');
+e.lastRentAt = 0;
+e.vast.rent = async () => { const err = new Error('HTTP 429：API requests too frequent'); err.status = 429; throw err; };
+try { await e.rent(pickH, 'manual'); } catch {}
+ok(e.rentCooldownUntil > Date.now(), '429 → 设置 5 分钟退避');
+ok(!Object.values(e.st.blacklist).length, '429 不拉黑机器（是我们的请求太快）');
+e.vast.rent = realRentH;
+
+console.log('— 竞价机算力长期偏低 → 退租（不拉黑）');
+e.offers = []; await e.scan(true);
+const pickI = e.offers.filter(o => !o.spotSkip && o.roi !== null)[0];
+e.lastRentAt = 0; e.rentCooldownUntil = 0;
+const idI = await e.rent(pickI, 'manual');
+await e.refreshVast();
+globalThis.__instanceStatus(idI, 'running');
+await e.refreshVast();
+const mI = e.st.managed[idI];
+mI.hashAt = Date.now() - 40 * MIN;
+e.everHashed.add(String(idI));
+// 伪造"算力只有预期一半"的健康判定
+const realInstances = e.instances.bind(e);
+e.instances = () => realInstances().map(i => i.id === String(idI)
+  ? { ...i, phase: 'mining', health: 'low', hashRatio: 0.56, firstHashAt: Date.now() - 40 * MIN, spot: true }
+  : i);
+await e.autoDestroy(e.instances());
+ok(!e.st.managed[idI], '竞价机算力只有 56% 且已出算力 40 分钟 → 已退租');
+ok(!Object.values(e.st.blacklist).length, '退租但不拉黑机器（是卡的问题，可以再试别的机器）');
+e.instances = realInstances;
+
 console.log('— 出价被拒（min_bid 在下单前涨了，review #3）');
 e.offers = []; await e.scan(true);
 const pickC = e.offers.filter(o => !o.spotSkip && o.roi >= 30)[0];

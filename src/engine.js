@@ -697,14 +697,22 @@ export class Engine {
     return summarize(this.leases, { priceUsd: this.market.price || 0 });
   }
 
-  // 矿池到账按「本矿池在跑的机器」的瞬时算力比例分账。
-  // 这是分摊不是真相：真正能对到单机的只有份额，所以 creditedSrc 明确标成 pool_alloc。
+  // 矿池到账分摊：有份额就按份额，没有才退回瞬时算力。
+  // 份额比例比算力比例准（份额是矿池真正付钱的依据），但 v8 之前的脚本 stats 被日志截断、
+  // 拿不到 accepted，所以只有「本矿池所有在跑机器都有份额计数」时才用份额分摊。
   allocateCredit(pool, deltaPrl) {
     if (!(deltaPrl > 0)) return;
-    const open = this.leases.filter(l => !l.tEnd && l.pool === pool && (Number(l.lastHs) > 0));
-    const wsum = open.reduce((a, l) => a + Number(l.lastHs), 0);
+    const open = this.leases.filter(l => !l.tEnd && l.pool === pool);
+    if (!open.length) return;
+    const shareSum = open.reduce((a, l) => a + (Number(l.sharesAccepted) || 0), 0);
+    const useShares = shareSum > 0 && open.every(l => Number(l.sharesAccepted) > 0);
+    const w = (l) => (useShares ? Number(l.sharesAccepted) : Number(l.lastHs) || 0);
+    const wsum = open.reduce((a, l) => a + w(l), 0);
     if (!(wsum > 0)) return;
-    for (const l of open) l.creditedPrl = +((Number(l.creditedPrl) || 0) + deltaPrl * (Number(l.lastHs) / wsum)).toFixed(8);
+    for (const l of open) {
+      l.creditedPrl = +((Number(l.creditedPrl) || 0) + deltaPrl * (w(l) / wsum)).toFixed(8);
+      l.creditedSrc = useShares ? 'share_alloc' : 'pool_alloc';
+    }
     this.save();
   }
 
@@ -730,6 +738,30 @@ export class Engine {
     if (!acc.length && !rej.length) return null;
     const last = a => (a.length ? Number(a[a.length - 1][1]) : 0);
     return { accepted: last(acc), rejected: last(rej) };
+  }
+
+  // 阈值的作用域：实验参数只对 pinned 实验机生效，绝不外溢到自动租用。
+  // 没有这条时，实验用的 targetProfitPct=-50 / stopLossPct=-90 是全局的，
+  // 于是 autoRent 用实验门槛去租生产机（3060 Ti 以 −48.5% 进场就是这么来的），
+  // 而止损又因为 −90% 永远不触发——两头都错。
+  limitsFor(x) {
+    const base = {
+      targetProfitPct: Number(this.cfg.targetProfitPct),
+      stopLossPct: Number(this.cfg.stopLossPct),
+      stopLossMinutes: Number(this.cfg.stopLossMinutes),
+      hashLowPct: Number(this.cfg.hashLowPct),
+      pinned: !!x?.pinned,
+      fromOverride: false,
+      skipRoi: false,
+    };
+    if (!x?.pinned) return base;
+    const o = this.cfg.expOverride;
+    if (!o || typeof o !== 'object') {
+      // pinned 但没有覆盖：维持老语义——测量锚点不做 ROI/算力淘汰
+      return { ...base, skipRoi: true };
+    }
+    const pick = (k) => (Number.isFinite(Number(o[k])) ? Number(o[k]) : base[k]);
+    return { ...base, targetProfitPct: pick('targetProfitPct'), stopLossPct: pick('stopLossPct'), stopLossMinutes: pick('stopLossMinutes'), hashLowPct: pick('hashLowPct'), fromOverride: true };
   }
 
   // 把 vast 实例 + 矿池算力 + 行情 合成面板要的数据
@@ -793,7 +825,7 @@ export class Engine {
       else if (!ACTIVE.has(i.actual_status) && i.actual_status) phase = i.intended_status === 'stopped' ? 'stopped' : 'offline';
       else if (!everSeen) phase = managed ? 'booting' : 'unmatched';
       else if (useHs === 0) phase = 'nohash';
-      else if (roi !== null && roi < this.cfg.stopLossPct) phase = 'loss';
+      else if (roi !== null && roi < this.limitsFor({ pinned: m?.pinned, id }).stopLossPct) phase = 'loss';
       else phase = 'mining';
       const sinceHashMin = firstHashAt ? (now - firstHashAt) / MIN : 0;
       const hh = this.hashHealth({ w, arr, numGpus, perGpuHs, now, sinceHashMin, phase, pool: rp.actual });
@@ -1137,9 +1169,10 @@ export class Engine {
           continue;
         }
       }
-      // 2a) 测量锚点（pinned）：不参与 ROI 与算力淘汰，只保留"抢占/离线/部署超时"的收尾。
-      //     理由：realizedFactor 需要一台机器连续跑 ≥24h，而这台按需机在保守口径下必然是负 ROI。
-      if (m.pinned) continue;
+      // 2a) 阈值作用域：pinned 且没有 expOverride → 只保留"抢占/离线/部署超时"的收尾；
+      //     pinned 且配了 expOverride → 用实验阈值参与 ROI/算力淘汰（实验参数不外溢到别的机器）。
+      const lim = this.limitsFor(x);
+      if (lim.skipRoi) continue;
       // 2b) 竞价机的算力长期只有预期的 hashLowPct 以下：按实际产出我们是在亏钱（实测 3080 只有 56%）。
       //     按需机不套用这条（按需是包干价，且换机成本高）；竞价机直接退，不拉黑机器。
       if (x.spot && x.health === 'low' && x.firstHashAt && now - x.firstHashAt > 20 * MIN) {
@@ -1149,10 +1182,10 @@ export class Engine {
       // 3) 止损：实时收益率持续低于止损线（行情数据不新鲜、或出算力不满 10 分钟时不判断）
       if (!this.marketFresh) continue;
       if (!x.firstHashAt || now - x.firstHashAt < (POOLS[x.pool]?.perGpu ? 10 : KX_WARMUP_MIN) * MIN) continue;
-      if (x.roi !== null && x.roi < this.cfg.stopLossPct) {
-        if (!m.belowSince) { m.belowSince = now; this.save(); this.log('warn', `实例 ${x.id} 收益率 ${x.roi.toFixed(1)}% 跌破止损线 ${this.cfg.stopLossPct}%，开始计时`); }
-        else if (now - m.belowSince > this.cfg.stopLossMinutes * MIN) {
-          await this.destroy(x.id, `收益率 ${x.roi.toFixed(1)}% 持续 ${this.cfg.stopLossMinutes} 分钟低于止损线 ${this.cfg.stopLossPct}%`, 60);
+      if (x.roi !== null && x.roi < lim.stopLossPct) {
+        if (!m.belowSince) { m.belowSince = now; this.save(); this.log('warn', `实例 ${x.id} 收益率 ${x.roi.toFixed(1)}% 跌破止损线 ${lim.stopLossPct}%${lim.fromOverride ? '（实验覆盖）' : ''}，开始计时`); }
+        else if (now - m.belowSince > lim.stopLossMinutes * MIN) {
+          await this.destroy(x.id, `收益率 ${x.roi.toFixed(1)}% 持续 ${lim.stopLossMinutes} 分钟低于止损线 ${lim.stopLossPct}%`, 60);
         }
       } else if (m.belowSince && x.roi !== null) {
         m.belowSince = null; this.save();
@@ -1682,6 +1715,26 @@ export class Engine {
     num('spotBidBuffer', 0, 1); num('spotBidMultiplier', 1, 3); num('spotBidFloorRatio', 0, 1);
     num('rentMinIntervalMin', 1, 180); num('maxRentsPerHour', 1, 20); num('preemptCooldownMin', 0, 120);
     num('maxBidRaises', 0, 10);   // 0 = 不追价（默认）；>0 才允许被顶后加价保活
+    // 实验参数覆盖：只允许挂在 pinned 机器上（作用域收窄），键名与范围都校验
+    if (patch.expOverride !== undefined) {
+      const o = patch.expOverride;
+      if (o === null || o === '') next.expOverride = null;
+      else if (typeof o !== 'object') throw new Error('「expOverride」必须是对象或 null');
+      else {
+        const lim = { targetProfitPct: [-50, 1000], stopLossPct: [-100, 1000], stopLossMinutes: [1, 1440], hashLowPct: [30, 99] };
+        const out = {};
+        for (const [k, [mn, mx]] of Object.entries(lim)) {
+          if (o[k] === undefined || o[k] === '') continue;
+          const v = Number(o[k]);
+          if (!Number.isFinite(v) || v < mn || v > mx) throw new Error(`「expOverride.${k}」应在 ${mn}~${mx} 之间`);
+          out[k] = v;
+        }
+        const tl = out.targetProfitPct ?? next.targetProfitPct;
+        const sl = out.stopLossPct ?? next.stopLossPct;
+        if (sl >= tl) throw new Error('expOverride：止损线必须低于目标收益率');
+        next.expOverride = Object.keys(out).length ? out : null;
+      }
+    }
     num('minBalanceStop', 0, 1000); num('maxSourceStaleMin', 5, 1440);
     if (next.stopLossPct >= next.targetProfitPct) throw new Error('止损线必须低于目标收益率，否则会租了马上退');
     for (const k of ['poolUrl', 'image', 'minerArgs', 'proxy']) if (typeof patch[k] === 'string') next[k] = patch[k].trim();

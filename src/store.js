@@ -1,8 +1,24 @@
 // 本地存储：data/config.json（设置+密钥，只存在你电脑上）、data/state.json（运行状态）
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 export const DATA_DIR = path.resolve(process.cwd(), 'data');
+
+// 硬保护：测试模式下只允许写系统临时目录。
+// DATA_DIR 是 import 时按 cwd 算的，靠「记得先 chdir 再 import」是不牢的——
+// 2026-10-27 就有测试把数据写进了生产 data/state.json（引擎重启时报「实例 501 已不在 vast 列表中」）。
+// 这里不依赖导入顺序：只要进程处于测试模式且目标不是临时目录，直接抛错。
+const TEST_MODE = process.env.NODE_ENV === 'test' || process.argv.includes('--test') || process.env.PRL_TEST === '1';
+export function assertWritable(dir = DATA_DIR) {
+  if (!TEST_MODE) return;
+  const tmp = path.resolve(os.tmpdir());
+  const abs = path.resolve(dir);
+  if (abs !== tmp && !abs.startsWith(tmp + path.sep)) {
+    throw new Error(`测试模式拒绝写入 ${abs}（只允许系统临时目录 ${tmp}）：检查是否漏了 process.chdir`); 
+  }
+}
+assertWritable();
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 export const DEFAULT_CONFIG = {
@@ -32,6 +48,11 @@ export const DEFAULT_CONFIG = {
   maxRentsPerHour: 3,       // 每小时最多自动租几台
   maxBidRaises: 0,          // 被顶后最多加价几次（0 = 不追价：20 次改价 0 次救活，见 docs/contracts.md §8）
   preemptCooldownMin: 5,    // 竞价被收回后，冷静多久再补（分钟）
+  // 实验参数的作用域覆盖：只对 pinned（测量锚点）机器生效，绝不外溢到自动租用。
+  // 例：{ targetProfitPct: -50, stopLossPct: -90, stopLossMinutes: 120 }
+  // 为什么必须这么写：实验参数留在全局配置里，等于让 autoRent 用实验门槛去租生产机
+  // （2026-10-27 的 3060 Ti 就是以 −48.5% ROI 进场：它注定额亏，却因为止损被放到 −90% 而活着）。
+  expOverride: null,
   minBalanceStop: 5,        // 总开关：余额低于此值，一切新租停止
   maxSourceStaleMin: 60,    // 总开关：行情三源全部失效超过这么久，停止新租
   minBalanceReserve: 2,     // 余额低于它就停止新租
@@ -64,6 +85,7 @@ function readJson(f, def) {
   try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return def; }
 }
 function writeJson(f, v) {
+  assertWritable(path.dirname(f));
   const tmp = f + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(v, null, 2));
   fs.renameSync(tmp, f);
@@ -103,5 +125,5 @@ export function saveState(s) { writeJson(stateFile, s); }
 
 const logFile = path.join(DATA_DIR, 'events.log');
 export function appendLog(line) {
-  try { fs.appendFileSync(logFile, line + '\n'); } catch {}
+  try { assertWritable(path.dirname(logFile)); fs.appendFileSync(logFile, line + '\n'); } catch (e) { if (TEST_MODE && /测试模式/.test(e.message)) throw e; }
 }

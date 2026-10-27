@@ -111,5 +111,51 @@ console.log('— (b) 按型号聚合用的是每机时净收益，不是 ROI 均
   ok(r.total.leases === 3 && r.byHost.length >= 1, '总量与按房东聚合都在');
 }
 
+
+console.log('— 实验参数作用域：只对 pinned 机器生效');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.cfg.targetProfitPct = 20; e.cfg.stopLossPct = 0; e.cfg.stopLossMinutes = 30; e.cfg.hashLowPct = 85;
+  e.cfg.expOverride = { targetProfitPct: -50, stopLossPct: -90, stopLossMinutes: 120 };
+
+  const prod = e.limitsFor({ pinned: false });
+  ok(prod.stopLossPct === 0 && prod.stopLossMinutes === 30 && !prod.skipRoi, '普通机器用生产阈值（0 / 30 分钟）');
+  ok(prod.targetProfitPct === 20, '普通机器目标收益率仍是 20%（实验的 −50% 不外溢）');
+
+  const exp = e.limitsFor({ pinned: true });
+  ok(exp.stopLossPct === -90 && exp.stopLossMinutes === 120 && exp.fromOverride, 'pinned 机器用实验覆盖（−90% / 120 分钟）');
+
+  e.cfg.expOverride = null;
+  const pinnedNoOv = e.limitsFor({ pinned: true });
+  ok(pinnedNoOv.skipRoi === true, 'pinned 但没配覆盖 → 维持老语义（不参与 ROI 淘汰）');
+}
+
+console.log('— 到账分摊：有份额按份额，没份额退回算力');
+{
+  const e = new Engine();
+  e.log = () => {};
+  const mk = (id, shares, hs) => { const l = e.leaseOf(id, { gpuName: 'X', spot: true, bid: 0.1, rentedAt: Date.now() }, {}); l.pool = 'kryptex'; l.sharesAccepted = shares; l.lastHs = hs; return l; };
+  const a = mk('801', 30, 100e12), b = mk('802', 10, 100e12);
+  e.allocateCredit('kryptex', 0.4);
+  ok(Math.abs(a.creditedPrl - 0.3) < 1e-6 && Math.abs(b.creditedPrl - 0.1) < 1e-6, `份额 3:1 → 入账 0.3 / 0.1 PRL（${a.creditedPrl} / ${b.creditedPrl}）`);
+  ok(a.creditedSrc === 'share_alloc' && b.creditedSrc === 'share_alloc', 'creditedSrc 标成 share_alloc（不是算力分摊）');
+
+  const c = mk('803', 0, 200e12);
+  a.sharesAccepted = 0; b.sharesAccepted = 0;
+  e.allocateCredit('kryptex', 0.3);
+  ok(Math.abs(c.creditedPrl - 0.3 * (200 / 400)) < 1e-6, `没有份额时退回算力比例（c 得 ${c.creditedPrl}）`);
+  ok(c.creditedSrc === 'pool_alloc', '退回算力比例时 creditedSrc 标成 pool_alloc');
+}
+
+console.log('— 测试模式写保护（不依赖导入顺序）');
+{
+  const { assertWritable, DATA_DIR } = await import(U('src/store.js'));
+  ok(assertWritable(DATA_DIR) === undefined, '临时目录允许写（当前 DATA_DIR 在 tmp 下）');
+  let threw = null;
+  try { assertWritable('/data/production-data'); } catch (x) { threw = x.message; }
+  ok(threw && /测试模式/.test(threw), `非临时目录直接抛错（${String(threw).slice(0, 28)}…）`);
+}
+
 console.log(`\n${pass} 通过，${fail} 失败`);
 process.exit(fail ? 1 : 0);

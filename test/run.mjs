@@ -13,7 +13,8 @@ for (const t of ['logic-test.mjs', 'pool-test.mjs', 'miner-test.mjs', 'spot-test
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'prl-test-'));
   for (const f of ['server.js', 'package.json', 'src', 'public', 'miners']) fs.cpSync(path.join(root, f), path.join(tmp, f), { recursive: true });
   console.log(`\n=== ${t}（临时目录 ${tmp}）`);
-  const r = spawnSync(process.execPath, ['--import', path.join(here, 'mock.mjs'), path.join(here, t), tmp], { stdio: 'inherit' });
+  // NODE_ENV=test：让 src/store.js 拒绝写非临时目录（硬保护，不依赖"记得先 chdir"）
+  const r = spawnSync(process.execPath, ['--import', path.join(here, 'mock.mjs'), path.join(here, t), tmp], { stdio: 'inherit', env: { ...process.env, NODE_ENV: 'test' } });
   if (r.status !== 0) failed++;
   fs.rmSync(tmp, { recursive: true, force: true });
 }

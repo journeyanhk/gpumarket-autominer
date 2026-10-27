@@ -147,6 +147,39 @@ xG = e.instances().find(i => i.id === String(idG));
 ok(xG?.phase === 'preempted', `同样的组合但已过 3 分钟 → phase=${xG?.phase}（这才算收回）`);
 delete e.st.managed[idG];
 
+console.log('— 决策用 6 小时均值，止损用瞬时');
+{
+  const g = new Engine(); g.log = () => {};
+  g.market.price = 1.75; g.market.params = { networkHs: 88.46e18, blockTime: 194, reward: 2218.75 };
+  g.market.updatedAt = Date.now();
+  const inst = g.usdHsHr;
+  ok(g.usdHsHr6h === inst, '样本不足时回退到瞬时值');
+  // 塞 6 个样本：3 个旧值（当前×2）+ 3 个当前值 → 均值应偏高
+  g.densitySamples = [
+    { t: Date.now() - 60 * MIN, v: inst * 2 },
+    { t: Date.now() - 40 * MIN, v: inst * 2 },
+    { t: Date.now() - 20 * MIN, v: inst * 2 },
+    { t: Date.now() - 3 * MIN, v: inst },
+    { t: Date.now() - 2 * MIN, v: inst },
+    { t: Date.now() - MIN, v: inst },
+  ];
+  ok(Math.abs(g.usdHsHr6h - inst * 1.5) < inst * 0.01, `6h 均值 = ${(g.usdHsHr6h / inst).toFixed(2)}× 瞬时（符合预期 1.5×）`);
+  g.densitySamples = [{ t: Date.now() - 500 * MIN, v: inst * 5 }];
+  ok(g.usdHsHr6h === inst, '超过 6 小时的样本不计入');
+  // 每分钟只留一个点
+  g.densitySamples = [];
+  g.recordDensity(); g.recordDensity();
+  ok(g.densitySamples.length === 1, '同一分钟内多次调用只留一个样本');
+}
+
+console.log('— 代码热更新检测');
+{
+  const g = new Engine(); g.log = () => {};
+  ok(g.bootScriptMtime > 0, '启动时记录了 onstart.js 的 mtime');
+  g.bootScriptMtime = 1;   // 模拟"文件已更新"
+  ok(g.preflight().some(w => /未重载/.test(w)), 'mtime 不一致时 preflight 拦租并提示重启');
+}
+
 console.log('— thPer01 门槛是派生值，不是配置');
 {
   const g = new Engine(); g.log = () => {};

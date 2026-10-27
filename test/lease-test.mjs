@@ -201,6 +201,40 @@ console.log('— 到账分摊：增量份额 × 难度，含刚结束的租约')
   ok(f.creditedSrc === 'pool_alloc', '缺份额时 creditedSrc 如实标成 pool_alloc');
 }
 
+console.log('— 同一房东 1 小时收回 ≥2 台 → 拉黑该房东已知机器 24h');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.leases = []; e.st.leases = []; e.st.blacklist = {}; e.st.hostStats = {};
+  const now = Date.now();
+  const mk = (id, machineId, hostId, minsAgo) => {
+    const l = newLease(id, { gpuName: 'RTX 3080', spot: true, bid: 0.1, rentedAt: now - 3600_000, machineId, hostId }, {}, now - 3600_000);
+    l.endReason = 'host_reclaim'; l.tEnd = now - minsAgo * MIN_;
+    e.leases.push(l);
+    return l;
+  };
+  const a = mk('1', 146144, 90577, 20);
+  mk('2', 139830, 90577, 30);      // 同房东的另一台（历史记录，已知机器）
+  let rec = e.recordHostReclaim(a, { machine_id: 146144 });
+  ok(rec.reclaims.length === 1 && !rec.blacklistedUntil, '第 1 台收回：只记数，不拉黑');
+  ok(Object.keys(e.st.blacklist).length === 0, '第 1 台收回不产生黑名单');
+
+  const b = mk('3', 147000, 90577, 0);
+  rec = e.recordHostReclaim(b, { machine_id: 147000 });
+  ok(rec.blacklistedUntil > now, '第 2 台收回：房东进入 24h 黑名单');
+  const ids = Object.keys(e.st.blacklist).map(String);
+  ok(ids.includes('146144') && ids.includes('139830') && ids.includes('147000'),
+     `该房东已知的 ${ids.length} 台机器全部拉黑（${ids.join(',')}）`);
+  ok(Object.values(e.st.blacklist).every(v => v.reason.includes('同一房东')), '黑名单原因写明是房东收回，不是机器坏');
+
+  // 另一房东不受牵连
+  const c = mk('4', 145135, 379343, 0);
+  const rec2 = e.recordHostReclaim(c, { machine_id: 145135 });
+  ok(rec2.reclaims.length === 1 && !rec2.blacklistedUntil, '另一个房东只有 1 次收回 → 不拉黑');
+  ok(!Object.keys(e.st.blacklist).includes('145135'), '不同房东互不牵连');
+}
+
+
 console.log('— 测试模式写保护（不依赖导入顺序）');
 {
   const { assertWritable, DATA_DIR } = await import(U('src/store.js'));

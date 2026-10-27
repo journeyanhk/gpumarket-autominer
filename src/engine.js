@@ -644,6 +644,31 @@ export class Engine {
     }
   }
 
+  // 房东维度的收回统计：同一房东短时间内收回多台，是比"型号"更强的信号。
+  // 一条回收/一次维护就能带走 2~3 台，把它当成"三次独立事件"会让型号排名全被噪声污染。
+  // 规则（用户 2026-10-27 约定）：同一房东 1 小时内收回 ≥2 台 → 该房东已知机器全部拉黑 24h。
+  recordHostReclaim(lease, inst) {
+    const host = lease?.hostId ?? inst?.host_id ?? null;
+    if (host == null) return null;
+    const now = Date.now();
+    const st = this.st.hostStats ||= {};
+    const rec = st[host] ||= { reclaims: [], machines: [], blacklistedUntil: 0 };
+    rec.reclaims = (rec.reclaims || []).filter(t => now - t < 60 * MIN);
+    rec.reclaims.push(now);
+    const machines = new Set((rec.machines || []).filter(Boolean));
+    for (const l of this.leases) if (String(l.hostId) === String(host) && l.machineId != null) machines.add(l.machineId);
+    if (lease?.machineId != null) machines.add(lease.machineId);
+    if (inst?.machine_id != null) machines.add(inst.machine_id);
+    rec.machines = [...machines];
+    if (rec.reclaims.length >= 2 && !(rec.blacklistedUntil > now)) {
+      rec.blacklistedUntil = now + 24 * 60 * MIN;
+      for (const id of rec.machines) this.st.blacklist[id] = { until: rec.blacklistedUntil, reason: `同一房东 ${host} 1 小时内收回 ${rec.reclaims.length} 台` };
+      this.log('warn', `房东 ${host} 1 小时内收回 ${rec.reclaims.length} 台，已把该房东已知的 ${rec.machines.length} 台机器拉黑 24h（同批收回按一次事件处理）`);
+    }
+    this.save();
+    return rec;
+  }
+
   // ---------- 租约台账 ----------
   // 一台机器一条记录，从租下跟到销毁。refreshVast 每轮补字段，destroy 时定终局。
   trimLeases() {
@@ -1691,7 +1716,9 @@ export class Engine {
       await this.vast.destroy(id);
       if (blacklistMin && inst?.machine_id) this.st.blacklist[inst.machine_id] = { until: Date.now() + blacklistMin * MIN, reason };
       // 台账定终局（要在删 managed 之前：租约里有出价/份额等细节）
-      this.closeLeaseFor(id, { reason });
+      const closed = this.closeLeaseFor(id, { reason });
+      // 房东收回（不是价格问题）→ 计入房东统计，必要时拉黑整个房东的已知机器
+      if (closed && closed.endReason === 'host_reclaim') this.recordHostReclaim(closed, inst);
       delete this.st.managed[id];
       // 竞价被收回 → 进入冷静期，别立刻再去同一个市场抢
       if (/竞价被抢占|竞价被收回/.test(reason)) {

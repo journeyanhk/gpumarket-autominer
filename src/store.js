@@ -118,6 +118,7 @@ export function loadState() {
     calib: {},       // gpuKey -> { th, samples }
     history: [],     // [{ t, price, netEh, usdPerThDay, spend, revenue }]
     leases: [],      // 租约台账：一台机器一条完整生命周期记录（见 src/leases.js）
+    hostStats: {},   // 房东维度：1 小时内收回 ≥2 台 → 该房东已知机器拉黑 24h
     ...readJson(stateFile, {}),
   };
 }

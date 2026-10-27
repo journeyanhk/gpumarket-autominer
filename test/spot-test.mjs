@@ -140,6 +140,23 @@ xG = e.instances().find(i => i.id === String(idG));
 ok(xG?.phase === 'preempted', `同样的组合但已过 3 分钟 → phase=${xG?.phase}（这才算收回）`);
 delete e.st.managed[idG];
 
+console.log('— 租用节流：抢占冷静期 / 最小间隔 / 每小时上限');
+{
+  const g = new Engine(); g.log = () => {};
+  g.cfg.rentMinIntervalMin = 10; g.cfg.maxRentsPerHour = 3; g.cfg.preemptCooldownMin = 5;
+  g.rentTimes = []; g.preemptCooldownUntil = 0;
+  ok(g.rentAllowed().ok === true, '干净状态下允许租');
+  g.preemptCooldownUntil = Date.now() + 3 * MIN;
+  ok(g.rentAllowed().ok === false && /冷静期/.test(g.rentAllowed().why), '竞价被收回后进入冷静期（不再立刻补）');
+  g.preemptCooldownUntil = 0;
+  g.rentTimes = [Date.now() - 2 * MIN];
+  ok(g.rentAllowed().ok === false && /不足 10 分钟/.test(g.rentAllowed().why), '距上次租用不足最小间隔 → 拦');
+  g.rentTimes = [Date.now() - 20 * MIN, Date.now() - 15 * MIN, Date.now() - 11 * MIN];
+  ok(g.rentAllowed().ok === false && /本小时已租 3 台/.test(g.rentAllowed().why), '每小时上限 3 台 → 拦');
+  g.rentTimes = [Date.now() - 70 * MIN];
+  ok(g.rentAllowed().ok === true, '超过 1 小时的旧记录不再计数');
+}
+
 console.log('— 平台 stop：actual 还是 created（实测确认的组合）');
 e.offers = []; await e.scan(true);
 const pickD = e.offers.filter(o => !o.spotSkip && o.roi !== null && o.roi >= 30)[0];

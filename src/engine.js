@@ -53,6 +53,8 @@ export class Engine {
     this.scanPausedUntil = this.st.scanPause?.until > Date.now() ? this.st.scanPause.until : 0; // 额度暂停跨重启保留
     this.pauseReason = this.scanPausedUntil ? this.st.scanPause.reason : null;
     this.lastRentAt = 0;
+    this.rentTimes = [];              // 最近一小时的自动租用时间点
+    this.preemptCooldownUntil = 0;    // 竞价被收回后的冷静期
     this.busy = new Set();
     this.everHashed = new Set();
     this.rigLogs = new Map(); // instanceId -> { t, text }
@@ -919,6 +921,19 @@ export class Engine {
     };
   }
 
+  // 租用节流：被顶 → 秒补 → 再被顶 的拉锯会烧掉部署时间和失败成本。
+  // 三个闸门：冷却期（抢占后）、最小间隔、每小时上限。
+  rentAllowed(now = Date.now()) {
+    if (now < (this.rentCooldownUntil || 0)) return { ok: false, why: '429 退避中' };
+    if (now < (this.preemptCooldownUntil || 0)) return { ok: false, why: `竞价被收回后的冷静期（剩 ${Math.ceil((this.preemptCooldownUntil - now) / 60000)} 分钟）` };
+    this.rentTimes = (this.rentTimes || []).filter(t => now - t < 60 * MIN);
+    if (this.rentTimes.length >= (this.cfg.maxRentsPerHour || 3)) return { ok: false, why: `本小时已租 ${this.rentTimes.length} 台（上限 ${this.cfg.maxRentsPerHour}）` };
+    const last = this.rentTimes[this.rentTimes.length - 1] || 0;
+    const gap = (this.cfg.rentMinIntervalMin || 10) * MIN;
+    if (last && now - last < gap) return { ok: false, why: `距上次租用不足 ${this.cfg.rentMinIntervalMin} 分钟` };
+    return { ok: true };
+  }
+
   async autoRent(list) {
     if (Date.now() < (this.rentCooldownUntil || 0)) return; // 429 退避期内不下单
     if (Date.now() - this.lastRentAt < 60_000) return;
@@ -942,6 +957,9 @@ export class Engine {
       this._warnOnce('runway', `余额 $${this.account.vastBalance.toFixed(2)} 只够每小时花 $${spendCap.toFixed(2)}（续航 ${this.cfg.minRunwayHours} 小时），现在已花 $${b.spend.toFixed(2)}/h，停止新租；充值后会自动继续`);
       return;
     }
+    // 节流闸门：放在"没钱/续航不够"这些真实原因之后，只拦"刚租过/刚被顶过"的频率问题
+    const gate = this.rentAllowed();
+    if (!gate.ok) { this._warnOnce('rentgate', `暂停新租：${gate.why}`); return; }
     // 一轮把达标的都抢下来（最多 5 台），不再每分钟只租一台；被别人抢走就直接试下一台，每轮最多下 8 次单
     let rented = 0, tries = 0, spend = b.spend, roomSpend = b.roomSpend, roomCount = b.roomCount, used = 0;
     for (const pick of affordable) {
@@ -1002,6 +1020,7 @@ export class Engine {
         sv: SCRIPT_VERSION, pools: poolIds, pool: def, mode: this.cfg.launchMode === 'args' ? 'args' : 'ssh',
       };
       this.save();
+      if (by === 'auto') { this.rentTimes.push(Date.now()); this.save(); }
       this.log('success', `${tag}租用 ${offer.numGpus}×${offer.gpuName}（实例 ${id}）${offer.spot ? '竞价出价' : ''}$${offer.dph.toFixed(4)}/h，挖 ${poolName(def)}，预计收益率 ${offer.roi.toFixed(1)}%`);
       setTimeout(() => this.refreshVast(), 3000);
       return id;
@@ -1010,6 +1029,8 @@ export class Engine {
       if (/no_such_ask|not available|unavailable/i.test(e.message)) {
         this.offers = this.offers.filter(o => o.id !== offer.id);
         this.lastRentAt = 0;
+    this.rentTimes = [];              // 最近一小时的自动租用时间点
+    this.preemptCooldownUntil = 0;    // 竞价被收回后的冷静期
         this.log('info', `${offer.numGpus}×${offer.gpuName} $${offer.dph.toFixed(3)}/h 已被别人抢先租走${by === 'auto' ? '，换下一台' : ''}`);
         // 同一台机器 2 小时内第 2 次「刚被租走」：多半是一直挂在列表里、实际租不了的机器，屏蔽 2 小时，别再浪费下单机会
         if (offer.machineId) {
@@ -1032,6 +1053,8 @@ export class Engine {
       if (/GPU conflict|already rented/i.test(e.message)) {
         this.offers = this.offers.filter(o => o.id !== offer.id);
         this.lastRentAt = 0;
+    this.rentTimes = [];              // 最近一小时的自动租用时间点
+    this.preemptCooldownUntil = 0;    // 竞价被收回后的冷静期
         this.log('info', `${offer.numGpus}×${offer.gpuName} 下单时已被占用（GPU conflict），换下一台`);
         const err = new Error('这台机器刚被别人租走了，换一台试试');
         err.gone = true;
@@ -1047,6 +1070,8 @@ export class Engine {
       if (offer.spot && /bid|price|too low|min_bid/i.test(e.message)) {
         this.offers = this.offers.filter(o => o.id !== offer.id);
         this.lastRentAt = 0;
+    this.rentTimes = [];              // 最近一小时的自动租用时间点
+    this.preemptCooldownUntil = 0;    // 竞价被收回后的冷静期
         this.log('info', `${offer.numGpus}×${offer.gpuName} 竞价出价 $${(offer.bid ?? 0).toFixed(4)}/h 低于当前最低价${by === 'auto' ? '，换下一台' : ''}（${e.message.slice(0, 80)}）`);
         const err = new Error('出价低于当前最低价，换一台试试');
         err.gone = true;
@@ -1279,6 +1304,10 @@ export class Engine {
       await this.vast.destroy(id);
       if (blacklistMin && inst?.machine_id) this.st.blacklist[inst.machine_id] = { until: Date.now() + blacklistMin * MIN, reason };
       delete this.st.managed[id];
+      // 竞价被收回 → 进入冷静期，别立刻再去同一个市场抢
+      if (/竞价被抢占|竞价被收回/.test(reason)) {
+        this.preemptCooldownUntil = Date.now() + (this.cfg.preemptCooldownMin || 5) * MIN;
+      }
       this.save();
       this.log('warn', `已退租实例 ${id}（${inst ? `${inst.num_gpus}×${inst.gpu_name}` : ''}）：${reason}`);
       setTimeout(() => this.refreshVast(), 2000);

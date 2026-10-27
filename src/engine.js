@@ -116,6 +116,20 @@ export class Engine {
   // 旧公式 min(收入/1.12, max(入场×1.1, 收入×1.05)) 其实永远等于 收入/1.12 ——
   // 每次都按利润上限出价，12% 的利润全让给了房东，还是被顶。
   // 新公式把利润留在自己手里：入场价×1.25 已经超过上限就直接不租。
+  // thPer01 门槛是派生值，不是配置：minThPer01 = 0.1 × (1+目标ROI) ÷ 每 TH 每小时收入。
+  // 币价/难度一变它就变，写死等于埋第二个真相源。
+  get minThPer01() {
+    const perThHr = this.usdHsHr * 1e12;          // $/TH/小时（已含该矿池费率）
+    if (!(perThHr > 0)) return null;
+    return 0.1 * (1 + this.cfg.targetProfitPct / 100) / perThHr;
+  }
+  // 某台机器的 thPer01（用实际会付的价：spot 用出价、按需用 dph_total）
+  thPer01Of(offer) {
+    const th = Number(offer.th) || 0, dph = Number(offer.dph) || 0;
+    if (!(th > 0) || !(dph > 0)) return null;
+    return (th / (dph / 0.1));
+  }
+
   bidPrice(revenueHr, minBid = 0) {
     if (!(revenueHr > 0)) return null;
     const upper = revenueHr / (1 + this.cfg.targetProfitPct / 100);
@@ -389,8 +403,14 @@ export class Engine {
         if (m && Number(i.dph_total) > 0) {
           const old = Number(m.dph) || 0, now = Number(i.dph_total);
           if (!old || Math.abs(now - old) / Math.max(old, now) > 0.05) {
-            m.dph = now; m.dphListed = old || null; this.save();
-            if (old) this.log('warn', `实例 ${i.id} 实际租金 $${now.toFixed(4)}/h 与记录的 $${old.toFixed(4)} 不符，已按实际值计算 ROI`);
+            m.dph = now; m.dphListed = old || null;
+            if (old) {
+              const dev = Math.abs(now - old) / Math.max(old, now);
+              this.log('warn', `实例 ${i.id} 实际租金 $${now.toFixed(4)}/h 与记录的 $${old.toFixed(4)} 不符（偏差 ${(dev * 100).toFixed(0)}%），已按实际值计算 ROI`);
+              // spot：这种偏差只会来自"搜索页价 ≠ 成交价"，租下去就是亏，直接处置
+              if (m.spot && now > old * 1.05) { m.priceMismatch = Date.now(); this.log('warn', `实例 ${i.id} 是竞价机且实际价高于预期，标记为需销毁`); }
+            }
+            this.save();
           }
         }
         // 注意：不要因为 actual_status 短暂回到 running 就清掉抢占计时。
@@ -822,6 +842,8 @@ export class Engine {
         blacklisted: bl && bl.until > now ? bl.reason : null,
       }, usd);
       offer.thPer01 = offer.th / (offer.dph / 0.1);
+      const line = this.minThPer01;
+      offer.passLine = line == null ? null : offer.thPer01 >= line;
       out.push(offer);
     }
     out.sort((a, b) => (b.roi ?? -Infinity) - (a.roi ?? -Infinity));
@@ -879,6 +901,11 @@ export class Engine {
       const m = this.st.managed[x.id] || (this.st.managed[x.id] = { rentedAt: x.startedAt, gpuName: x.gpuName, numGpus: x.numGpus, machineId: x.machineId });
       // 0) 刚重启 / 正在换矿池：给它时间恢复，期间不做任何退租判断
       if (x.phase === 'restarting' || x.phase === 'switching') continue;
+      // 0a) 租后核价不符（平台实际价 > 预期 5%）的竞价机：不划算，直接退
+      if (m.priceMismatch) {
+        await this.destroy(x.id, `实际租金 $${Number(x.dph).toFixed(4)}/h 高于下单价（平台改价），不划算`, 0);
+        continue;
+      }
       // 0b) 竞价被抢占：先试"改价保活"（一次改价零成本，一次重部署 3 分钟），改不动再销毁
       if (x.phase === 'preempted') {
         if (await this.tryRaiseBid(x, m, now)) continue;
@@ -977,6 +1004,12 @@ export class Engine {
   // 租用节流：被顶 → 秒补 → 再被顶 的拉锯会烧掉部署时间和失败成本。
   // 三个闸门：冷却期（抢占后）、最小间隔、每小时上限。
   rentAllowed(now = Date.now()) {
+    // 总开关：余额见底或行情全部失效时，一切新租停止（与 fail-closed 配套的最后一道闸）
+    const bal = this.account.vastBalance;
+    const minBal = Number(this.cfg.minBalanceStop ?? 5);
+    if (bal != null && bal < minBal) return { ok: false, why: `余额 $${bal.toFixed(2)} < 下限 $${minBal}` };
+    const staleMin = this.market.updatedAt ? (now - this.market.updatedAt) / MIN : 999;
+    if (staleMin > Number(this.cfg.maxSourceStaleMin ?? 60)) return { ok: false, why: `行情已 ${Math.round(staleMin)} 分钟没更新` };
     if (now < (this.rentCooldownUntil || 0)) return { ok: false, why: '429 退避中' };
     if (now < (this.preemptCooldownUntil || 0)) return { ok: false, why: `竞价被收回后的冷静期（剩 ${Math.ceil((this.preemptCooldownUntil - now) / 60000)} 分钟）` };
     this.rentTimes = (this.rentTimes || []).filter(t => now - t < 60 * MIN);
@@ -1076,7 +1109,10 @@ export class Engine {
       if (by === 'auto') { this.rentTimes.push(Date.now()); this.save(); }
       // 出价/收入比要进日志：spot 的"清算比例"就是靠这批样本的中位数算出来的
       const ratio = offer.spot && offer.revenueHr > 0 ? `（出价/收入 ${(offer.dph / offer.revenueHr * 100).toFixed(0)}%）` : '';
-      this.log('success', `${tag}租用 ${offer.numGpus}×${offer.gpuName}（实例 ${id}）${offer.spot ? '竞价出价' : ''}$${offer.dph.toFixed(4)}/h${ratio}，挖 ${poolName(def)}，预计收益率 ${offer.roi.toFixed(1)}%`);
+      const line = this.minThPer01;
+      const tp = this.thPer01Of(offer);
+      const lineTxt = line && tp ? `｜${Math.round(tp).toLocaleString('en-US')} TH/$0.1h，今日线 ${Math.round(line)}，${tp >= line ? '过线' : '不过线'}` : '';
+      this.log('success', `${tag}租用 ${offer.numGpus}×${offer.gpuName}（实例 ${id}）${offer.spot ? '竞价出价' : ''}$${offer.dph.toFixed(4)}/h${ratio}，挖 ${poolName(def)}，预计收益率 ${offer.roi.toFixed(1)}%${lineTxt}`);
       setTimeout(() => this.refreshVast(), 3000);
       return id;
     } catch (e) {
@@ -1418,7 +1454,11 @@ export class Engine {
     num('maxHourlySpend', 0, 1000); num('minBalanceReserve', 0, 100000); num('stopLossMinutes', 1, 1440);
     num('bootTimeoutMinutes', 5, 120); num('hashLowPct', 30, 99); num('minerStartTimeoutMinutes', 3, 60); num('minRunwayHours', 1, 720); num('minReliability', 0, 1); num('minInetDown', 0, 100000);
     num('maxGpusPerMachine', 1, 16); num('minCuda', 0, 20); num('disk', 8, 200); num('scanIntervalSec', 60, 3600); num('scanRows', 20, 1000);
-    num('failoverMinutes', 2, 60); num('spotBidFactor', 0.1, 1.5); // 允许 >1：出价可以高于收入（负 ROI），用于测「加价能否站住」 num('spotBidBuffer', 0, 1);
+    num('failoverMinutes', 2, 60);
+    num('spotBidFactor', 0.1, 1.5); // 允许 >1：出价可以高于收入（负 ROI），用于测「加价能否站住」
+    num('spotBidBuffer', 0, 1); num('spotBidMultiplier', 1, 3); num('spotBidFloorRatio', 0, 1);
+    num('rentMinIntervalMin', 1, 180); num('maxRentsPerHour', 1, 20); num('preemptCooldownMin', 0, 120);
+    num('minBalanceStop', 0, 1000); num('maxSourceStaleMin', 5, 1440);
     if (next.stopLossPct >= next.targetProfitPct) throw new Error('止损线必须低于目标收益率，否则会租了马上退');
     for (const k of ['poolUrl', 'image', 'minerArgs', 'proxy']) if (typeof patch[k] === 'string') next[k] = patch[k].trim();
     if (patch.launchMode === 'args' || patch.launchMode === 'ssh') next.launchMode = patch.launchMode;

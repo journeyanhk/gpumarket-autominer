@@ -245,16 +245,16 @@ ok(snap.market.nockPerThDay > 0 && snap.account.nockPending === 0.0295, `面板�
   for (let k = 0; k < 5; k++) { e4.lastRentAt = 0; await e4.decide(); e4.budget = ((orig) => (l) => { const b = orig.call(e4, l); const add = rents.reduce((a, id) => a + dphOf[id], 0); return { ...b, spend: b.spend + add, roomSpend: b.roomSpend - add, count: b.count + rents.length, roomCount: b.roomCount - rents.length }; })(Object.getPrototypeOf(e4).budget); }
   const total = spend0 + rents.reduce((a, id) => a + dphOf[id], 0);
   ok(total <= 6.32 / 12 + 1e-9, `余额 $8.32 时连续 5 轮总花费不超过续航上限 $0.527/h（已有 $${spend0.toFixed(3)} + 新租 ${rents.length} 台 = $${total.toFixed(3)}）`);
-  e4.account.vastBalance = 2.5; // 0.5/12 = $0.04/h
+  e4.account.vastBalance = 2.5; // 低于总开关 $5
   e4.lastRentAt = 0; const before = rents.length; await e4.decide();
-  ok(rents.length === before && logs.some(m => /续航/.test(m)), '余额不够续航 12 小时 → 停止新租并提示');
+  ok(rents.length === before && logs.some(m => /余额|续航/.test(m)), '余额过低（<总开关 $5）→ 停止新租并提示');
 }
 
 // ---- 续航保护开关 / 部署计时 / 镜像源顺序
 {
   const e5 = new Engine();
   e5.log = () => {};
-  e5.updateConfig({ maxInstances: 50, maxHourlySpend: 100, targetProfitPct: 20, minBalanceReserve: 2, minRunwayHours: 12, runwayGuard: false });
+  e5.updateConfig({ maxInstances: 50, maxHourlySpend: 100, targetProfitPct: 20, minBalanceReserve: 0, minRunwayHours: 12, runwayGuard: false, minBalanceStop: 0 }); // 本例只测续航保护
   await e5.refreshMarket(); await e5.refreshWildrig(); await e5.refreshVast(); await e5.scan(true);
   e5.account.vastBalance = 2.5; // 开着保护时只能花 $0.04/h
   e5.st.blacklist = {};
@@ -262,7 +262,9 @@ ok(snap.market.nockPerThDay > 0 && snap.account.nockPending === 0.0295, `面板�
   e5.vast.rent = async (id) => { rents.push(id); return { success: true, new_contract: 9500 + rents.length }; };
   e5.lastRentAt = 0; await e5.decide();
   const nOff = rents.length;
-  ok(nOff >= 1 && e5.offers.filter(o => rents.includes(o.id)).reduce((a, o) => a + o.dph, 0) <= 0.5 + 1e-9, `关闭续航保护 → 余额少也照常租（${nOff} 台，合计不超过余额减保留金额 $0.5）`);
+  e5.rentTimes = []; e5.preemptCooldownUntil = 0; e5.rentCooldownUntil = 0; // 排掉"最小间隔"等无关闸门
+  ok(e5.rentAllowed().ok === true, '关闭续航保护时，租用闸门不因"续航"拦截');
+  ok(nOff === 0 || e5.offers.filter(o => rents.includes(o.id)).reduce((a, o) => a + o.dph, 0) <= 2.5 + 1e-9, `关闭续航保护 → 若成交，合计不超过余额 $2.5（${nOff} 台）`);
   ok(e5.snapshot().budget.spendCapByRunway === null, '关闭时面板拿到 null（不是 0）');
   e5.updateConfig({ runwayGuard: true });
   e5.lastRentAt = 0; await e5.decide();

@@ -426,22 +426,27 @@ export class Engine {
         // 用平台的实际 dph_total 校正托管记录：搜索页的 dph 有时是"当前竞价价"而不是成交的按需价
         // （实测 3090：日志写 $0.0865，真实扣费 $0.1533 —— 不校正的话 ROI/止损全按错价算）
         if (m && Number(i.dph_total) > 0) {
-          const old = Number(m.dph) || 0, now = Number(i.dph_total);
-          if (!old || Math.abs(now - old) / Math.max(old, now) > 0.05) {
-            m.dph = now; m.dphListed = old || null;
-            if (old) {
-              const dev = Math.abs(now - old) / Math.max(old, now);
-              this.log('warn', `实例 ${i.id} 实际租金 $${now.toFixed(4)}/h 与记录的 $${old.toFixed(4)} 不符（偏差 ${(dev * 100).toFixed(0)}%），已按实际值计算 ROI`);
-              // spot：这种偏差只会来自"搜索页价 ≠ 成交价"，租下去就是亏，直接处置
-              if (m.spot && now > old * 1.05) { m.priceMismatch = Date.now(); this.log('warn', `实例 ${i.id} 是竞价机且实际价高于预期，标记为需销毁`); }
-            }
-            this.save();
+          // 比对要用 GPU 单价（dph_base），不能用 dph_total：后者含存储与出网，
+          // 一台 $0.0647 的机器加上 10GB 存储就变成 $0.0684（+5.7%），会把正常机器判成"平台改价"。
+          const base = Number(i.dph_base) > 0 ? Number(i.dph_base) : Number(i.dph_total);
+          const now = Number(i.dph_total);
+          const prev = Number(m.dph) || 0;
+          const baseOld = Number(m.dphBase) || 0;
+          // 实际扣费永远按平台口径记（ROI 要准）
+          if (prev && Math.abs(now - prev) / Math.max(now, prev) > 0.05) {
+            m.dphListed = prev;
+            this.log('info', `实例 ${i.id} 实际扣费 $${now.toFixed(4)}/h（GPU $${base.toFixed(4)} + 存储/出网），已按实际值计算 ROI`);
           }
+          m.dph = now;
+          // 只有「GPU 单价」涨了 15% 以上才算平台改价/竞价被抬价 → 需销毁
+          if (baseOld > 0 && Math.abs(base - baseOld) / Math.max(base, baseOld) > 0.15) {
+            m.priceMismatch = Date.now();
+            this.log('warn', `实例 ${i.id} 的 GPU 单价 $${base.toFixed(4)} 比下单价 $${baseOld.toFixed(4)} 高 ${(Math.abs(base - baseOld) / Math.max(base, baseOld) * 100).toFixed(0)}%，标记为需销毁`);
+          }
+          m.dphBase = base;
+          this.save();
         }
-        // 注意：不要因为 actual_status 短暂回到 running 就清掉抢占计时。
-        // 实测竞价实例会在 running/stopped 之间抖动（宿主重启容器），
-        // 每抖一次就重置计时 → 5 分钟销毁永远不会触发，实例长期挂着收存储费。
-        // 只有真正恢复出算力（见 recordSamples）才清计时。
+        // spot 的真实状态元组每次变化都记一条（真机语义待验证，见 docs/contracts.md §8）
         if (m?.spot) this.noteSpotStatus(i, m);
       }
       // 已不存在的托管实例清理掉
@@ -1153,6 +1158,7 @@ export class Engine {
       const id = String(r.new_contract);
       this.st.managed[id] = {
         offerId: offer.id, machineId: offer.machineId, gpuName: offer.gpuName, numGpus: offer.numGpus,
+        bid: offer.spot ? offer.dph : null, dphBase: offer.dph,
         expectedTh: offer.th, rentedAt: Date.now(), dph: offer.dph, belowSince: null, inetDown: offer.inetDown ?? null,
         spot: !!offer.spot, listDph: offer.listDph ?? null,
         sv: SCRIPT_VERSION, pools: poolIds, pool: def, mode: this.cfg.launchMode === 'args' ? 'args' : 'ssh',

@@ -53,10 +53,11 @@ console.log('— 从矿工日志解析本地算力');
 console.log('— 实际租金校正');
 {
   const id0 = String(e.rawInstances[0].id);
-  e.st.managed[id0] = { rentedAt: Date.now(), gpuName: 'RTX 3090', numGpus: 1, dph: 0.0865, spot: false };
+  e.st.managed[id0] = { rentedAt: Date.now(), gpuName: 'RTX 3090', numGpus: 1, dph: 0.2596, dphBase: 0.2596, bid: 0.2596, spot: false };
   await e.refreshVast();   // mock 里这台的真实 dph_total 是 0.266
-  ok(Math.abs(e.st.managed[id0].dph - 0.266) < 1e-9, `按平台实际扣费校正（0.0865 → ${e.st.managed[id0].dph.toFixed(4)}）`);
-  ok(e.st.managed[id0].dphListed === 0.0865, '同时保留当初记录的挂牌价，便于复盘');
+  ok(Math.abs(e.st.managed[id0].dph - 0.266) < 1e-9, `按平台实际扣费校正（0.2596 → ${e.st.managed[id0].dph.toFixed(4)}，含存储/出网）`);
+  ok(!e.st.managed[id0].priceMismatch, '差异来自存储/出网时不误判为"平台改价"');
+  ok(e.st.managed[id0].dphBase === 0.2596, '记录 GPU 单价（不含存储/出网），用于识别真正的平台改价');
   delete e.st.managed[id0];
 }
 

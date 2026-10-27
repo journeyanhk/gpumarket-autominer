@@ -329,6 +329,25 @@ await e.decide();
 ok(raised.length === 1, `第一次被顶 → 调了一次改价（${raised[0]?.[1]}）`);
 ok(!e.st.managed[idK]?.preemptedAt, '改价成功后清掉销毁计时（继续观察）');
 ok(e.st.managed[idK]?.bidRaises?.length === 1, '记录本小时改价次数');
+
+console.log('— 核价基准跟随「自己抬过的价」（57935994 被顶后反被判「平台改价」）');
+{
+  const raisedTo = e.st.managed[idK].bid;
+  ok(Math.abs(raisedTo - raised[0][1]) < 1e-9, `抬价成功后 m.bid 跟随新出价（$${raisedTo}）`);
+  // 平台把 dph_base 补齐之前：dph_total 已经是新出价，dph_base 还停在旧下单价
+  globalThis.__setPrice(idK, raisedTo, pickK.dph);
+  await e.refreshVast();
+  ok(!e.st.managed[idK].priceDeviationPct, '自己抬的价不会被当成「平台改价」');
+  ok(Math.abs(e.st.managed[idK].dphBase - raisedTo) < 1e-9, `核价基准取 max(平台单价, 自己出价) = $${e.st.managed[idK].dphBase}`);
+  // 平台真的涨过我们出过的价 → 仍然要报，不能因为加了基准就把真改价一起吞掉
+  globalThis.__setPrice(idK, +(raisedTo * 1.5).toFixed(4), pickK.dph);
+  await e.refreshVast();
+  ok(e.st.managed[idK].priceDeviationPct > 40, `平台真改价仍然报偏差（${e.st.managed[idK]?.priceDeviationPct}%）`);
+  // 复位，后面的"改价 3 次上限"用例要按原价跑
+  globalThis.__setPrice(idK, pickK.dph, pickK.dph);
+  delete e.st.managed[idK].priceDeviationPct;
+  await e.refreshVast();
+}
 // 再被顶两次仍可改，第 4 次不再改（交给销毁）
 for (let i = 0; i < 3; i++) { globalThis.__preempt(idK); await e.refreshVast(); await e.decide(); }
 ok(e.st.managed[idK]?.bidRaises?.length === 3, `每小时最多 3 次改价（当前 ${e.st.managed[idK]?.bidRaises?.length}）`);

@@ -35,6 +35,14 @@ globalThis.__instanceStatus = (id, actual, intended = 'running', msg = '') => {
   if (i) { i.actual_status = actual; i.intended_status = intended; i.status_msg = msg; i.cur_state = actual; i.next_state = actual; }
 };
 globalThis.__kxEarned = 0;
+// 模拟平台侧的计费字段：dph_total = 实际扣费（含存储/出网），dph_base = GPU 单价
+globalThis.__setPrice = (id, total, base) => {
+  const i = instances.find(x => x.id === +String(id));
+  if (!i) return null;
+  if (total != null) i.dph_total = total;
+  if (base != null) i.dph_base = base;
+  return { total: i.dph_total, base: i.dph_base };
+};
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, opt = {}) => {
   const u = new URL(url);

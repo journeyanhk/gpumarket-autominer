@@ -432,17 +432,22 @@ export class Engine {
           const base = Number(i.dph_base) > 0 ? Number(i.dph_base) : Number(i.dph_total);
           const now = Number(i.dph_total);
           const storageHr = (Number(i.storage_cost) || 0) * (Number(this.cfg.disk) || 10) / 730;
-          const expected = base + storageHr;
+          // 核价基准必须跟上「我们自己出过的价」：被顶时 tryRaiseBid 抬价是主动保活，
+          // 抬完到平台把 dph_base 补齐之间有一段窗口，此时若拿旧下单价当基准，
+          // 就会把这次抬价判成「平台改价」（实例 57935994 被顶到 $0.1439 后就是这么被旧规则判死的）。
+          // 用 max(平台 GPU 单价, 自己出过的价)：自己抬的价不算平台改价，平台真涨过我们的出价照样报。
+          const selfBid = Number(m.bid) || 0;
+          const refBase = Math.max(base, selfBid);
+          const expected = refBase + storageHr;
           const prev = Number(m.dph) || 0;
           if (prev && Math.abs(now - prev) / Math.max(now, prev) > 0.05) m.dphListed = prev;
-          m.dph = now; m.dphBase = base;
+          m.dph = now; m.dphBase = refBase;
           if (expected > 0 && now / expected - 1 > 0.05) {
             m.priceDeviationPct = +((now / expected - 1) * 100).toFixed(1);
-            this.log('warn', `实例 ${i.id} 实际扣费 $${now.toFixed(4)}/h 比预期 $${expected.toFixed(4)}（GPU $${base.toFixed(4)}+存储 $${storageHr.toFixed(4)}）高 ${m.priceDeviationPct}%，按实际价计 ROI，由止损决定去留`);
+            this.log('warn', `实例 ${i.id} 实际扣费 $${now.toFixed(4)}/h 比预期 $${expected.toFixed(4)}（GPU $${refBase.toFixed(4)}${selfBid > base ? '（含自己抬价）' : ''}+存储 $${storageHr.toFixed(4)}）高 ${m.priceDeviationPct}%，按实际价计 ROI，由止损决定去留`);
           } else if (m.priceDeviationPct) {
             delete m.priceDeviationPct;
           }
-          m.dphBase = base;
           this.save();
         }
         // spot 的真实状态元组每次变化都记一条（真机语义待验证，见 docs/contracts.md §8）
@@ -1244,9 +1249,14 @@ export class Engine {
     try {
       await this.vast.setBidPrice(x.id, +target.toFixed(4));
       m.bidRaises.push(now);
+      // 抬价成功就把「自己的出价」记为核价基准：m.bid 原来只在租用时写过一次，
+      // 抬价后不更新，后续任何拿 m.bid 当「下单价」的比对都会把这次抬价当成平台改价。
+      m.bid = +target.toFixed(4);
+      m.dphBase = m.bid;
+      delete m.priceDeviationPct;
       delete m.preemptedAt;
       this.save();
-      this.log('warn', `实例 ${x.id} 被顶，出价 $${cur.toFixed(4)} → $${target.toFixed(4)}（上限 $${upper.toFixed(4)}，本小时第 ${m.bidRaises.length} 次）`);
+      this.log('warn', `实例 ${x.id} 被顶，出价 $${cur.toFixed(4)} → $${target.toFixed(4)}（上限 $${upper.toFixed(4)}，本小时第 ${m.bidRaises.length} 次，核价基准已跟随）`);
       return true;
     } catch (e) {
       this.log('warn', `实例 ${x.id} 改价失败：${e.message}（改为销毁）`);
@@ -1447,7 +1457,8 @@ export class Engine {
     id = String(id);
     const cur = this.rigLogs.get(id);
     if (cur && Date.now() - cur.t < (manual ? 30_000 : 3 * MIN)) return cur;
-    const text = String(await this.vast.logs(id, 300) || '');
+    // tail 给大一点：v6/v7 的 stats 块每个约 100 行，300 行只够看到最后一个的半截
+    const text = String(await this.vast.logs(id, 2000) || '');
     const v = { t: Date.now(), text: text.slice(-20000) };
     this.rigLogs.set(id, v);
     return v;

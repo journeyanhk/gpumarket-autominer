@@ -60,6 +60,9 @@ export function newLease(id, m = {}, inst = {}, now = Date.now()) {
     sharesRejected: 0,
     creditedPrl: 0,
     creditedSrc: 'pool_alloc',
+    // 分摊用的游标：sharesMark 是本轮已计入的累计份额，difficulty 是该机的 vardiff 难度
+    sharesMark: 0,
+    difficulty: null,
     localThAvg: null,
     priceUsd: null,
     netUsd: null,
@@ -93,6 +96,11 @@ export function netUsdOf(l, { now = Date.now(), priceUsd = 0 } = {}) {
 export function closeLease(l, { endReason = 'unknown', now = Date.now(), priceUsd = null, preemptKind = null, opponentRatio = null } = {}) {
   l.tEnd ||= now;
   l.endReason = END_REASONS.includes(endReason) ? endReason : 'unknown';
+  // 竞价被收回是笼统说法：min_bid 没涨（对手价位 <1×）说明不是被顶掉的，是房东收回。
+  // 两者对决策的意义完全不同——被顶说明「我们的出价不够」，房东收回说明「加价也没用」。
+  const kind = preemptKind || l.preemptKind;
+  if (l.endReason === 'preempted_outbid' && kind === 'host_reclaim') l.endReason = 'host_reclaim';
+  if (l.endReason === 'preempted_outbid' && kind === 'deploy_fail') l.endReason = 'deploy_fail';
   if (preemptKind) l.preemptKind = preemptKind;
   if (opponentRatio != null && Number.isFinite(Number(opponentRatio))) l.opponentRatio = +Number(opponentRatio).toFixed(3);
   if (priceUsd != null) l.priceUsd = +Number(priceUsd).toFixed(4);
@@ -124,7 +132,8 @@ export function median(arr) {
 function row(key, group, now, priceUsd) {
   const n = group.length;
   const hashed = group.filter(l => l.tFirstShare).length;
-  const nets = group.map(l => (l.netUsd != null ? l.netUsd : netUsdOf(l, { now, priceUsd })));
+  // 净收益一律现算：租约结束后仍可能有矿池到账（滞后的 unconfirmed 结算）
+  const nets = group.map(l => netUsdOf(l, { now, priceUsd }));
   const hours = group.reduce((a, l) => a + hoursOf(l, now), 0);
   const spent = group.reduce((a, l) => a + (Number(l.dphTotalActual ?? l.bidFinal ?? 0) || 0) * hoursOf(l, now), 0);
   const credited = group.reduce((a, l) => a + (Number(l.creditedPrl) || 0), 0);
@@ -159,7 +168,7 @@ export function summarize(leases = [], { now = Date.now(), priceUsd = 0 } = {}) 
     return [...m.entries()].map(([k, g]) => row(k, g, now, priceUsd)).sort((a, b) => (b.netPerMachineHour ?? -1e9) - (a.netPerMachineHour ?? -1e9));
   };
   const hours = leases.reduce((a, l) => a + hoursOf(l, now), 0);
-  const nets = leases.map(l => (l.netUsd != null ? l.netUsd : netUsdOf(l, { now, priceUsd })));
+  const nets = leases.map(l => netUsdOf(l, { now, priceUsd }));
   return {
     total: {
       leases: leases.length,

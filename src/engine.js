@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { loadManifest } from './miners.js';
 import { pickDensity } from './sources.js';
 import { request } from './http.js';
-import { newLease, closeLease, endReasonOf, preemptKindOf, summarize } from './leases.js';
+import { newLease, closeLease, endReasonOf, preemptKindOf, summarize, netUsdOf } from './leases.js';
 
 const MIN = 60_000;
 const LABEL = 'prl-auto';
@@ -476,6 +476,7 @@ export class Engine {
             if (sh) {
               l.sharesAccepted = Math.max(l.sharesAccepted || 0, sh.accepted || 0);
               l.sharesRejected = Math.max(l.sharesRejected || 0, sh.rejected || 0);
+              if (Number(sh.difficulty) > 0) l.difficulty = Number(sh.difficulty);
               if (sh.accepted > 0) l.tFirstShare ||= Date.now();
             }
             if (m.hashAt && !l.tFirstShare) l.tFirstShare = m.hashAt;
@@ -697,21 +698,32 @@ export class Engine {
     return summarize(this.leases, { priceUsd: this.market.price || 0 });
   }
 
-  // 矿池到账分摊：有份额就按份额，没有才退回瞬时算力。
-  // 份额比例比算力比例准（份额是矿池真正付钱的依据），但 v8 之前的脚本 stats 被日志截断、
-  // 拿不到 accepted，所以只有「本矿池所有在跑机器都有份额计数」时才用份额分摊。
+  // 矿池到账分摊。三条硬约束（2026-10-27 复核指出，前两条会让排名偏向长寿机器）：
+  //   ① 权重必须是「本轮增量份额」而不是累计值 —— 用累计值的话，每笔到账老机器都拿大头；
+  //   ② 分摊对象要包含「刚结束」的租约 —— 入账有滞后（Kryptex unconfirmed 几分钟到几十分钟，
+  //      Pearlhash 按小时结算），一台跑 40 分钟就被收回的机器，它的币是死后才到账的；
+  //   ③ 份额数跨机器不可比（Kryptex vardiff），权重用 Δaccepted × difficulty = 工作量。
+  // 缺份额数据（v8 之前的脚本 stats 被日志截断）时退回瞬时算力比例，并如实标注 creditedSrc。
   allocateCredit(pool, deltaPrl) {
     if (!(deltaPrl > 0)) return;
-    const open = this.leases.filter(l => !l.tEnd && l.pool === pool);
-    if (!open.length) return;
-    const shareSum = open.reduce((a, l) => a + (Number(l.sharesAccepted) || 0), 0);
-    const useShares = shareSum > 0 && open.every(l => Number(l.sharesAccepted) > 0);
-    const w = (l) => (useShares ? Number(l.sharesAccepted) : Number(l.lastHs) || 0);
-    const wsum = open.reduce((a, l) => a + w(l), 0);
-    if (!(wsum > 0)) return;
-    for (const l of open) {
-      l.creditedPrl = +((Number(l.creditedPrl) || 0) + deltaPrl * (w(l) / wsum)).toFixed(8);
+    const now = Date.now();
+    const windowMin = pool === 'pearlhash' ? 90 : 60;
+    const cand = this.leases.filter(l => l.pool === pool && (!l.tEnd || now - l.tEnd <= windowMin * MIN));
+    if (!cand.length) return;
+    const deltaOf = l => Math.max(0, (Number(l.sharesAccepted) || 0) - (Number(l.sharesMark) || 0));
+    const workOf = l => deltaOf(l) * (Number(l.difficulty) || 1);
+    let total = cand.reduce((a, l) => a + workOf(l), 0);
+    const useShares = total > 0;
+    if (!useShares) total = cand.reduce((a, l) => a + (Number(l.lastHs) || 0), 0);
+    if (!(total > 0)) return;
+    const price = this.market.price || 0;
+    for (const l of cand) {
+      const w = useShares ? workOf(l) : (Number(l.lastHs) || 0);
+      if (w > 0) l.creditedPrl = +((Number(l.creditedPrl) || 0) + deltaPrl * (w / total)).toFixed(8);
       l.creditedSrc = useShares ? 'share_alloc' : 'pool_alloc';
+      if (useShares) l.sharesMark = Number(l.sharesAccepted) || 0;
+      // 结束后的到账也要回写到 netUsd，否则台账里的净收益永远差最后一笔
+      if (l.tEnd) l.netUsd = netUsdOf(l, { priceUsd: price });
     }
     this.save();
   }
@@ -735,9 +747,12 @@ export class Engine {
     if (!v?.text) return null;
     const acc = [...v.text.matchAll(/"accepted"\s*:\s*(\d+)/g)];
     const rej = [...v.text.matchAll(/"rejected"\s*:\s*(\d+)/g)];
+    const dif = [...v.text.matchAll(/"difficulty"\s*:\s*([\d.]+)/g)];
     if (!acc.length && !rej.length) return null;
     const last = a => (a.length ? Number(a[a.length - 1][1]) : 0);
-    return { accepted: last(acc), rejected: last(rej) };
+    // difficulty 是 vardiff 的分母：Kryptex 给每个 worker 单独调难度，
+    // 单纯比 accepted 个数会把「高难度少量份额」和「低难度大量份额」算成不等价。
+    return { accepted: last(acc), rejected: last(rej), difficulty: last(dif) || null };
   }
 
   // 阈值的作用域：实验参数只对 pinned 实验机生效，绝不外溢到自动租用。

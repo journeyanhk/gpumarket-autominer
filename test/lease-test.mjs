@@ -15,6 +15,7 @@ const { summarize, netUsdOf, preemptKindOf, endReasonOf, newLease, closeLease, h
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log('  ✓', m); } else { fail++; console.log('  ✗', m); } };
 const MIN = 60_000;
+const MIN_ = MIN;
 
 console.log('— (a) 追价开关默认关闭');
 {
@@ -84,6 +85,18 @@ console.log('— (b) 租约生命周期与净收益');
   ok(endReasonOf('跌破止损') === 'our_stoploss' && endReasonOf('余额不足') === 'our_gate', '止损/闸门分开');
 }
 
+console.log('— 被收回的成因要落到 endReason 上');
+{
+  const now = 1_800_000_000_000;
+  const mk = (kind) => { const l = newLease('1', { gpuName: 'X', spot: true, bid: 0.1, rentedAt: now }, {}, now); l.preemptKind = kind; return l; };
+  const a = closeLease(mk('host_reclaim'), { endReason: 'preempted_outbid', now: now + 60 * MIN });
+  ok(a.endReason === 'host_reclaim', 'min_bid 没涨 → host_reclaim（加价也没用的那种）');
+  const b = closeLease(mk('outbid'), { endReason: 'preempted_outbid', now: now + 60 * MIN });
+  ok(b.endReason === 'preempted_outbid', '确实被更高出价顶掉 → 仍是 preempted_outbid');
+  const c = closeLease(mk('deploy_fail'), { endReason: 'preempted_outbid', now: now + 60 * MIN });
+  ok(c.endReason === 'deploy_fail', '容器起不来 → deploy_fail（看着像被收，其实是部署失败）');
+}
+
 console.log('— (b) 按型号聚合用的是每机时净收益，不是 ROI 均值');
 {
   const now = 1_800_000_000_000;
@@ -131,21 +144,61 @@ console.log('— 实验参数作用域：只对 pinned 机器生效');
   ok(pinnedNoOv.skipRoi === true, 'pinned 但没配覆盖 → 维持老语义（不参与 ROI 淘汰）');
 }
 
-console.log('— 到账分摊：有份额按份额，没份额退回算力');
+console.log('— 到账分摊：增量份额 × 难度，含刚结束的租约');
 {
   const e = new Engine();
   e.log = () => {};
-  const mk = (id, shares, hs) => { const l = e.leaseOf(id, { gpuName: 'X', spot: true, bid: 0.1, rentedAt: Date.now() }, {}); l.pool = 'kryptex'; l.sharesAccepted = shares; l.lastHs = hs; return l; };
+  e.market.price = 2;
+  e.leases = []; e.st.leases = [];   // 同一份临时 state 会被多个 Engine 实例读到，这里清空保证确定性
+  const mk = (id, shares, hs, diff = 1e6) => {
+    const l = e.leaseOf(id, { gpuName: 'X', spot: true, bid: 0.1, rentedAt: Date.now() - 3600_000 }, {});
+    l.pool = 'kryptex'; l.sharesAccepted = shares; l.sharesMark = 0; l.difficulty = diff; l.lastHs = hs;
+    return l;
+  };
   const a = mk('801', 30, 100e12), b = mk('802', 10, 100e12);
   e.allocateCredit('kryptex', 0.4);
-  ok(Math.abs(a.creditedPrl - 0.3) < 1e-6 && Math.abs(b.creditedPrl - 0.1) < 1e-6, `份额 3:1 → 入账 0.3 / 0.1 PRL（${a.creditedPrl} / ${b.creditedPrl}）`);
-  ok(a.creditedSrc === 'share_alloc' && b.creditedSrc === 'share_alloc', 'creditedSrc 标成 share_alloc（不是算力分摊）');
+  ok(Math.abs(a.creditedPrl - 0.3) < 1e-6 && Math.abs(b.creditedPrl - 0.1) < 1e-6, `份额 30:10（同难度）→ 0.3 / 0.1 PRL（${a.creditedPrl} / ${b.creditedPrl}）`);
+  ok(a.creditedSrc === 'share_alloc', 'creditedSrc = share_alloc');
+  ok(a.sharesMark === 30 && b.sharesMark === 10, '分完把游标推到当前累计份额（下次只算增量）');
 
-  const c = mk('803', 0, 200e12);
-  a.sharesAccepted = 0; b.sharesAccepted = 0;
-  e.allocateCredit('kryptex', 0.3);
-  ok(Math.abs(c.creditedPrl - 0.3 * (200 / 400)) < 1e-6, `没有份额时退回算力比例（c 得 ${c.creditedPrl}）`);
-  ok(c.creditedSrc === 'pool_alloc', '退回算力比例时 creditedSrc 标成 pool_alloc');
+  // 第二轮：a 的份额没涨、b 涨了 10 → 增量 0:10，a 不该再分到钱
+  b.sharesAccepted = 20;
+  e.allocateCredit('kryptex', 0.2);
+  ok(Math.abs(a.creditedPrl - 0.3) < 1e-6, `第二轮 a 拿 0，累计仍是 ${a.creditedPrl}`);
+  ok(Math.abs(b.creditedPrl - 0.3) < 1e-6, `第二轮 b 拿满 0.2，累计 ${b.creditedPrl}`);
+
+  // 难度加权：10 份额 @2e6 与 20 份额 @1e6 等价
+  const c = e.leaseOf('803', { gpuName: 'Y', spot: true, bid: 0.1, rentedAt: Date.now() - 3600_000 }, {});
+  const d = e.leaseOf('804', { gpuName: 'Y', spot: true, bid: 0.1, rentedAt: Date.now() - 3600_000 }, {});
+  Object.assign(c, { pool: 'kryptex', sharesAccepted: 10, sharesMark: 0, difficulty: 2e6 });
+  Object.assign(d, { pool: 'kryptex', sharesAccepted: 20, sharesMark: 0, difficulty: 1e6 });
+  e.allocateCredit('kryptex', 0.02);
+  ok(Math.abs(c.creditedPrl - 0.01) < 1e-6 && Math.abs(d.creditedPrl - 0.01) < 1e-6, `10 份额@2e6 = 20 份额@1e6（各 ${c.creditedPrl} / ${d.creditedPrl}）`);
+
+  // 入账滞后：刚被收回的机器也要分到它自己挖的币
+  const gone = e.leaseOf('805', { gpuName: 'Z', spot: true, bid: 0.5, rentedAt: Date.now() - 1800_000 }, {});
+  Object.assign(gone, { pool: 'kryptex', sharesAccepted: 40, sharesMark: 0, difficulty: 1e6, dphTotalActual: 0.5, tEnd: Date.now() - 10 * MIN_ });
+  e.allocateCredit('kryptex', 0.4);
+  ok(Math.abs(gone.creditedPrl - 0.4) < 1e-6, `结束后 10 分钟的租约仍分到 ${gone.creditedPrl} PRL（入账本来就滞后）`);
+  // 0.4 PRL × $2 = $0.8 入账，实付 0.5/h × 20min = $0.1667 → 净 +$0.6333
+  ok(gone.netUsd != null && Math.abs(gone.netUsd - 0.6333) < 1e-3, `结束后的净收益回写（${gone.netUsd}）`);
+
+  // 超过窗口就不再分：怕把早就结算过的币重复记到旧租约上
+  const old = e.leaseOf('806', { gpuName: 'Z', spot: true, bid: 0.1, rentedAt: Date.now() - 7200_000 }, {});
+  Object.assign(old, { pool: 'kryptex', sharesAccepted: 50, sharesMark: 0, difficulty: 1e6, tEnd: Date.now() - 120 * MIN_ });
+  e.allocateCredit('kryptex', 0.4);
+  ok(old.creditedPrl === 0, '结束超过 60 分钟的租约不再参与分摊');
+
+  // 没有份额数据（v7 机器）→ 退回算力比例，并标注来源
+  const e2 = new Engine(); e2.log = () => {};
+  e2.leases = []; e2.st.leases = [];
+  const f = e2.leaseOf('901', { gpuName: 'X', spot: true, bid: 0.1, rentedAt: Date.now() }, {});
+  const g = e2.leaseOf('902', { gpuName: 'X', spot: true, bid: 0.1, rentedAt: Date.now() }, {});
+  Object.assign(f, { pool: 'kryptex', lastHs: 100e12 });
+  Object.assign(g, { pool: 'kryptex', lastHs: 300e12 });
+  e2.allocateCredit('kryptex', 0.4);
+  ok(Math.abs(f.creditedPrl - 0.1) < 1e-6 && Math.abs(g.creditedPrl - 0.3) < 1e-6, `缺份额时按算力 1:3 分摊（${f.creditedPrl} / ${g.creditedPrl}）`);
+  ok(f.creditedSrc === 'pool_alloc', '缺份额时 creditedSrc 如实标成 pool_alloc');
 }
 
 console.log('— 测试模式写保护（不依赖导入顺序）');

@@ -99,7 +99,8 @@ export function minerTarget(pool, { wallet, nockAddress, geo, pearlUrl }) {
   }
   if (pool === 'kryptex') {
     // Kryptex 的矿工名写在用户名里：钱包.矿工名（与 Kryptex 官方教程的 SRBMiner 命令一致，TCP 7048 端口）
-    return { bin: 'srb', cmd: `--disable-cpu --algorithm pearlhash --pool ${kryptexHost(geo)}:7048 --wallet ${wallet}.$W` };
+    // --api-enable：把 accepted/rejected/stale 暴露在 127.0.0.1:21555，供机器上的脚本每 5 分钟采样
+    return { bin: 'srb', cmd: `--disable-cpu --algorithm pearlhash --pool ${kryptexHost(geo)}:7048 --wallet ${wallet}.$W --api-enable --api-port 21555` };
   }
   throw new Error('未知矿池 ' + pool);
 }

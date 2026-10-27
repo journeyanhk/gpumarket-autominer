@@ -39,15 +39,15 @@ ok(priced.every(o => o.bid <= o.revenueHr / 1.3 + 1e-6), '出价不超过「目�
 ok(priced.every(o => o.listDph >= o.bid), '挂牌价 ≥ 出价（挂牌价只是展示）');
 ok(e.offers.filter(o => o.spotSkip).every(o => o.bid === null && o.roi === null), '入场价高于上限的机器保留但不参与出价（不再从列表里消失）');
 
-console.log('— 出价算法边界');
-ok(e.bidPrice(0.30, 0) === 0.225, `收入 $0.30/h、系数 0.75 → 出价 $${e.bidPrice(0.30, 0)}`);
-ok(e.bidPrice(0.30, 0.5) === null, '入场价高于「目标 ROI 允许的上限」→ 不出价（宁可不租）');
-e.cfg.spotBidFactor = 0.5;
-ok(e.bidPrice(0.30, 0.20) === 0.22, `入场价 $0.20 + 10% 缓冲 = $${e.bidPrice(0.30, 0.20)}（贴着地板会被秒顶）`);
-ok(e.bidPrice(0.30, 0.24) === null, '加完缓冲超过目标 ROI 上限 → 不租');
-e.cfg.spotBidFactor = 0.75;
-e.cfg.targetProfitPct = 100;
-ok(e.bidPrice(0.30, 0) === 0.15, `目标 100% 时上限收紧到 rev/2（$${e.bidPrice(0.30, 0)}）`);
+console.log('— 出价算法边界（利润带公式）');
+// 目标 20% → 上限 = 收入/1.2；下限 = 收入×0.7；目标出价 = 入场价×1.25
+e.cfg.targetProfitPct = 20; e.cfg.spotBidFloorRatio = 0.7; e.cfg.spotBidMultiplier = 1.25;
+ok(e.bidPrice(0.30, 0) === 0.21, `入场价 0 → 按下限 $${e.bidPrice(0.30, 0)}（收入×0.7）`);
+ok(e.bidPrice(0.30, 0.10) === 0.21, `入场价×1.25 低于下限 → 仍出 $${e.bidPrice(0.30, 0.10)}`);
+ok(e.bidPrice(0.30, 0.19) === 0.2375, `入场价×1.25 落在带内 → 出 $${e.bidPrice(0.30, 0.19)}`);
+ok(e.bidPrice(0.30, 0.25) === null, '入场价×1.25 超过利润上限 → 不租（不把利润让给房东）');
+e.cfg.targetProfitPct = 12;
+ok(Math.abs(e.bidPrice(0.30, 0.19) - 0.2375) < 1e-9, '目标 12% 时上限更宽，出价仍按 1.25 倍');
 e.cfg.targetProfitPct = 30;
 
 console.log('— 状态不同的机器不会在两次 tick 之间闪烁（review #7）');
@@ -63,9 +63,10 @@ e.offers = scannedOffers; // 还原扫描结果，后面还要真的下单
 console.log('— 出价系数可以 >1（负 ROI 实验）');
 ok(e.updateConfig({ spotBidFactor: 1.05 }).restartNeeded === false, 'factor=1.05 被接受（允许高于收入出价）');
 ok((() => { try { e.updateConfig({ spotBidFactor: 1.6 }); return false; } catch { return true; } })(), 'factor=1.6 越界被拒');
-e.cfg.targetProfitPct = -5; e.cfg.spotBidFactor = 1.05; e.cfg.spotBidBuffer = 0.1;
-const bidOver = e.bidPrice(0.10, 0.09);
-ok(Math.abs(bidOver - 0.105) < 1e-6, `factor=1.05、收入 $0.10 → 出价 $${bidOver}（高于收入，ROI −5%）`);
+// 想出价高于收入（负 ROI）只能靠负目标：上限 = 收入/(1+目标)
+e.cfg.targetProfitPct = -5; e.cfg.spotBidFloorRatio = 0.7; e.cfg.spotBidMultiplier = 1.25;
+const bidOver = e.bidPrice(0.10, 0.0842);  // 入场价 1.25 倍刚好触到上限
+ok(Math.abs(bidOver - 0.1053) < 1e-3, `目标 −5%、入场 $0.10 → 出价 $${bidOver}（高于收入，ROI −5%）`);
 e.cfg.targetProfitPct = 0; e.cfg.spotBidFactor = 0.75;
 e.updateConfig({ spotBidFactor: 0.75, targetProfitPct: 0, stopLossPct: -20 }); // 一起改回：止损必须 < 目标
 

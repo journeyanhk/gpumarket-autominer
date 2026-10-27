@@ -112,16 +112,19 @@ export class Engine {
   }
   // 竞价出价：收入 × 系数，但绝不超过「按目标收益率仍然划算」的上限；
   // 入场价已经高于上限的机器直接返回 null（宁可不租，也不在亏损区抢机器）。
+  // 竞价出价：以「入场价 × 1.25」为起点，夹在 [收入×0.7, 收入/(1+目标ROI)] 之间。
+  // 旧公式 min(收入/1.12, max(入场×1.1, 收入×1.05)) 其实永远等于 收入/1.12 ——
+  // 每次都按利润上限出价，12% 的利润全让给了房东，还是被顶。
+  // 新公式把利润留在自己手里：入场价×1.25 已经超过上限就直接不租。
   bidPrice(revenueHr, minBid = 0) {
     if (!(revenueHr > 0)) return null;
-    const maxPay = revenueHr / (1 + this.cfg.targetProfitPct / 100);
-    // 不能贴着 min_bid 出：那是最低价，任何一个更高出价都会把你顶掉（实测 1 秒）。
-    const buffer = Math.min(1, Math.max(0, Number(this.cfg.spotBidBuffer ?? 0.1)));
-    const floor = minBid * (1 + buffer);
-    if (floor > maxPay) return null; // 加完缓冲仍超过目标 ROI 的上限 → 不租
-    // 系数允许 >1：那就是"出价高于收入"（负 ROI），用于验证加价能否站住；上限仍受 maxPay 约束
-    const want = revenueHr * Math.min(1.5, Math.max(0.1, Number(this.cfg.spotBidFactor) || 0.75));
-    return +Math.min(maxPay, Math.max(floor, want)).toFixed(4);
+    const upper = revenueHr / (1 + this.cfg.targetProfitPct / 100);
+    const floorRatio = Math.min(1, Math.max(0, Number(this.cfg.spotBidFloorRatio ?? 0.7)));
+    const lower = revenueHr * floorRatio;
+    const multi = Math.max(1, Number(this.cfg.spotBidMultiplier ?? 1.25));
+    const want = minBid * multi;
+    if (want > upper) return null;                 // 加价后已无利可图 → 不租
+    return +Math.min(upper, Math.max(lower, want)).toFixed(4);
   }
 
   // 某个矿池每 1 H/s 每小时的总收益：PRL（扣该池手续费）+ NOCK（只有 Pearlhash 有）

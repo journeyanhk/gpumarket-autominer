@@ -49,15 +49,21 @@ try {
   const key = readEnv(`${SEC}/clore_key`).CLORE_KEY || fs.readFileSync(`${SEC}/clore_key`, 'utf8').trim();
   const r = await fetch('https://api.clore.ai/v1/marketplace', { headers: { auth: key } });
   const d = await r.json();
-  const by = {};
+  const by = {}, bySpot = {};
   for (const s of d.servers || []) {
     if (s.rented) continue;
     const m = /^\s*(\d+)\s*x\s*(.+)$/.exec(s?.specs?.gpu || ''); if (!m) continue;
     const cnt = +m[1]; const g = modelOf(m[2]); if (!g) continue;
-    const usd = Number(s?.price?.usd?.on_demand_usd); if (!(usd > 0)) continue;
-    (by[g.key] ||= []).push(usd / cnt / 24);
+    const p = s?.price || {};
+    const usd = Number(p?.usd?.on_demand_usd);
+    if (usd > 0) (by[g.key] ||= []).push(usd / cnt / 24);
+    // Spot 价在 price.spot['USD-Blockchain']（price.usd.spot 恒为 0，是个坑）
+    const spot = Number(p?.spot?.['USD-Blockchain']);
+    if (spot > 0) (bySpot[g.key] ||= []).push(spot / cnt / 24);
   }
-  out.venues.clore = { note: '按需 $/天 ÷24，未含 10% 平台费', prices: Object.fromEntries(Object.entries(by).map(([k, v]) => [k, { n: v.length, med: medianOrNull(v), min: Math.min(...v) }])) };
+  const conv = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { n: v.length, med: medianOrNull(v), min: Math.min(...v) }]));
+  out.venues.clore = { note: '按需 $/天 ÷24，未含 10% 平台费', prices: conv(by) };
+  out.venues.cloreSpot = { note: 'Spot $/天 ÷24，未含 2.5% 手续费', prices: conv(bySpot) };
 } catch (e) { out.venues.clore = { error: String(e.message).slice(0, 100) }; }
 
 // ---- RunPod：GraphQL gpuTypes ----
@@ -85,19 +91,20 @@ for (const key of models) {
   const be = g.effective * density / 24;
   const v = out.venues.vast?.prices?.[g.key]?.med ?? null;
   const c = out.venues.clore?.prices?.[g.key]?.med ?? null;
+  const cs = out.venues.cloreSpot?.prices?.[g.key]?.med ?? null;
   const rp = out.venues.runpod?.ondemand?.[g.key]?.med ?? null;
   const roi = p => (p ? ((be / p - 1) * 100) : null);
-  rows.push({ model: g.name, th: g.effective, breakEven: +be.toFixed(4), vast: v, vastRoi: roi(v), clore: c, cloreRoi: roi(c), runpod: rp, runpodRoi: roi(rp) });
+  rows.push({ model: g.name, th: g.effective, breakEven: +be.toFixed(4), vast: v, vastRoi: roi(v), clore: c, cloreRoi: roi(c), cloreSpot: cs, cloreSpotRoi: roi(cs), runpod: rp, runpodRoi: roi(rp) });
 }
 out.rows = rows;
 
 if (has('json')) { console.log(JSON.stringify(out, null, 2)); process.exit(0); }
 
 console.log(`\n收入密度 $${density.toFixed(5)}/TH·天（源 ${sourceName}）· PRL $${price}\n`);
-console.log('型号             TH/s   盈亏线$ /h   vast竞价      Clore按需     RunPod按需');
+console.log('型号             TH/s   盈亏线$ /h   vast竞价      Clore Spot    Clore按需     RunPod');
 for (const r of rows) {
   const f = (v, roi) => v == null ? '   —        ' : `${v.toFixed(4)} ${roi >= 0 ? '✅' : '  '}${(roi >= 0 ? '+' : '') + roi.toFixed(0)}%`.padEnd(14);
-  console.log(`${r.model.padEnd(16)} ${String(r.th).padStart(4)}   ${r.breakEven.toFixed(4).padStart(8)}   ${f(r.vast, r.vastRoi)} ${f(r.clore, r.cloreRoi)} ${f(r.runpod, r.runpodRoi)}`);
+  console.log(`${r.model.padEnd(16)} ${String(r.th).padStart(4)}   ${r.breakEven.toFixed(4).padStart(8)}   ${f(r.vast, r.vastRoi)} ${f(r.cloreSpot, r.cloreSpotRoi)} ${f(r.clore, r.cloreRoi)} ${f(r.runpod, r.runpodRoi)}`);
 }
 console.log('\n提示：✅ 表示该场地中位价低于盈亏线（正收益），空白表示高于盈亏线。');
 console.log('      n 是样本数；n=1 时中位就是那一台的报价，参考价值有限。');

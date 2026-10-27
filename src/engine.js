@@ -612,7 +612,7 @@ export class Engine {
         liveHs: w && !restarting ? w.hs : 0, avgHs, expectedHs, firstHashAt, revenueHr, expRevenueHr, roi, expRoi, phase,
         belowSince: m?.belowSince || null, refSource: ref?.source || '未知型号',
         // 竞价/按需必须暴露给面板与策略脚本：缺了它，swap-policy 会把竞价机当成按需机
-        spot: !!m?.spot, listDph: m?.listDph ?? null,
+        spot: !!m?.spot, listDph: m?.listDph ?? null, pinned: !!m?.pinned,
         deploy: m ? { rentedAt: m.rentedAt, runningAt: m.runningAt || null, hashAt: m.hashAt || null, inetDown: m.inetDown ?? i.inet_down ?? null } : null,
         logHint: this.logHint(id),
       };
@@ -915,6 +915,9 @@ export class Engine {
           continue;
         }
       }
+      // 2a) 测量锚点（pinned）：不参与 ROI 与算力淘汰，只保留"抢占/离线/部署超时"的收尾。
+      //     理由：realizedFactor 需要一台机器连续跑 ≥24h，而这台按需机在保守口径下必然是负 ROI。
+      if (m.pinned) continue;
       // 2b) 竞价机的算力长期只有预期的 hashLowPct 以下：按实际产出我们是在亏钱（实测 3080 只有 56%）。
       //     按需机不套用这条（按需是包干价，且换机成本高）；竞价机直接退，不拉黑机器。
       if (x.spot && x.health === 'low' && x.firstHashAt && now - x.firstHashAt > 20 * MIN) {
@@ -1442,6 +1445,17 @@ export class Engine {
     if (changes.some(c => c.includes('Kryptex 钱包'))) { this.kx.earnedAt = 0; this.refreshKryptex().catch(() => {}); }
     if (changes.some(c => c.includes('钱包'))) this.repriceOffers();
     return { restartNeeded: proxyChanged };
+  }
+
+  // 钉住/取消钉住：pinned 的实例不会被 ROI 或算力规则退租
+  setPinned(id, pinned = true) {
+    id = String(id);
+    const m = this.st.managed[id];
+    if (!m) throw new Error('没有这台实例的托管记录');
+    if (pinned) m.pinned = true; else delete m.pinned;
+    this.save();
+    this.log('info', `实例 ${id} ${pinned ? '已钉住（只做测量，不参与 ROI 淘汰）' : '已取消钉住'}`);
+    return { id, pinned: !!m.pinned };
   }
 
   setAlias(id, name) {

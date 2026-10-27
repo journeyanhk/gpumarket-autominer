@@ -5,6 +5,8 @@ import { gpuKey, hashrateTable } from './gpus.js';
 import { buildOnstart, workerName, SCRIPT_VERSION } from './onstart.js';
 import { POOLS, POOL_IDS, poolName, minerTarget, fetchKryptexInfo, fetchKryptexWorkers, fetchKryptexEarned } from './pools.js';
 import { loadConfig, saveConfig, loadState, saveState, appendLog, DEFAULT_CONFIG } from './store.js';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { loadManifest } from './miners.js';
 import { pickDensity } from './sources.js';
 import { request } from './http.js';
@@ -54,6 +56,11 @@ export class Engine {
     this.samples = new KeyMap();     // String(instanceId) -> [{t, hs}]（统一用字符串当键，避免非数字 ID 转成 NaN 后串数据）
     this.lastCalib = new Map();
     this.events = [];
+    // 收入密度的 6 小时滚动均值：决策（租/不租）用均值，止损仍用瞬时值。
+    // 单点密度每小时能抖动 3~5%，用瞬时值会让"今天能不能租"随刷新而变。
+    this.densitySamples = [];
+    // 代码热更新检测：进程启动时记下 onstart.js 的 mtime，preflight 时比对
+    try { this.bootScriptMtime = fs.statSync(fileURLToPath(new URL('./onstart.js', import.meta.url))).mtimeMs; } catch { this.bootScriptMtime = null; }
     this.scanPausedUntil = this.st.scanPause?.until > Date.now() ? this.st.scanPause.until : 0; // 额度暂停跨重启保留
     this.pauseReason = this.scanPausedUntil ? this.st.scanPause.reason : null;
     this.lastRentAt = 0;
@@ -119,7 +126,7 @@ export class Engine {
   // thPer01 门槛是派生值，不是配置：minThPer01 = 0.1 × (1+目标ROI) ÷ 每 TH 每小时收入。
   // 币价/难度一变它就变，写死等于埋第二个真相源。
   get minThPer01() {
-    const perThHr = this.usdHsHr * 1e12;          // $/TH/小时（已含该矿池费率）
+    const perThHr = this.usdHsHr6h * 1e12;        // $/TH/小时，用 6h 均值（决策口径）
     if (!(perThHr > 0)) return null;
     return 0.1 * (1 + this.cfg.targetProfitPct / 100) / perThHr;
   }
@@ -139,6 +146,23 @@ export class Engine {
     const want = minBid * multi;
     if (want > upper) return null;                 // 加价后已无利可图 → 不租
     return +Math.min(upper, Math.max(lower, want)).toFixed(4);
+  }
+
+  // 6 小时滚动均值（$/H/s/小时）；样本不足 5 分钟时退回瞬时值
+  get usdHsHr6h() {
+    const now = Date.now();
+    const win = (this.densitySamples || []).filter(s => now - s.t <= 6 * 60 * MIN);
+    if (win.length < 5) return this.usdHsHr;
+    return win.reduce((a, s) => a + s.v, 0) / win.length;
+  }
+  recordDensity() {
+    const v = this.usdHsHr;
+    if (!(v > 0)) return;
+    const arr = this.densitySamples;
+    const last = arr[arr.length - 1];
+    if (last && Date.now() - last.t < MIN) { last.v = v; return; }   // 每分钟只留一个点
+    arr.push({ t: Date.now(), v });
+    while (arr.length > 400) arr.shift();                              // 6h × 60 ≈ 360
   }
 
   // 某个矿池每 1 H/s 每小时的总收益：PRL（扣该池手续费）+ NOCK（只有 Pearlhash 有）
@@ -264,6 +288,7 @@ export class Engine {
     if (!errs.length && this._mktFailLogged) this.log('info', 'Pearlhash 数据已恢复');
     this._mktFailLogged = this._mktFail >= 3 || (this._mktFailLogged && errs.length > 0);
     this.market.error = errs.length ? errs.join('；') : null;
+    this.recordDensity();
     this.recordSamples();
     this.pushHistory();
   }
@@ -828,7 +853,7 @@ export class Engine {
 
   // 用最新行情重算每台机器的收益率（扫描结果可能是几分钟前的，币价/全网算力随时在变）
   repriceOffers() {
-    const usd = this.usdHsHr;
+    const usd = this.usdHsHr6h;   // 决策用 6h 均值，避免每次刷新都换一批"最划算的型号"
     const now = Date.now();
     for (const o of this.offers) {
       this.priceOffer(o, usd);
@@ -841,7 +866,7 @@ export class Engine {
   }
 
   evaluateOffers(raw) {
-    const usd = this.usdHsHr;
+    const usd = this.usdHsHr6h;   // 同上：挂牌评估用均值
     const now = Date.now();
     const out = [];
     let known = 0;
@@ -1004,6 +1029,13 @@ export class Engine {
     if (!this.marketFresh) why.push('PRL 行情数据不新鲜');
     if (!this.minerManifest) why.push(`矿工清单不可用：${this.minerError || '未知原因'}`);
     if (this.account.vastBalance === null) why.push('还没读到 vast 余额');
+    // 代码更新了但进程没重载：脚本版本/行为可能对不上，宁可拦住也不带着旧逻辑下单
+    if (this.bootScriptMtime != null) {
+      try {
+        const now = fs.statSync(fileURLToPath(new URL('./onstart.js', import.meta.url))).mtimeMs;
+        if (now !== this.bootScriptMtime) why.push('代码已更新但进程未重载（请重启控制台后再租）');
+      } catch {}
+    }
     return why;
   }
 

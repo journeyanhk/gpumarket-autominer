@@ -220,6 +220,29 @@ e.recordSamples();
 ok(!e.st.managed[idF]?.preemptedAt, '实例回到 running 且矿池有算力 → 清计时（真恢复）');
 delete e.st.managed[idF];
 
+console.log('— 钉住的测量锚点不参与 ROI 淘汰');
+e.offers = []; await e.scan(true);
+const pickJ = e.offers.filter(o => !o.spotSkip && o.roi !== null)[0];
+e.lastRentAt = 0; e.rentCooldownUntil = 0;
+const idJ = await e.rent(pickJ, 'manual');
+await e.refreshVast();
+globalThis.__instanceStatus(idJ, 'running');
+await e.refreshVast();
+e.setPinned(idJ, true);
+const mJ = e.st.managed[idJ];
+mJ.hashAt = Date.now() - 60 * MIN;
+e.everHashed.add(String(idJ));
+const realInstancesJ = e.instances.bind(e);
+e.instances = () => realInstancesJ().map(i => i.id === String(idJ)
+  ? { ...i, phase: 'mining', roi: -40, health: 'low', hashRatio: 0.5, firstHashAt: Date.now() - 60 * MIN }
+  : i);
+await e.autoDestroy(e.instances());
+ok(e.st.managed[idJ]?.pinned === true, 'pinned 标记仍然存在（ROI −40%、算力 50% 也没被退租）');
+e.setPinned(idJ, false);
+await e.autoDestroy(e.instances());
+ok(!e.st.managed[idJ], '取消钉住后，ROI −40% 立刻按止损退租');
+e.instances = realInstancesJ;
+
 console.log('— 台数上限要算上"抢占待销毁"');
 {
   const f = new Engine(); f.log = () => {};

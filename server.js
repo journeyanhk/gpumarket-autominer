@@ -86,6 +86,10 @@ if (boot.proxy && !process.env.PRL_PROXY_APPLIED) {
         const b = await body(req);
         return send(res, 200, { ok: true, ...(await engine.switchAll(String(b.to || ''), b.from ? String(b.from) : null)) });
       }
+      if ((m = p.match(/^\/api\/instances\/(\d+)\/pin$/)) && req.method === 'POST') {
+        const b = await body(req);
+        return send(res, 200, { ok: true, ...engine.setPinned(m[1], b.pinned !== false) });
+      }
       if ((m = p.match(/^\/api\/instances\/(\d+)\/alias$/)) && req.method === 'POST') {
         const b = await body(req);
         engine.setAlias(m[1], (b.worker || '').trim());

@@ -1,10 +1,16 @@
 // 租约台账 + 追价开关 + 对手价位：三条改动的回归测试。
 // 只跑本地纯逻辑与 mock，不会真的租机器。
-import { Engine } from '../src/engine.js';
-import { summarize, netUsdOf, preemptKindOf, endReasonOf, newLease, closeLease, hoursOf } from '../src/leases.js';
-
-globalThis.__mockRoot = process.argv[2];
-process.chdir(process.argv[2]);
+//
+// 注意：必须先 chdir 到临时目录再 import 引擎——store.js 的 DATA_DIR 是在 import 时
+// 用 process.cwd() 算出来的，先 import 再 chdir 就会写到生产 data/state.json 上
+// （2026-10-27 踩过一次：引擎重启时报「实例 501 已不在 vast 列表中」）。
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+const dir = process.argv[2];
+process.chdir(dir);
+const U = p => pathToFileURL(path.join(dir, p)).href;
+const { Engine } = await import(U('src/engine.js'));
+const { summarize, netUsdOf, preemptKindOf, endReasonOf, newLease, closeLease, hoursOf } = await import(U('src/leases.js'));
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log('  ✓', m); } else { fail++; console.log('  ✗', m); } };

@@ -873,6 +873,12 @@ export class Engine {
           continue;
         }
       }
+      // 2b) 竞价机的算力长期只有预期的 hashLowPct 以下：按实际产出我们是在亏钱（实测 3080 只有 56%）。
+      //     按需机不套用这条（按需是包干价，且换机成本高）；竞价机直接退，不拉黑机器。
+      if (x.spot && x.health === 'low' && x.firstHashAt && now - x.firstHashAt > 20 * MIN) {
+        await this.destroy(x.id, `算力只有预期的 ${Math.round((x.hashRatio || 0) * 100)}%（${x.gpuName}），竞价不值这个价`, 0);
+        continue;
+      }
       // 3) 止损：实时收益率持续低于止损线（行情数据不新鲜、或出算力不满 10 分钟时不判断）
       if (!this.marketFresh) continue;
       if (!x.firstHashAt || now - x.firstHashAt < (POOLS[x.pool]?.perGpu ? 10 : KX_WARMUP_MIN) * MIN) continue;
@@ -914,6 +920,7 @@ export class Engine {
   }
 
   async autoRent(list) {
+    if (Date.now() < (this.rentCooldownUntil || 0)) return; // 429 退避期内不下单
     if (Date.now() - this.lastRentAt < 60_000) return;
     const why = this.preflight();
     if (why.length) { this._warnOnce('pre', `自动租用暂停：${why.join('、')}`); return; }
@@ -1020,6 +1027,21 @@ export class Engine {
         const err = new Error('这台机器刚被别人租走了，换一台试试');
         err.gone = true;
         throw err;
+      }
+      // GPU conflict = 下单前这台机器已被人占了（和 no_such_ask 同类）。不是机器坏了，不拉黑。
+      if (/GPU conflict|already rented/i.test(e.message)) {
+        this.offers = this.offers.filter(o => o.id !== offer.id);
+        this.lastRentAt = 0;
+        this.log('info', `${offer.numGpus}×${offer.gpuName} 下单时已被占用（GPU conflict），换下一台`);
+        const err = new Error('这台机器刚被别人租走了，换一台试试');
+        err.gone = true;
+        throw err;
+      }
+      // 429 限流：这是我们请求太快，不是机器问题。退避 5 分钟，不拉黑
+      if (e.status === 429) {
+        this.rentCooldownUntil = Date.now() + 5 * MIN;
+        this._warnOnce('rent429', 'vast 提示请求过于频繁，暂停自动租用 5 分钟（不影响已租机器）');
+        throw e;
       }
       // 竞价：扫描到下单之间 min_bid 涨了 → 出价被拒。这是出价问题，不是机器问题，不能拉黑
       if (offer.spot && /bid|price|too low|min_bid/i.test(e.message)) {

@@ -770,9 +770,11 @@ export class Engine {
   sharesOf(id) {
     const v = this.rigLogs.get(String(id));
     if (!v?.text) return null;
-    const acc = [...v.text.matchAll(/"accepted"\s*:\s*(\d+)/g)];
-    const rej = [...v.text.matchAll(/"rejected"\s*:\s*(\d+)/g)];
-    const dif = [...v.text.matchAll(/"difficulty"\s*:\s*([\d.]+)/g)];
+    // v8 的 stats 行只挑字段，键名两边的引号可能只剩半边（accepted":14），
+    // 所以引号必须是可选的，否则新脚本采到的份额一个都读不出来。
+    const acc = [...v.text.matchAll(/"?accepted"?\s*:\s*(\d+)/g)];
+    const rej = [...v.text.matchAll(/"?rejected"?\s*:\s*(\d+)/g)];
+    const dif = [...v.text.matchAll(/"?difficulty"?\s*:\s*([\d.]+)/g)];
     if (!acc.length && !rej.length) return null;
     const last = a => (a.length ? Number(a[a.length - 1][1]) : 0);
     // difficulty 是 vardiff 的分母：Kryptex 给每个 worker 单独调难度，

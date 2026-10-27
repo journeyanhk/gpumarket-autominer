@@ -235,6 +235,21 @@ console.log('— 同一房东 1 小时收回 ≥2 台 → 拉黑该房东已知�
 }
 
 
+console.log('— v8 的 stats 行（键名只剩半边引号）也要能解析');
+{
+  const e = new Engine();
+  e.log = () => {};
+  // v8 实际产出的格式：grep 只挑值，键名尾部的引号还在
+  e.rigLogs.set('700', { t: Date.now(), text: '[prl] 11:42:02 stats srb time=69.1ms :: accepted":14 rejected":0 difficulty":1000000 uptime":900 ' });
+  const sh = e.sharesOf('700');
+  ok(sh?.accepted === 14 && sh?.rejected === 0 && sh?.difficulty === 1000000, `compact 格式解析：accepted=${sh?.accepted} rejected=${sh?.rejected} diff=${sh?.difficulty}`);
+  // 旧格式（完整 JSON）继续兼容
+  e.rigLogs.set('701', { t: Date.now(), text: '[prl] 11:42:02 stats srb :: { "shares": {"accepted": 7, "rejected": 1}, "difficulty": 500000 }' });
+  const sh2 = e.sharesOf('701');
+  ok(sh2?.accepted === 7 && sh2?.rejected === 1, '完整 JSON 格式仍然可解析');
+}
+
+
 console.log('— 测试模式写保护（不依赖导入顺序）');
 {
   const { assertWritable, DATA_DIR } = await import(U('src/store.js'));

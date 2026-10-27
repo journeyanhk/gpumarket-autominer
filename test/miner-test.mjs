@@ -62,8 +62,24 @@ ok(O.SCRIPT_VERSION === 8, '脚本版本号 8（v8：stats 只挑 shares/hashrat
 // vast 的日志接口会把单行截在 500 字符，SRBMiner 的完整 JSON 有 2~4KB：
 // 整段 echo 出去，shares/hashrate 永远落在截断点之后（实测 stats 行只剩 500 字符、没有 accepted）
 ok(!/stats srb \$RTT :: \$J/.test(script), 'v8：不再整段回显 JSON（否则会被 500 字符截断吃掉 shares）');
-ok(/grep -oE .*shares\|hashrate/.test(script), 'v8：只挑 shares/hashrate/gpu_compute_errors/difficulty/uptime/pool');
-ok(script.includes('cut -c1-420'), 'v8：挑完的字段时间还留了余量（<500 截断线）');
+ok(/grep -oE .*accepted\|rejected\|difficulty\|uptime/.test(script), 'v8：只挑 accepted/rejected/difficulty/uptime/1min 这几个值');
+ok(script.includes('cut -c1-300'), 'v8：挑完再截 300 字符，远离日志 500 字符截断线');
+
+console.log('— 生成的脚本必须能过 shell 语法检查');
+{
+  // v8 第一版在这里翻车：stats 那行的引号转义错位，机器上 run.sh 直接
+  // `unexpected EOF while looking for matching "` 崩溃循环，白烧 10 分钟租金。
+  const fsx = await import('node:fs');
+  const osx = await import('node:os');
+  const pathx = await import('node:path');
+  const { spawnSync } = await import('node:child_process');
+  const p = pathx.join(osx.tmpdir(), `prl-onstart-${process.pid}.sh`);
+  fsx.writeFileSync(p, script);
+  const r = spawnSync('bash', ['-n', p], { encoding: 'utf8' });
+  ok(r.status === 0, `bash -n 通过（${(r.stderr || '').trim().split('\n')[0] || 'no error'}）`);
+  fsx.rmSync(p, { force: true });
+  ok(!/grep -oE "\\"/.test(script), 'stats 抽取不允许在双引号里再嵌双引号（v8 崩溃的根因）');
+}
 
 console.log('— 没 pin 就不许租');
 ok(throws(() => O.buildOnstart({ pools, def: 'pearlhash', miners: { wr: man.miners.wr } }), /srb.*没有 pin|没有 pin/), '缺 srb 的 pin → 直接抛错（不会降级）');

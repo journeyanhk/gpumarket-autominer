@@ -103,7 +103,7 @@ export function buildOnstart({ pools, def, miners, extraArgs = '', cnFirst = fal
     // vast 的日志接口会把单行截断到 500 字符，而 SRBMiner 的完整 JSON 有 2~4KB，
     // 直接整段 echo 出去，shares / hashrate 这两个关键字段永远落在截断点之后。
     // 所以只挑需要的字段再打：shares / hashrate / difficulty / uptime / pool / gpu_compute_errors。
-    '    if [ -n "$J" ]; then S=$(printf %s "$J" | grep -oE "\"(shares|hashrate|gpu_compute_errors)\" ?: ?\\{[^}]*\\}|\"(difficulty|uptime)\" ?: ?[0-9.]+|\"pool\" ?: ?\"[^\"]*\"" | tr "\\n" " " | cut -c1-420); echo "[prl] $TS stats srb $RTT :: $S" | out; return 0; fi',
+    '    if [ -n "$J" ]; then S=$(printf %s "$J" | grep -oE \'(accepted|rejected|difficulty|uptime)"?[[:space:]]*:[[:space:]]*"?[0-9.]+\' | tr "\\n" " " | cut -c1-300); echo "[prl] $TS stats srb $RTT :: $S" | out; return 0; fi',
     '  fi',
     '  echo "[prl] $TS stats $2 $RTT :: $(tail -n 22 /root/prl/miner.log | grep -v "^ *#*$" | tr "\\n" "|" | cut -c1-500)" | out',
     '}',

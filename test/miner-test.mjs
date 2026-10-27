@@ -56,8 +56,9 @@ ok(script.includes('[ "$(sha256sum "$D/$i.part" 2>/dev/null | cut -d" " -f1)" = 
 ok(script.includes('|| wget -q -T 15 -t 1 -O $D/$i.part "$U") && [ "$(sha256sum'), '下载完成后立刻校验，没有「先解压再看」的旁路');
 ok(script.includes('没有下载源通过 sha256 校验'), '全部源都不对时给出明确失败原因');
 ok(script.includes('command -v sha256sum'), '机器上没有 sha256sum 时拒绝执行（fail-closed）');
-ok(/while true; do sleep 300; stats/.test(script) && script.includes('http://127.0.0.1:21555/'), 'v6：每 5 分钟采样一次（SRBMiner API 21555，取不到就退回日志尾）');
-ok(O.SCRIPT_VERSION === 6, '脚本版本号 6（v6：每 5 分钟采样份额统计，优先问矿工本地 API）');
+ok(/while true; do sleep 300; stats/.test(script) && script.includes('http://127.0.0.1:21555/'), 'v7：每 5 分钟采样一次（SRBMiner API 21555）');
+ok(script.includes('tr -d "\\n\\r"'), 'v7：JSON 压成单行，保证一行可解析');
+ok(O.SCRIPT_VERSION === 7, '脚本版本号 7（v7：stats 把 JSON 压成单行，否则日志里只有 "{"）');
 
 console.log('— 没 pin 就不许租');
 ok(throws(() => O.buildOnstart({ pools, def: 'pearlhash', miners: { wr: man.miners.wr } }), /srb.*没有 pin|没有 pin/), '缺 srb 的 pin → 直接抛错（不会降级）');

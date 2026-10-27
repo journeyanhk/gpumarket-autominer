@@ -9,7 +9,7 @@
 // 脚本版本 4：每个矿池可以用不同的矿工（Pearlhash 用 WildRig，Kryptex 用 SRBMiner），用到时才下载。
 // 与 v3 的区别：每个候选包在解压前必须通过 miners/manifest.json 里 pin 的 sha256；
 // 所有源都失败就拒绝启动矿工（宁可挖不到，也不执行来路不明的二进制）。
-export const SCRIPT_VERSION = 6;
+export const SCRIPT_VERSION = 7;
 
 const SAFE = /^[A-Za-z0-9@=.:/_$+,-]+$/; // 写进脚本的参数只允许这些字符，防止注入
 
@@ -99,7 +99,7 @@ export function buildOnstart({ pools, def, miners, extraArgs = '', cnFirst = fal
     '  TS=$(date +%T)',
     '  RTT=$( (ping -c1 -W2 $(echo "$1" | sed "s/^.*@//;s/:.*$//") 2>/dev/null | grep -o "time=[0-9.]*" | head -1) || true)',
     '  if [ "$2" = srb ]; then',
-    '    J=$(curl -s --max-time 5 http://127.0.0.1:21555/ 2>/dev/null)',
+    '    J=$(curl -s --max-time 5 http://127.0.0.1:21555/ 2>/dev/null | tr -d "\\n\\r" | tr -s " ")',
     '    if [ -n "$J" ]; then echo "[prl] $TS stats srb $RTT :: $J" | out; return 0; fi',
     '  fi',
     '  echo "[prl] $TS stats $2 $RTT :: $(tail -n 22 /root/prl/miner.log | grep -v "^ *#*$" | tr "\\n" "|" | cut -c1-500)" | out',

@@ -26,6 +26,9 @@ export const DEFAULT_CONFIG = {
   autoRent: false,          // 自动租用（默认关闭，先观察）
   autoDestroy: true,        // 自动退租（无算力 / 跌破止损）
   // —— 高级（一般不用改）——
+  rentMinIntervalMin: 10,   // 两次自动租用之间至少隔多久（分钟）——避免"被顶→秒补→再被顶"的拉锯
+  maxRentsPerHour: 3,       // 每小时最多自动租几台
+  preemptCooldownMin: 5,    // 竞价被收回后，冷静多久再补（分钟）
   minBalanceReserve: 2,     // 余额低于它就停止新租
   runwayGuard: false,       // 续航保护开关（默认关闭，在设置里打开）
   minRunwayHours: 12,       // 余额必须够所有机器再跑这么多小时，否则停止新租

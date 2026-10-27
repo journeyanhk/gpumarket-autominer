@@ -56,8 +56,8 @@ ok(script.includes('[ "$(sha256sum "$D/$i.part" 2>/dev/null | cut -d" " -f1)" = 
 ok(script.includes('|| wget -q -T 15 -t 1 -O $D/$i.part "$U") && [ "$(sha256sum'), '下载完成后立刻校验，没有「先解压再看」的旁路');
 ok(script.includes('没有下载源通过 sha256 校验'), '全部源都不对时给出明确失败原因');
 ok(script.includes('command -v sha256sum'), '机器上没有 sha256sum 时拒绝执行（fail-closed）');
-ok(/while true; do sleep 600; peek/.test(script), 'v5：每 10 分钟把矿工输出打到容器日志（否则只能看到启动那一次）');
-ok(O.SCRIPT_VERSION === 5, '脚本版本号 5（v5：每 10 分钟把矿工输出打到容器日志，便于事后查 stale/reject）');
+ok(/while true; do sleep 300; stats/.test(script) && script.includes('http://127.0.0.1:21555/'), 'v6：每 5 分钟采样一次（SRBMiner API 21555，取不到就退回日志尾）');
+ok(O.SCRIPT_VERSION === 6, '脚本版本号 6（v6：每 5 分钟采样份额统计，优先问矿工本地 API）');
 
 console.log('— 没 pin 就不许租');
 ok(throws(() => O.buildOnstart({ pools, def: 'pearlhash', miners: { wr: man.miners.wr } }), /srb.*没有 pin|没有 pin/), '缺 srb 的 pin → 直接抛错（不会降级）');

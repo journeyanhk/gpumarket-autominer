@@ -243,6 +243,31 @@ await e.autoDestroy(e.instances());
 ok(!e.st.managed[idJ], '取消钉住后，ROI −40% 立刻按止损退租');
 e.instances = realInstancesJ;
 
+console.log('— 被顶先改价保活（不立刻销毁）');
+e.offers = []; await e.scan(true);
+e.cfg.targetProfitPct = 20;
+// 必须挑一台「加价 10% 之后仍在利润带内」的机器，否则按设计就不该加价
+const pickK = e.offers.filter(o => !o.spotSkip && o.roi !== null && o.roi >= 40)[0]
+  || e.offers.filter(o => !o.spotSkip && o.roi !== null).sort((a,b)=>b.roi-a.roi)[0];
+e.lastRentAt = 0; e.rentCooldownUntil = 0; e.preemptCooldownUntil = 0;
+const idK = await e.rent(pickK, 'manual');
+await e.refreshVast();
+let raised = [];
+e.vast.setBidPrice = async (id, price) => { raised.push([String(id), price]); return { success: true }; };
+globalThis.__preempt(idK);
+await e.refreshVast();
+await e.decide();
+ok(raised.length === 1, `第一次被顶 → 调了一次改价（${raised[0]?.[1]}）`);
+ok(!e.st.managed[idK]?.preemptedAt, '改价成功后清掉销毁计时（继续观察）');
+ok(e.st.managed[idK]?.bidRaises?.length === 1, '记录本小时改价次数');
+// 再被顶两次仍可改，第 4 次不再改（交给销毁）
+for (let i = 0; i < 3; i++) { globalThis.__preempt(idK); await e.refreshVast(); await e.decide(); }
+ok(e.st.managed[idK]?.bidRaises?.length === 3, `每小时最多 3 次改价（当前 ${e.st.managed[idK]?.bidRaises?.length}）`);
+ok(e.st.managed[idK]?.preemptedAt > 0, '到达上限后重新开始销毁计时');
+e.st.managed[idK].preemptedAt = Date.now() - 6 * MIN;
+await e.decide();
+ok(!e.st.managed[idK], '改价次数用尽 → 仍然销毁');
+
 console.log('— 台数上限要算上"抢占待销毁"');
 {
   const f = new Engine(); f.log = () => {};

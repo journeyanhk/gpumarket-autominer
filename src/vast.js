@@ -114,6 +114,15 @@ export class Vast {
     return r;
   }
 
+  // 提高竞价实例的出价（官方 CLI `change bid`）：被顶时先改价保活，比重租省一次 3 分钟部署
+  async setBidPrice(id, price) {
+    const r = await request(`${BASE}/instances/bid_price/${id}/`, {
+      method: 'PUT', headers: this.h(), body: { client_id: 'me', price }, timeoutMs: 30000,
+    });
+    if (r && r.success === false) throw new Error(r.msg || r.error || '改价失败');
+    return r;
+  }
+
   async destroy(id) {
     return request(`${BASE}/instances/${id}/`, { method: 'DELETE', headers: this.h(), body: {}, timeoutMs: 30000 });
   }

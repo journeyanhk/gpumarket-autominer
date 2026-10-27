@@ -612,7 +612,7 @@ export class Engine {
         liveHs: w && !restarting ? w.hs : 0, avgHs, expectedHs, firstHashAt, revenueHr, expRevenueHr, roi, expRoi, phase,
         belowSince: m?.belowSince || null, refSource: ref?.source || '未知型号',
         // 竞价/按需必须暴露给面板与策略脚本：缺了它，swap-policy 会把竞价机当成按需机
-        spot: !!m?.spot, listDph: m?.listDph ?? null, pinned: !!m?.pinned,
+        spot: !!m?.spot, listDph: m?.listDph ?? null, pinned: !!m?.pinned, minBid: Number(i.min_bid) || 0,
         deploy: m ? { rentedAt: m.rentedAt, runningAt: m.runningAt || null, hashAt: m.hashAt || null, inetDown: m.inetDown ?? i.inet_down ?? null } : null,
         logHint: this.logHint(id),
       };
@@ -870,8 +870,9 @@ export class Engine {
       const m = this.st.managed[x.id] || (this.st.managed[x.id] = { rentedAt: x.startedAt, gpuName: x.gpuName, numGpus: x.numGpus, machineId: x.machineId });
       // 0) 刚重启 / 正在换矿池：给它时间恢复，期间不做任何退租判断
       if (x.phase === 'restarting' || x.phase === 'switching') continue;
-      // 0b) 竞价被抢占：stopped 期间磁盘仍计费，别等它自己回来 —— 5 分钟内销毁，且不算机器问题（不拉黑）
+      // 0b) 竞价被抢占：先试"改价保活"（一次改价零成本，一次重部署 3 分钟），改不动再销毁
       if (x.phase === 'preempted') {
+        if (await this.tryRaiseBid(x, m, now)) continue;
         if (!m.preemptedAt) {
           m.preemptedAt = now; this.save();
           this.log('warn', `实例 ${x.id} 竞价被抢占（stopped，磁盘仍在计费），${PREEMPT_DESTROY_MIN} 分钟内销毁`);
@@ -1064,7 +1065,9 @@ export class Engine {
       };
       this.save();
       if (by === 'auto') { this.rentTimes.push(Date.now()); this.save(); }
-      this.log('success', `${tag}租用 ${offer.numGpus}×${offer.gpuName}（实例 ${id}）${offer.spot ? '竞价出价' : ''}$${offer.dph.toFixed(4)}/h，挖 ${poolName(def)}，预计收益率 ${offer.roi.toFixed(1)}%`);
+      // 出价/收入比要进日志：spot 的"清算比例"就是靠这批样本的中位数算出来的
+      const ratio = offer.spot && offer.revenueHr > 0 ? `（出价/收入 ${(offer.dph / offer.revenueHr * 100).toFixed(0)}%）` : '';
+      this.log('success', `${tag}租用 ${offer.numGpus}×${offer.gpuName}（实例 ${id}）${offer.spot ? '竞价出价' : ''}$${offer.dph.toFixed(4)}/h${ratio}，挖 ${poolName(def)}，预计收益率 ${offer.roi.toFixed(1)}%`);
       setTimeout(() => this.refreshVast(), 3000);
       return id;
     } catch (e) {
@@ -1128,6 +1131,31 @@ export class Engine {
   }
 
   rigLabel(gpuName, pool) { return `${LABEL}-${gpuKey(gpuName)} pool=${pool}`; }
+
+  // 被顶时先提高出价保活：目标是「当前出价×1.1」与「入场价×1.1」的较大者，
+  // 但不得超过 revenue/(1+目标ROI)；每实例每小时最多 3 次，避免无限加价。
+  async tryRaiseBid(x, m, now) {
+    if (!x.spot) return false;
+    m.bidRaises = (m.bidRaises || []).filter(t => now - t < 60 * MIN);
+    if (m.bidRaises.length >= 3) return false;
+    // 刚租下还没出算力时 revenueHr=0，用"预期收入"算上限，否则永远无法改价
+    const rev = Math.max(Number(x.revenueHr) || 0, Number(x.expRevenueHr) || 0);
+    const upper = rev / (1 + this.cfg.targetProfitPct / 100);
+    const cur = Number(x.dph) || 0;
+    const target = Math.max(cur * 1.1, Number(x.minBid || 0) * 1.1);
+    if (!(upper > 0) || !(target > cur) || target > upper) return false;
+    try {
+      await this.vast.setBidPrice(x.id, +target.toFixed(4));
+      m.bidRaises.push(now);
+      delete m.preemptedAt;
+      this.save();
+      this.log('warn', `实例 ${x.id} 被顶，出价 $${cur.toFixed(4)} → $${target.toFixed(4)}（上限 $${upper.toFixed(4)}，本小时第 ${m.bidRaises.length} 次）`);
+      return true;
+    } catch (e) {
+      this.log('warn', `实例 ${x.id} 改价失败：${e.message}（改为销毁）`);
+      return false;
+    }
+  }
 
   // ---------- 切换矿池 ----------
   // 改 vast 标签 → 机器上的脚本 1 分钟内读到 pool=xxx 并改连新矿池；控制端等它在新矿池出算力

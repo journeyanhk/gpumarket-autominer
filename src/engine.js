@@ -384,6 +384,15 @@ export class Engine {
       for (const i of this.rawInstances) {
         const m = this.st.managed[String(i.id)];
         if (m && !m.runningAt && i.actual_status === 'running') { m.runningAt = Date.now(); this.save(); }
+        // 用平台的实际 dph_total 校正托管记录：搜索页的 dph 有时是"当前竞价价"而不是成交的按需价
+        // （实测 3090：日志写 $0.0865，真实扣费 $0.1533 —— 不校正的话 ROI/止损全按错价算）
+        if (m && Number(i.dph_total) > 0) {
+          const old = Number(m.dph) || 0, now = Number(i.dph_total);
+          if (!old || Math.abs(now - old) / Math.max(old, now) > 0.05) {
+            m.dph = now; m.dphListed = old || null; this.save();
+            if (old) this.log('warn', `实例 ${i.id} 实际租金 $${now.toFixed(4)}/h 与记录的 $${old.toFixed(4)} 不符，已按实际值计算 ROI`);
+          }
+        }
         // 注意：不要因为 actual_status 短暂回到 running 就清掉抢占计时。
         // 实测竞价实例会在 running/stopped 之间抖动（宿主重启容器），
         // 每抖一次就重置计时 → 5 分钟销毁永远不会触发，实例长期挂着收存储费。

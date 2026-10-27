@@ -39,6 +39,16 @@ const list = e.instances();
 ok(list.length === 1 && list[0].phase, `实例快照可用（phase=${list[0]?.phase}）`);
 ok(e.instancesOk, 'instancesOk=true —— decide() 不会提前 return，止损/退租这条链是通的');
 
+console.log('— 实际租金校正');
+{
+  const id0 = String(e.rawInstances[0].id);
+  e.st.managed[id0] = { rentedAt: Date.now(), gpuName: 'RTX 3090', numGpus: 1, dph: 0.0865, spot: false };
+  await e.refreshVast();   // mock 里这台的真实 dph_total 是 0.266
+  ok(Math.abs(e.st.managed[id0].dph - 0.266) < 1e-9, `按平台实际扣费校正（0.0865 → ${e.st.managed[id0].dph.toFixed(4)}）`);
+  ok(e.st.managed[id0].dphListed === 0.0865, '同时保留当初记录的挂牌价，便于复盘');
+  delete e.st.managed[id0];
+}
+
 console.log('— 新地址的 404 不算错误');
 globalThis.__account404 = true;
 await e.refreshMarket();

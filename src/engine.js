@@ -949,7 +949,24 @@ export class Engine {
     const day = this.utcDay();
     let u = this.st.searchUsage;
     if (!u || u.day !== day) u = this.st.searchUsage = { day, requests: 0, rows: 0, exhaustedAt: null };
+    u.cruiseRows ||= 0; u.windowRows ||= 0;
     return u;
+  }
+
+  // 额度分桶：40% 巡航、60% 锁给窗口。额度只有 ~331 次/天，而窗口通常出现在
+  // 亚洲/美国盘交叠的几小时——固定节奏会把额度在无窗口时段烧光，窗口来了没子弹。
+  quotaBuckets(now = Date.now()) {
+    const est = Number(this.st.quotaEst) || 0;
+    const u = this.usageToday(now);
+    const cruiseBudget = Math.floor(est * 0.4);
+    const windowBudget = Math.floor(est * 0.6);
+    const cruiseRows = Number(u.cruiseRows) || 0;
+    const windowRows = Number(u.windowRows) || 0;
+    return {
+      est, cruiseBudget, windowBudget, cruiseRows, windowRows,
+      cruiseLeft: Math.max(0, cruiseBudget - cruiseRows),
+      windowLeft: Math.max(0, windowBudget - windowRows),
+    };
   }
 
   // 当前应该隔多久扫一次（毫秒）以及原因
@@ -969,17 +986,24 @@ export class Engine {
       if (b.roomBalance <= 0) return { skip: true, why: '余额低于保留金额，暂停扫描' };
       if (b.spendCapByRunway != null && b.spend + 0.02 >= b.spendCapByRunway) return { skip: true, why: '余额不够续航，暂停扫描' };
     }
-    // 额度分摊：vast 告诉了剩余额度就用它；否则用自己学到的每日额度
     const msLeft = this.nextUtcMidnight() - now;
-    let remaining = null, src = '';
-    if (this.st.quotaEst) { remaining = Math.max(0, this.st.quotaEst * 0.9 - this.usageToday().rows); src = '按学到的每日额度'; }
-    if (remaining != null) {
-      const scansLeft = Math.floor(remaining / rows) - 1; // 留一次给手动扫描
-      if (scansLeft <= 0) return { interval: msLeft, why: `今日额度快用完（${src}），等 ${new Date(now + msLeft).toLocaleTimeString('zh-CN', { hour12: false })} 重置` };
-      const pace = msLeft / scansLeft;
-      return { interval: Math.max(base, pace), why: pace > base ? `${src}：剩 ${scansLeft} 次，均匀分摊到重置前` : '' };
+    const bk = this.quotaBuckets(now);
+    const winActive = !!this.st.windowState?.active;
+    // 窗口期：用窗口桶，60 秒一次、100 行（把额度花在刀刃上）
+    if (winActive && bk.windowLeft > 0) {
+      const rowsWin = Math.min(100, Math.max(30, Number(this.cfg.windowScanRows) || 100));
+      return { interval: 60_000, rows: rowsWin, bucket: 'window', why: `窗口期扫描：窗口桶剩 ${bk.windowLeft} 行` };
     }
-    return { interval: base, why: '' };
+    // 巡航：只用巡航桶，间隔 = 剩余时间 ÷ 剩余次数，最少 10 分钟
+    const rowsCruise = Math.min(Number(this.cfg.cruiseScanRows) || 30, Math.max(20, Number(this.cfg.scanRows) || 30));
+    const cruiseLeft = bk.est > 0 ? bk.cruiseLeft : Math.max(0, 24 * 3600 / 600 * rowsCruise); // 没学到额度时按 10 分钟一次估
+    const scansLeft = Math.max(0, Math.floor(cruiseLeft / rowsCruise));
+    if (bk.est > 0 && scansLeft <= 0) {
+      return { interval: Math.max(msLeft, 10 * MIN), rows: rowsCruise, bucket: 'cruise', why: `巡航额度已用完（窗口桶还剩 ${bk.windowLeft} 行），只等窗口` };
+    }
+    const pace = scansLeft > 0 ? msLeft / scansLeft : msLeft;
+    return { interval: Math.max(10 * MIN, base, pace), rows: rowsCruise, bucket: 'cruise',
+      why: `巡航桶剩 ${bk.cruiseLeft} 行 / 窗口桶剩 ${bk.windowLeft} 行，约每 ${Math.round(Math.max(10 * MIN, pace) / 60000)} 分钟一次` };
   }
 
   async scanTick() {
@@ -991,6 +1015,8 @@ export class Engine {
     this.offerStats.nextScanAt = plan.skip ? null : (this.lastScanAttempt || 0) + plan.interval;
     if (plan.skip) return;
     if (now - (this.lastScanAttempt || 0) < plan.interval) return;
+    this._scanRows = plan.rows || this.cfg.scanRows;
+    this._scanBucket = plan.bucket || 'cruise';
     await this.scan();
   }
 
@@ -1005,18 +1031,21 @@ export class Engine {
     try {
       let sq = this.scanQuery();
       let raw;
-      try { raw = await this.vast.searchOffers(this.cfg, meta, sq.names); }
+      const scanCfg = { ...this.cfg, scanRows: this._scanRows || this.cfg.scanRows };
+      try { raw = await this.vast.searchOffers(scanCfg, meta, sq.names); }
       catch (e) {
         // 万一 vast 不接受按型号过滤：本次改用全量搜索，之后不再用精准搜索
         if (sq.mode !== 'focused' || e.status === 429 || !(e.status >= 400 && e.status < 500)) throw e;
         this.focusedOff = true;
         this.log('warn', `vast 不接受按型号精准搜索（${e.message.slice(0, 80)}），改回全量搜索`);
         sq = { mode: 'broad' };
-        raw = await this.vast.searchOffers(this.cfg, meta);
+        raw = await this.vast.searchOffers(scanCfg, meta);
       }
       this.learnVastNames(raw);
       const u = this.usageToday();
       u.requests++; u.rows += raw.length;
+      if (this._scanBucket === 'window') u.windowRows = (u.windowRows || 0) + raw.length;
+      else u.cruiseRows = (u.cruiseRows || 0) + raw.length;
       this.readQuotaHeaders(meta.headers);
       this.save();
       this.offerStats.error = null;
@@ -1479,7 +1508,7 @@ export class Engine {
       const best = offers.reduce((a, o) => Math.max(a, (o.th * d6 / 24) / o.dph), 0);
       ratio = +best.toFixed(3);
     }
-    return { chg1h: chg(3600e3), density6h: +d6.toFixed(5), densityRise24hPct: rise, ratio };
+    return { chg1h: chg(3600e3), chg6h: chg(6 * 3600e3), density6h: +d6.toFixed(5), densityRise24hPct: rise, ratio };
   }
 
   // 每轮扫描算一次；触发则进入窗口（最长 minutes 分钟），到点自动退出
@@ -1497,6 +1526,10 @@ export class Engine {
     const info = this.windowInfo(now);
     let why = null;
     if (info.chg1h != null && info.chg1h >= Number(cfg.chg1hPct ?? 8)) why = `PRL 1h ${info.chg1h > 0 ? '+' : ''}${info.chg1h}% ≥ ${cfg.chg1hPct}%`;
+    // 阶梯式上涨：6h 涨够、但 1h 已停滞（最常见的形态，只认 1h 会漏）
+    else if (info.chg6h != null && info.chg6h >= Number(cfg.chg6hPct ?? 8) && info.ratio != null && info.ratio >= Number(cfg.stairRatio ?? 1.1)) {
+      why = `PRL 6h +${info.chg6h}% ≥ ${cfg.chg6hPct ?? 8}% 且密度÷地板 ${info.ratio} ≥ ${cfg.stairRatio ?? 1.1}（阶梯窗口）`;
+    }
     else if (info.ratio != null && info.ratio >= Number(cfg.ratio ?? 1) && info.densityRise24hPct != null && info.densityRise24hPct >= Number(cfg.densityRise24hPct ?? 15)) {
       why = `密度÷地板 ${info.ratio} ≥ ${cfg.ratio} 且密度 24h ${info.densityRise24hPct > 0 ? '+' : ''}${info.densityRise24hPct}%`;
     }
@@ -1629,7 +1662,17 @@ export class Engine {
     const why = this.preflight();
     if (why.length) { this._warnOnce('pre', `自动租用暂停：${why.join('、')}`); return; }
     const plan = this.scanPlan();
-    if (Date.now() - this.offerStats.scannedAt > Math.min(60 * MIN, Math.max(10 * MIN, (plan.interval || 0) * 2))) return;
+    // 「最近扫描太旧就不下单」这条在额度耗尽时是致命的：scannedAt 不再更新，
+    // 缓存里有可用报价也永远进不来（2026-10-28 两次窗口都是被这条挡住的）。
+    // 额度暂停期间，用报价缓存的时间戳当新鲜度基准，上限 offerCacheMaxMin 分钟。
+    const quotaPaused = this.pauseReason === 'quota' && Date.now() < (this.scanPausedUntil || 0);
+    const cacheAt = this.st.offersCache?.at || 0;
+    const cacheAge = cacheAt ? Date.now() - cacheAt : Infinity;
+    const cacheUsable = (this.offers || []).length > 0 && cacheAge <= (Number(this.cfg.offerCacheMaxMin) || 30) * MIN;
+    const maxAge = Math.min(60 * MIN, Math.max(10 * MIN, (plan.interval || 0) * 2));
+    const freshAt = quotaPaused && cacheUsable ? Math.max(this.offerStats.scannedAt || 0, cacheAt) : (this.offerStats.scannedAt || 0);
+    if (Date.now() - freshAt > maxAge) return;
+    if (quotaPaused && cacheUsable) this._warnOnce('cachebid', `额度已耗尽，用 ${Math.round(cacheAge / 60000)} 分钟前的缓存报价出价（下单不吃搜索配额）`);
     const b = this.budget(list);
     if (b.roomCount <= 0 || b.roomSpend <= 0) return;
     this.repriceOffers(); // 下单前一刻用最新币价和全网算力重算
@@ -1640,7 +1683,11 @@ export class Engine {
     const candidates = this.offers.filter(o =>
       o.roi >= this.cfg.targetProfitPct && o.autoOk && !o.used && !o.spotSkip &&
       !(this.st.blacklist[o.machineId]?.until > now) &&
-      o.dph <= b.roomSpend);
+      o.dph <= b.roomSpend
+      // 额度耗尽时的应急通道：用缓存报价下单（下单走 /asks/，不吃搜索配额）。
+      // 只接受 ≤ offerCacheMaxMin 分钟、且 min_bid 不跳动的缓存，其余当作过期。
+      && (!o.stale || Date.now() - (this.st.offersCache?.at || 0) <= (Number(this.cfg.offerCacheMaxMin) || 30) * MIN)
+      && !(o.stale && o.minBidTrend?.unstable));
     const affordable = candidates.filter(o => b.spend + o.dph <= spendCap);
     if (candidates.length && !affordable.length) {
       this._warnOnce('runway', `余额 $${this.account.vastBalance.toFixed(2)} 只够每小时花 $${spendCap.toFixed(2)}（续航 ${this.cfg.minRunwayHours} 小时），现在已花 $${b.spend.toFixed(2)}/h，停止新租；充值后会自动继续`);
@@ -2096,6 +2143,7 @@ export class Engine {
     num('rentMinIntervalMin', 1, 180); num('maxRentsPerHour', 1, 20); num('preemptCooldownMin', 0, 120);
     num('maxBidRaises', 0, 10);   // 0 = 不追价（默认）；>0 才允许被顶后加价保活
     num('dailyFailBudget', 0, 100); num('minBidStablePct', 0, 100);
+    num('cruiseScanRows', 20, 200); num('windowScanRows', 20, 1000); num('chg6hPct', 1, 100); num('stairRatio', 0.5, 5); num('offerCacheMaxMin', 5, 240);
     if (patch.venueGuard !== undefined) {
       const v = patch.venueGuard;
       if (v === null) next.venueGuard = null;
@@ -2294,7 +2342,9 @@ export class Engine {
       instances: list,
       offers: this.offers.slice(0, 80),
       offerStats: { ...this.offerStats, pausedUntil: this.scanPausedUntil > now ? this.scanPausedUntil : 0, pauseReason: this.scanPausedUntil > now ? this.pauseReason : null,
-        usage: this.usageToday(), quota: this.st.searchQuota || null, quotaEst: this.st.quotaEst || null },
+        usage: this.usageToday(), quota: this.st.searchQuota || null, quotaEst: this.st.quotaEst || null,
+        // 额度分桶：巡航 40% / 窗口 60%；巡检要报这两个余量，而不是只说"额度用完了"
+        buckets: this.quotaBuckets(), cacheAt: this.st.offersCache?.at || null, cacheRows: this.st.offersCache?.rows?.length || 0 },
       table: this.table,
       history: this.st.history.slice(-288),
       events: this.events.slice(0, 120),

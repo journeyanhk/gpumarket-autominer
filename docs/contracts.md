@@ -306,3 +306,24 @@ Pearl 的 ticker 已经被三方撞过：Gate 的 `PEARL` 是 Pearl，而 Gate/B
 2026-10-28 实测：`gate/PEARL_USDT` 1.00×、`lighter/PRL` 1.00× → 可用；
 `gate/PRL_USDT`、`binance PRLUSDT(perp)`、`mexc/bitget/kucoin PRLUSDT` 全部 0.06× → 判定 IMPOSTOR。
 结论：**Pearl 目前只有 Gate 现货 + Lighter 永续两个可用场所**，其余都是同名不同币。
+
+### 8.10 搜索额度分桶（40 / 60）与「额度耗尽也能下单」
+
+vast 的搜索额度按**返回行数**计、UTC 0 点重置（北京时间 08:00）。固定 90 秒 × 60 行的节奏
+会在无窗口的下午把额度烧光（2026-10-28：331 次 / 19,860 行，正好在两次 +10% 窗口前耗尽）——
+这是**策略缺陷**，不是"只能等到明早"。
+
+- `quotaBuckets()`：`quotaEst × 40%` 给巡航、`× 60%` 锁给窗口，`usageToday()` 分别记 `cruiseRows` / `windowRows`。
+- 巡航：每次 `cruiseScanRows`（默认 30）行，间隔 = 剩余巡航额度 ÷ 剩余次数，**最少 10 分钟**。
+- 窗口：`windowScanRows`（默认 100）行、**60 秒**一次，直到窗口桶耗尽。
+- 下单不受搜索配额限制（走 `PUT /asks/{id}`），所以额度耗尽时用**缓存报价**出价：
+  `offersCache` 落盘、≤ `offerCacheMaxMin`（30 分钟）、`min_bid` 稳定、`thPer01` 过线的可直接下单，
+  `no_such_ask` / `unavailable` 换下一条，不计失败成本。
+- `autoRent` 里「最近扫描太旧就不下单」的闸门在额度暂停期间改用**缓存时间戳**判断——
+  这条不改，缓存报价永远进不来（两次窗口都是被它挡住的）。
+
+### 8.11 第三种窗口触发：6 小时阶梯上涨
+
+只认「1 小时急涨」会漏掉最常见的形态：价格分几小时阶梯抬上来、1 小时已经停滞
+（2026-10-28：1h +0.56% 但 6h +11.04%）。第三条规则：
+`6h 涨幅 ≥ chg6hPct（8%）` **且** `密度 6h 均值 ÷ 地板 ≥ stairRatio（1.1）`。

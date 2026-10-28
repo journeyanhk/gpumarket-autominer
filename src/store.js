@@ -71,6 +71,12 @@ export const DEFAULT_CONFIG = {
   l1Default: 0.8,           // 没有样本的型号，按"份额反推算力 ÷ 矿工自报"= 0.8 保守折算
   // 场所单点降级：Gate 现货（唯一变现出口）或 Lighter 永续（唯一对冲腿）任一不可用 → 保护态
   venueGuard: { enabled: true, inventoryCapPrl: 50 },
+  // 额度分桶：巡航只花 40%，60% 锁给窗口（窗口通常出现在亚洲/美国盘交叠的几小时）
+  cruiseScanRows: 30,     // 巡航每次取多少行（越小越省额度）
+  windowScanRows: 100,    // 窗口期每次取多少行（要看得全）
+  chg6hPct: 8,            // 第三种窗口触发：6 小时涨幅 ≥ 8%
+  stairRatio: 1.1,        //                   且 密度÷地板 ≥ 1.1（阶梯式上涨）
+  offerCacheMaxMin: 30,   // 缓存报价可用于下单的最大年龄（额度耗尽时的应急通道）
   minBalanceStop: 5,        // 总开关：余额低于此值，一切新租停止
   maxSourceStaleMin: 60,    // 总开关：行情三源全部失效超过这么久，停止新租
   minBalanceReserve: 2,     // 余额低于它就停止新租

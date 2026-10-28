@@ -319,6 +319,52 @@ console.log('— 场所单点降级：库存超上限才停租');
   ok(e.rentAllowed().ok, '场所恢复后自动解除');
 }
 
+console.log('— 额度分桶：巡航 40% / 窗口 60%');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.cfg.autoRent = true; e.account.vastBalance = 100; e.market.updatedAt = Date.now();
+  e.st.quotaEst = 19860;   // 今天学到的额度
+  e.st.searchUsage = { day: e.utcDay(), requests: 0, rows: 0, cruiseRows: 0, windowRows: 0 };
+  e.st.windowState = { active: false };
+  let bk = e.quotaBuckets();
+  ok(bk.cruiseBudget === Math.floor(19860 * 0.4) && bk.windowBudget === Math.floor(19860 * 0.6),
+     `预算 40/60 拆分：巡航 ${bk.cruiseBudget} 行 / 窗口 ${bk.windowBudget} 行`);
+  e.st.searchUsage.cruiseRows = bk.cruiseBudget;   // 巡航额度用光
+  bk = e.quotaBuckets();
+  ok(bk.cruiseLeft === 0 && bk.windowLeft === bk.windowBudget, '巡航用光后窗口桶仍然是满的（这就是改成 40/60 的意义）');
+  const planCruise = e.scanPlan();
+  ok(/巡航额度已用完/.test(planCruise.why || ''), `巡航桶耗尽 → 只等窗口（${planCruise.why}）`);
+  // 窗口开启后改用窗口桶：60 秒一次、100 行
+  e.st.windowState = { active: true, until: Date.now() + 3600e3 };
+  const planWin = e.scanPlan();
+  ok(planWin.interval === 60_000 && planWin.rows === 100 && planWin.bucket === 'window',
+     `窗口期扫描：每 ${planWin.interval / 1000}s、${planWin.rows} 行、桶=${planWin.bucket}`);
+  // 窗口桶也用光 → 回落到巡航节奏（不会无限扫）
+  e.st.searchUsage.windowRows = bk.windowBudget;
+  const planWin2 = e.scanPlan();
+  ok(planWin2.bucket !== 'window' || planWin2.interval > 60_000, '窗口桶用光后不再高频扫描');
+}
+
+console.log('— 第三种窗口触发：6h 阶梯上涨');
+{
+  const e = new Engine();
+  e.log = () => {};
+  const now = Date.now();
+  e.cfg.windowMode = { enabled: true, chg1hPct: 8, chg6hPct: 8, stairRatio: 1.1, ratio: 1, densityRise24hPct: 15, minutes: 360, minBidStablePct: 50, failBudgetUsd: 1, maxHourlySpend: 0.6 };
+  e.cfg.l1Default = 1;
+  e.st.windowState = null;
+  e.market.price = 1.81;
+  e.st.history = [{ t: now - 6 * 3600e3, price: 1.63 }, { t: now - 3600e3, price: 1.80 }];
+  e.densitySamples = [{ t: now - 3600e3, v: 0.0224 / 24e12 }];
+  e.offers = [{ dph: 0.10, th: 100 }];   // 收入 100*0.0224/24 = 0.0933 → ratio 0.93
+  let st = e.updateWindowMode(now);
+  ok(!st.active, `比值不足 1.1 时不触发（${JSON.stringify(e.windowInfo(now))}）`);
+  e.offers = [{ dph: 0.08, th: 100 }];   // ratio ≈ 1.17
+  st = e.updateWindowMode(now);
+  ok(st.active && /6h/.test(st.reason || ''), `6h +11% 且比值 ≥1.1 → 触发阶梯窗口（${st.reason}）`);
+}
+
 console.log('— 窗口模式：两种触发 / 只放宽三项 / 自动退出');
 {
   const e = new Engine();

@@ -1078,6 +1078,14 @@ export class Engine {
             this.anonBackoffUntil = Date.now() + (Number(this.cfg.anonBackoffMin) || 5) * MIN;
             throw e1;
           }
+          // key 失效（401/403/404 Invalid user key）也要能退回匿名：否则一条 key 出错就完全停摆
+          const badKey = e1.status === 401 || e1.status === 403 || /invalid user key|unauthorized|invalid api/i.test(e1.message || '');
+          if (badKey && anon === false) {
+            this.log('error', `vast API key 无效（${e1.message.slice(0, 60)}）—— 退回匿名搜索；下单/查实例仍需有效 key`);
+            this.anonAvailable = true;
+            const r = await trySearch(true);
+            return r;
+          }
           if (e1.status !== 429 || !quotaHit) throw e1;
           this.log('warn', `${anon ? '匿名' : '带 key'} 搜索额度耗尽，改用${anon ? '带 key' : '匿名'}身份重试`);
           const r = await trySearch(!anon);

@@ -342,6 +342,7 @@ ok(snap.market.nockPerThDay > 0 && snap.account.nockPending === 0.0295, `面板�
 
   // 调度
   e6.st.quotaEst = 3000;
+  e6.anonAvailable = false;   // 本用例测的是「账号额度分摊」路径，先关掉匿名巡航
   e6.st.searchUsage = { day: e6.utcDay(), requests: 0, rows: 0 };
   let plan = e6.scanPlan();
   const expect = (e6.nextUtcMidnight() - Date.now()) / (Math.floor(2700 / 100) - 1);

@@ -287,3 +287,22 @@ allocate({
 
 规则：按型号维护最近 20 个样本取中位数；**样本 <3 的型号用全局保守值 `l1Default = 0.8`**（不拿一两台机器当结论）；
 异常值（<0.3 或 >1.5）直接丢弃。面板同时暴露 `th`（乘过 L1）与 `thRaw`，避免再被单一口径误导。
+
+### 8.9 场所审计 `tools/venue-audit.mjs`（同名不同币防线）
+
+Pearl 的 ticker 已经被三方撞过：Gate 的 `PEARL` 是 Pearl，而 Gate/Binance/MEXC/Bitget/KuCoin 的 `PRL`
+是**另一个项目**（全都在 $0.096–0.097 一带，5 个所都挂着，成交量还不小）。差一个数量级，
+深度再好也不能用——用错就是拿别人的盘口做对冲。
+
+工具做法：取权威参考价（优先控制台 `market.price`，退回 pearlhash `/api/pearl-price`），
+逐个场所拉最新价并算 `ratio = 场所价 / 参考价`：
+
+| ratio | 判定 | 处理 |
+|---|---|---|
+| 0.67–1.5 | `SAME_ASSET` | 可用（`--deep` 时再拉三层盘口） |
+| <0.33 或 >3 | `IMPOSTOR` | 直接忽略，并在输出里点名 |
+| 其余 | `SUSPECT` | 人工核（可能只是行情滞后） |
+
+2026-10-28 实测：`gate/PEARL_USDT` 1.00×、`lighter/PRL` 1.00× → 可用；
+`gate/PRL_USDT`、`binance PRLUSDT(perp)`、`mexc/bitget/kucoin PRLUSDT` 全部 0.06× → 判定 IMPOSTOR。
+结论：**Pearl 目前只有 Gate 现货 + Lighter 永续两个可用场所**，其余都是同名不同币。

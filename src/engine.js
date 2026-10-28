@@ -969,8 +969,11 @@ export class Engine {
     const windowBudget = Math.floor(est * 0.6);
     const cruiseRows = Number(u.cruiseRows) || 0;
     const windowRows = Number(u.windowRows) || 0;
+    // 注意：/bundles/ 返回的 x-ratelimit-* 是**请求频率**（limit=30），不是每日行数额度。
+    // 只有当我们真的看到一个"行数级"的上限（>1000）时才把它当成每日余量，否则忽略。
     const lastQuota = this.st.lastQuota || {};
-    const totalLeft = Number.isFinite(Number(lastQuota.remaining)) ? Number(lastQuota.remaining) : null;
+    const looksLikeRows = Number(lastQuota.limit) > 1000;
+    const totalLeft = looksLikeRows && Number.isFinite(Number(lastQuota.remaining)) ? Number(lastQuota.remaining) : null;
     let cruiseLeft = Math.max(0, cruiseBudget - cruiseRows);
     let windowLeft = Math.max(0, windowBudget - windowRows);
     // vast 响应头是"真实剩余"的唯一来源：一旦它比我们的记账更小，两边一起夹住

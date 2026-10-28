@@ -357,13 +357,30 @@ export class Engine {
     const L = this.st.ledger;
     return (L[pool] ||= { since: Date.now(), prl: { last: null, acc: 0 }, nock: { last: null, acc: 0 }, spend: 0, theo: 0, hours: 0 });
   }
+  // 累计到账（acc）必须是**单调**的。这里曾经踩过一个 P0 级 bug：
+  // 传进来的值是「当前余额」而不是「累计到账」，于是矿池一打款余额归零、又从 0 涨回来，
+  // 同一笔币被记了两次（2026-10-28 实测 Kryptex 多记 1.03、Pearlhash 多记 1.10，
+  // 面板"全程盈利 +$2.26" 其实是 −$1.65）。
+  // 两条防线：
+  //   ① 调用方一律传单调量（Kryptex = paid + balance，Pearlhash = 正值交易之和 + pending）；
+  //   ② 这里保留高水位：值一旦下降只记一次 resets 计数，绝不把 last 跟着降。
   track(pool, coin, value) {
     if (!Number.isFinite(value)) return;
     const c = this.ledgerOf(pool)[coin];
-    const delta = (c.last != null && value > c.last) ? value - c.last : 0;
-    if (delta > 0 && coin === 'prl') this.allocateCredit(pool, delta);
-    if (c.last != null && value > c.last) c.acc += value - c.last;
-    c.last = value;
+    if (c.last == null) { c.last = value; return; }
+    if (value > c.last) {
+      const delta = value - c.last;
+      if (coin === 'prl') this.allocateCredit(pool, delta);
+      c.acc += delta;
+      c.last = value;
+      return;
+    }
+    if (value < c.last) {
+      // 打款/接口口径回退：累计到账不能减，也不许把高水位拉低（否则下一轮会重复计入）
+      c.resets = (c.resets || 0) + 1;
+      c.resetAt = Date.now();
+      if (!this._warned?.ledgerReset) { this._warned ||= {}; this._warned.ledgerReset = true; this.log('warn', `${pool} 的累计到账计数回落（$${value.toFixed(4)} < 高水位 ${c.last.toFixed(4)}），已忽略本次回落`); }
+    }
   }
   // 把这段时间的租金和理论收益记到机器当前所在的矿池
   accrue(list, now = Date.now()) {
@@ -703,6 +720,11 @@ export class Engine {
       preemptKind: l.preemptKind || preemptKind,
       opponentRatio: l.opponentRatio ?? opponentRatio,
     });
+    // 从来没出过份额 → 这笔租金算"失败成本"（每日封顶的对象）
+    if (!l.tFirstShare) {
+      const h = Math.max(0, (l.tEnd - l.tRent) / 3_600_000);
+      this.addFailSpend((Number(l.dphTotalActual ?? l.bidFinal ?? 0) || 0) * h);
+    }
     this.save();
     return l;
   }
@@ -1100,6 +1122,10 @@ export class Engine {
         source: ref.source, autoOk: ref.autoOk,
         blacklisted: bl && bl.until > now ? bl.reason : null,
       }, usd);
+      // min_bid 30 分钟稳定性：竞价机的 min_bid 是房东/市场的挂牌地板，
+      // 半小时内跳 >10% 说明这台机器正在被抢（或房东在试探），此时出价大概率刚租就被收。
+      offer.minBidTrend = this.recordMinBid(o.machine_id, offer.minBid, now);
+      if (offer.spot && offer.minBidTrend && offer.minBidTrend.unstable) offer.spotSkip = true;
       offer.thPer01 = offer.th / (offer.dph / 0.1);
       const line = this.minThPer01;
       offer.passLine = line == null ? null : offer.thPer01 >= line;
@@ -1111,6 +1137,24 @@ export class Engine {
       total: raw.length, known, profitable: out.filter(x => x.roi !== null && x.roi >= this.cfg.targetProfitPct).length,
       scannedAt: now, error: null,
     };
+  }
+
+  // min_bid 走势：返回 { unstable, changePct, spanMin }；样本不足返回 null（不误杀新机）
+  recordMinBid(machineId, minBid, now = Date.now()) {
+    if (!machineId || !(Number(minBid) > 0)) return null;
+    const st = this.st.minBidHist ||= {};
+    const key = String(machineId);
+    const arr = (st[key] || []).filter(x => now - x.t < 30 * MIN);
+    arr.push({ t: now, mb: +Number(minBid).toFixed(4) });
+    if (arr.length > 40) arr.splice(0, arr.length - 40);
+    st[key] = arr;
+    // 清理太久没见的机器，避免 state 无限膨胀
+    if (Object.keys(st).length > 400) for (const k of Object.keys(st)) if (!st[k].length || now - st[k].at(-1).t > 120 * MIN) delete st[k];
+    const old = arr.find(x => now - x.t >= 20 * MIN);   // 至少 20 分钟前的样本
+    if (!old) return { unstable: false, changePct: null, spanMin: null };
+    const pct = (Number(minBid) / old.mb - 1) * 100;
+    const limit = Number(this.cfg.minBidStablePct ?? 10);
+    return { unstable: Math.abs(pct) > limit, changePct: +pct.toFixed(1), spanMin: Math.round((now - old.t) / MIN) };
   }
 
   // ---------- 决策：自动退租 + 自动租用 ----------
@@ -1273,6 +1317,21 @@ export class Engine {
 
   // 租用节流：被顶 → 秒补 → 再被顶 的拉锯会烧掉部署时间和失败成本。
   // 三个闸门：冷却期（抢占后）、最小间隔、每小时上限。
+  // 失败成本：只统计「从来没出过份额」的租约（部署失败 / 刚下就被收回）
+  failSpendToday(now = Date.now()) {
+    const day = new Date(now).toISOString().slice(0, 10);
+    const f = this.st.failSpend ||= { day, usd: 0 };
+    if (f.day !== day) { f.day = day; f.usd = 0; }
+    return f;
+  }
+
+  addFailSpend(usd, now = Date.now()) {
+    if (!(usd > 0)) return;
+    const f = this.failSpendToday(now);
+    f.usd = +(f.usd + usd).toFixed(4);
+    this.save();
+  }
+
   rentAllowed(now = Date.now()) {
     // 总开关：余额见底或行情全部失效时，一切新租停止（与 fail-closed 配套的最后一道闸）
     const bal = this.account.vastBalance;
@@ -1282,6 +1341,11 @@ export class Engine {
     if (staleMin > Number(this.cfg.maxSourceStaleMin ?? 60)) return { ok: false, why: `行情已 ${Math.round(staleMin)} 分钟没更新` };
     if (now < (this.rentCooldownUntil || 0)) return { ok: false, why: '429 退避中' };
     if (now < (this.preemptCooldownUntil || 0)) return { ok: false, why: `竞价被收回后的冷静期（剩 ${Math.ceil((this.preemptCooldownUntil - now) / 60000)} 分钟）` };
+    // 每日失败成本封顶：租到的机器一台都没出过份额就被收回/退租的钱，
+    // 单独累计（不算正常租用），到顶就停到明天——否则"等待模式"的上限无界。
+    const fs = this.failSpendToday(now);
+    const fsCap = Number(this.cfg.dailyFailBudget ?? 0.3);
+    if (fsCap > 0 && fs.usd >= fsCap) return { ok: false, why: `今日失败成本 $${fs.usd.toFixed(2)} 已达上限 $${fsCap}（停机到明天）` };
     this.rentTimes = (this.rentTimes || []).filter(t => now - t < 60 * MIN);
     if (this.rentTimes.length >= (this.cfg.maxRentsPerHour || 3)) return { ok: false, why: `本小时已租 ${this.rentTimes.length} 台（上限 ${this.cfg.maxRentsPerHour}）` };
     const last = this.rentTimes[this.rentTimes.length - 1] || 0;
@@ -1762,6 +1826,7 @@ export class Engine {
     num('spotBidBuffer', 0, 1); num('spotBidMultiplier', 1, 3); num('spotBidFloorRatio', 0, 1);
     num('rentMinIntervalMin', 1, 180); num('maxRentsPerHour', 1, 20); num('preemptCooldownMin', 0, 120);
     num('maxBidRaises', 0, 10);   // 0 = 不追价（默认）；>0 才允许被顶后加价保活
+    num('dailyFailBudget', 0, 100); num('minBidStablePct', 0, 100);
     // 实验参数覆盖：只允许挂在 pinned 机器上（作用域收窄），键名与范围都校验
     if (patch.expOverride !== undefined) {
       const o = patch.expOverride;

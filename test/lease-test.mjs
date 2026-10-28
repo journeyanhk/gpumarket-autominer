@@ -201,6 +201,83 @@ console.log('— 到账分摊：增量份额 × 难度，含刚结束的租约')
   ok(f.creditedSrc === 'pool_alloc', '缺份额时 creditedSrc 如实标成 pool_alloc');
 }
 
+console.log('— 每日失败成本封顶');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.cfg.dailyFailBudget = 0.3;
+  e.account.vastBalance = 100;
+  e.market.updatedAt = Date.now();
+  e.rentCooldownUntil = 0; e.preemptCooldownUntil = 0; e.rentTimes = [];
+  e.st.failSpend = { day: '', usd: 0 };
+  ok(e.rentAllowed().ok, '失败成本为 0 时正常放行');
+  e.addFailSpend(0.2);
+  ok(e.failSpendToday().usd === 0.2 && e.rentAllowed().ok, '累计 $0.2（未到 $0.3）仍放行');
+  e.addFailSpend(0.15);
+  const g = e.rentAllowed();
+  ok(!g.ok && /失败成本/.test(g.why), `累计 $0.35 触发封顶（${g.why}）`);
+  // 第二天清零
+  e.st.failSpend.day = '2000-01-01';
+  ok(e.failSpendToday().usd === 0 && e.rentAllowed().ok, '跨天自动清零，恢复放行');
+
+  // 结租时只有"没出过份额"的才算失败成本
+  const now = Date.now();
+  const mk = (id, hashed) => {
+    const l = e.leaseOf(id, { gpuName: 'RTX 3060', spot: true, bid: 0.1, rentedAt: now - 60 * MIN_ }, {});
+    l.pool = 'kryptex'; l.dphTotalActual = 0.12; l.tFirstShare = hashed ? now - 30 * MIN_ : null;
+    return l;
+  };
+  e.st.failSpend = { day: '', usd: 0 };
+  mk('601', false);
+  e.closeLeaseFor('601', { reason: '竞价被抢占（stopped，磁盘仍在计费）' });
+  ok(Math.abs(e.failSpendToday().usd - 0.12) < 1e-6, `没出过份额的 1 小时租约记 $0.12（当前 ${e.failSpendToday().usd}）`);
+  e.st.failSpend = { day: '', usd: 0 };
+  mk('602', true);
+  e.closeLeaseFor('602', { reason: '竞价被抢占（stopped，磁盘仍在计费）' });
+  ok(e.failSpendToday().usd === 0, '出过份额的租约不计入失败成本（即使也被收回）');
+}
+
+console.log('— min_bid 30 分钟稳定性过滤');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.st.minBidHist = {};
+  e.cfg.minBidStablePct = 10;
+  const now = Date.now();
+  e.recordMinBid(9001, 0.10, now - 60 * MIN_);
+  e.recordMinBid(9001, 0.10, now - 30 * MIN_);
+  const calm = e.recordMinBid(9001, 0.101, now);
+  ok(calm && !calm.unstable, `min_bid 稳定（${calm.changePct}%）→ 不算不稳定`);
+  e.st.minBidHist = {};
+  e.recordMinBid(9002, 0.10, now - 25 * MIN_);
+  const hot = e.recordMinBid(9002, 0.13, now);
+  ok(hot && hot.unstable && hot.changePct > 25, `min_bid 25 分钟涨 ${hot.changePct}% → 判为不稳定（正在被抢）`);
+  e.st.minBidHist = {};
+  const fresh = e.recordMinBid(9003, 0.10, now);
+  ok(fresh && !fresh.unstable && fresh.changePct === null, '样本不足 20 分钟 → 不误杀新机');
+}
+
+
+console.log('— 累计到账必须单调：矿池打款不能把同一笔记两次');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.st.ledger = { kryptex: { since: Date.now(), prl: { last: null, acc: 0 }, nock: { last: null, acc: 0 }, spend: 0, theo: 0, hours: 0 } };
+  e.leases = []; e.st.leases = [];
+  const L = () => e.st.ledger.kryptex.prl;
+  e.track('kryptex', 'prl', 1.78);   // 第一笔只做基线，不计入 acc
+  ok(L().acc === 0 && Math.abs(L().last - 1.78) < 1e-9, `首笔作为基线（acc=${L().acc}，last=${L().last}）`);
+  e.track('kryptex', 'prl', 0.75);   // 打款后余额归零（曾经就是这里把 1.03 记了两次）
+  ok(L().acc === 0, '打款导致计数回落 → acc 不变');
+  ok(Math.abs(L().last - 1.78) < 1e-9, '高水位不被拉低（否则下一轮会重复计入）');
+  ok((L().resets || 0) === 1, '回落被记成 resets 计数，方便以后发现口径问题');
+  e.track('kryptex', 'prl', 1.90);
+  ok(Math.abs(L().acc - 0.12) < 1e-9, `后续只加增量 0.12 → acc=${L().acc}`);
+  // 对照：老口径（余额型）会把打款后的 0.75 再涨回 1.78 记成 +1.03
+  ok(Math.abs(L().acc - 1.03) > 0.5, '没有把打款金额重复计入');
+}
+
+
 console.log('— 同一房东 1 小时收回 ≥2 台 → 拉黑该房东已知机器 24h');
 {
   const e = new Engine();

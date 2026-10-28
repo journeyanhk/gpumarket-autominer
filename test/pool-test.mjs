@@ -176,11 +176,15 @@ const L0 = JSON.parse(JSON.stringify(e.st.ledger));
 globalThis.__kxEarned = 7.5;
 e.kx.earnedAt = 0; await e.refreshKryptex();
 ok(Math.abs(e.st.ledger.kryptex.prl.acc - (L0.kryptex?.prl.acc || 0) - 2.5) < 1e-9, 'Kryptex 累计收益从 5 → 7.5 PRL，记 +2.5');
-globalThis.__kxEarned = 1;   // 打款后余额下降
+// 打款造成的计数回落（老口径的坑）：acc 不变、高水位不被拉低
+globalThis.__kxEarned = 1;
 e.kx.earnedAt = 0; await e.refreshKryptex();
-globalThis.__kxEarned = 1.4;
+ok(Math.abs(e.st.ledger.kryptex.prl.acc - (L0.kryptex?.prl.acc || 0) - 2.5) < 1e-9, '打款造成的回落不进 acc（曾经在这里把同一笔重复计入）');
+ok(e.st.ledger.kryptex.prl.resets >= 1, '回落被记成 resets（口径问题的报警信号）');
+// 单调口径（paid + balance）继续增长 → 正常累加
+globalThis.__kxEarned = 7.9;
 e.kx.earnedAt = 0; await e.refreshKryptex();
-ok(Math.abs(e.st.ledger.kryptex.prl.acc - (L0.kryptex?.prl.acc || 0) - 2.9) < 1e-9, '打款造成的下降不算负收益，之后继续累加（+0.4）');
+ok(Math.abs(e.st.ledger.kryptex.prl.acc - (L0.kryptex?.prl.acc || 0) - 2.9) < 1e-9, '单调口径继续增长时正常累加（+0.4）');
 // 租金记到机器所在的矿池
 await e.setPool(idB, 'kryptex'); await e.refreshKryptex(); await e.checkSwitches(e.instances());
 list = e.instances();

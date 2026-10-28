@@ -53,6 +53,8 @@ export const DEFAULT_CONFIG = {
   // 为什么必须这么写：实验参数留在全局配置里，等于让 autoRent 用实验门槛去租生产机
   // （2026-10-27 的 3060 Ti 就是以 −48.5% ROI 进场：它注定额亏，却因为止损被放到 −90% 而活着）。
   expOverride: null,
+  dailyFailBudget: 0.3,   // 每日"失败成本"（租到手却没出过一份份额的租金）上限，到顶停租到明天
+  minBidStablePct: 10,    // 竞价机 min_bid 30 分钟内变动超过这个百分比就跳过（正在被抢）
   minBalanceStop: 5,        // 总开关：余额低于此值，一切新租停止
   maxSourceStaleMin: 60,    // 总开关：行情三源全部失效超过这么久，停止新租
   minBalanceReserve: 2,     // 余额低于它就停止新租
@@ -119,6 +121,8 @@ export function loadState() {
     history: [],     // [{ t, price, netEh, usdPerThDay, spend, revenue }]
     leases: [],      // 租约台账：一台机器一条完整生命周期记录（见 src/leases.js）
     hostStats: {},   // 房东维度：1 小时内收回 ≥2 台 → 该房东已知机器拉黑 24h
+    failSpend: { day: '', usd: 0 },   // 每日失败成本（部署失败/刚下就被收回的租金）
+    minBidHist: {},  // machineId -> [{t, mb}]，用于 min_bid 30 分钟稳定性过滤
     ...readJson(stateFile, {}),
   };
 }

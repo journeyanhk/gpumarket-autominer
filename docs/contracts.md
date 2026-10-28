@@ -231,3 +231,31 @@ allocate({
 `endReason` 与被收回成因的对应：`preemptKind = host_reclaim`（同机 `min_bid` 没涨，说明不是被顶掉的）
 时，`endReason` 归 `host_reclaim` 而不是 `preempted_outbid`——前者说明「加价也没用」，后者说明「出价不够」，
 对决策的意义完全不同；容器起不来的归 `deploy_fail`。
+
+### 8.4 累计到账必须单调（P0 复盘，2026-10-28）
+
+`ledger.prl.acc` 曾经把同一笔 PRL 记两次：调用方传的是「当前余额」而不是「累计到账」，
+矿池一打款余额归零、再从 0 涨回来，差额就被再记一遍。实测 Kryptex 多记 1.03、Pearlhash 多记 1.10，
+面板"全程盈利 +$2.26"其实是 **−$1.65**。
+
+修法两条：
+
+1. **调用方一律传单调量**：Kryptex 用 `paid + balance`（`fetchKryptexEarned().earned` 已是此口径）；
+   Pearlhash 用「正数 `balance_transactions` 之和 + pending」（pending 结算时 credited 增加、pending 减少，和不变）。
+2. **`track()` 保留高水位**：值一旦下降只记 `resets` 计数（`ledger.<pool>.prl.resets`），绝不把 `last` 跟着降。
+   `resets` 就是口径问题的报警信号。
+3. 回归测试：`pool-test`（打款导致回落 → acc 不变）、`lease-test`（高水位 / 增量累加）。
+
+**租约台账的 `creditedPrl` 是相对口径**：只覆盖台账上线之后的到账增量，是给型号排名做相对比较用的，
+不等于该机器的绝对产出。矿池级绝对数看 `ledger`（现已校正到真实累计）。
+
+### 8.5 每日失败成本封顶（`dailyFailBudget`，默认 $0.30）
+
+「等待模式」不是零成本：租到手却没出过一份份额的机器（部署失败、刚下就被房东收回）照样付租金。
+这类支出单独累计在 `st.failSpend = { day, usd }`，只统计 `tFirstShare == null` 的租约；
+到顶后 `rentAllowed()` 直接拒租到第二天零点（UTC 日切），避免"抢不到也要花钱"无界。
+
+### 8.6 min_bid 30 分钟稳定性过滤（`minBidStablePct`，默认 10%）
+
+同一台机器的 `min_bid` 在 30 分钟内跳 >10%，说明它正在被抢或房东在试探价格，
+此时下单大概率刚租就被收（今天 4090 三次开局收回都是这种形态）。样本不足 20 分钟不判（避免误杀新机）。

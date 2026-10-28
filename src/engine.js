@@ -1157,9 +1157,17 @@ export class Engine {
     const pick = (...ks) => { for (const k of ks) if (h[k] != null && h[k] !== '') return Number(h[k]); return null; };
     const limit = pick('x-ratelimit-limit', 'x-ratelimit-limit-day', 'x-search-quota-limit');
     const remaining = pick('x-ratelimit-remaining', 'x-ratelimit-remaining-day', 'x-search-quota-remaining');
+    // 第一次抓到的响应头原样留一份：vast 的"每日行数额度"到底在哪个 header 里，
+    // 只有实测才知道（此前见过的 limit=30/remaining=29 是请求频率，不是每日行数）。
+    if (!this.st.headerSample) {
+      const raw = {};
+      for (const [k, v] of Object.entries(h)) if (/rate|quota|limit|search/i.test(k)) raw[k] = String(v).slice(0, 40);
+      this.st.headerSample = { at: Date.now(), raw };
+    }
     if (remaining == null && limit == null) return;
-    // 实测 vast 返回 limit=30、remaining=29，这是请求频率限制而不是每日条数额度，只记录不参与调度
     this.st.rateLimitHeaders = { limit, remaining, seenAt: Date.now() };
+    // 同一个口径同时写进 lastQuota：quotaBuckets() 读的是这个键（之前写错了键，导致 totalLeft 永远为空）
+    this.st.lastQuota = { limit, remaining, at: Date.now() };
   }
 
   // 统一定价：spot 用「实际出价」、按需用挂牌价。出价上限已高于目标线的机器**保留**并标 spotSkip，

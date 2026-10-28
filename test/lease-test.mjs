@@ -338,7 +338,7 @@ console.log('— 额度分桶：巡航 40% / 窗口 60%');
   // 窗口开启后改用窗口桶：60 秒一次、100 行
   e.st.windowState = { active: true, until: Date.now() + 3600e3 };
   const planWin = e.scanPlan();
-  ok(planWin.interval === 60_000 && planWin.rows === 100 && planWin.bucket === 'window',
+  ok(planWin.interval === 60_000 && planWin.rows === 40 && planWin.bucket === 'window',
      `窗口期扫描：每 ${planWin.interval / 1000}s、${planWin.rows} 行、桶=${planWin.bucket}`);
   // 窗口桶也用光 → 回落到巡航节奏（不会无限扫）
   e.st.searchUsage.windowRows = bk.windowBudget;

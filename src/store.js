@@ -78,6 +78,9 @@ export const DEFAULT_CONFIG = {
   chg6hPct: 8,            // 第三种窗口触发：6 小时涨幅 ≥ 8%
   stairRatio: 1.1,        //                   且 密度÷地板 ≥ 1.1（阶梯式上涨）
   offerCacheMaxMin: 30,   // 缓存报价可用于下单的最大年龄（额度耗尽时的应急通道）
+  anonCruiseIntervalMin: 2, // 匿名巡航间隔（分钟）：廉价竞价机寿命只有几分钟
+  anonCruiseRows: 30,       // 匿名巡航每次取 30 行（按 min_bid 升序）
+  anonBackoffMin: 5,        // 匿名被频率锁时的退避
   minBalanceStop: 5,        // 总开关：余额低于此值，一切新租停止
   maxSourceStaleMin: 60,    // 总开关：行情三源全部失效超过这么久，停止新租
   minBalanceReserve: 2,     // 余额低于它就停止新租

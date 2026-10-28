@@ -1012,8 +1012,13 @@ export class Engine {
     // 匿名身份可用时，账号的每日行数额度对我们无关（匿名只受 30 次/窗口的频率限制），
     // 所以巡航不该被"账号额度耗尽"卡住 —— 固定 10 分钟一次、每次 20 行。
     if (this.anonAvailable) {
-      return { interval: 10 * MIN, rows: Math.min(20, Number(this.cfg.cruiseScanRows) || 20), bucket: 'anon',
-        why: '匿名巡航：不消耗账号额度（仅受 30 次/窗口频率限制）' };
+      const backoff = Math.max(0, (this.anonBackoffUntil || 0) - now);
+      const rows = Math.max(20, Number(this.cfg.anonCruiseRows) || 30);
+      if (backoff > 0) return { interval: backoff, rows, bucket: 'anon', why: `匿名被限流，退避 ${Math.ceil(backoff / 60000)} 分钟` };
+      // 廉价竞价机的寿命只有几分钟（2026-10-28：六条里三条 25 分钟内被人抢走），
+      // 所以匿名巡航压到 2 分钟一轮、按 min_bid 升序取最便宜的 30 条。
+      return { interval: (Number(this.cfg.anonCruiseIntervalMin) || 2) * MIN, rows, bucket: 'anon', order: 'min_bid',
+        why: '匿名巡航：2 分钟一轮 / 30 行 / min_bid 升序（不消耗账号额度）' };
     }
     // 巡航：只用巡航桶，间隔 = 剩余时间 ÷ 剩余次数，最少 10 分钟
     const rowsCruise = Math.min(Number(this.cfg.cruiseScanRows) || 30, Math.max(20, Number(this.cfg.scanRows) || 30));
@@ -1038,6 +1043,8 @@ export class Engine {
     if (now - (this.lastScanAttempt || 0) < plan.interval) return;
     this._scanRows = plan.rows || this.cfg.scanRows;
     this._scanBucket = plan.bucket || 'cruise';
+    this._scanOrder = plan.order || null;
+    this._autoAfterScan = true;
     await this.scan();
   }
 
@@ -1058,13 +1065,19 @@ export class Engine {
       // 身份选择：巡航走匿名（不消耗账号的每日行数）、窗口走 key（账号额度留给窗口）。
       // 任一身份 429，就换另一个身份重试一次。
       let anon = this._forceAnon || this._scanBucket !== 'window';
-      const trySearch = async (useAnon) => this.vast.searchOffers(scanCfg, meta, sq.names, { anon: useAnon });
+      const trySearch = async (useAnon) => this.vast.searchOffers(scanCfg, meta, sq.names,
+        { anon: useAnon, order: this._scanOrder || null });
       const searchWithIdentity = async () => {
         try { const r = await trySearch(anon); this.anonAvailable = anon; return r; }
         catch (e1) {
           // 只有"每日行数额度"才值得换身份（那是按 identity 计的）；
           // 普通频率限流换身份等于绕过自己的配额，不做。
           const quotaHit = e1.body?.error === 'search_quota_exceeded' || /quota|Daily search/i.test(e1.message || '');
+          if (e1.status === 429 && !quotaHit && anon) {
+            // 匿名频率锁：退避 5 分钟（不要立刻换带 key 身份去烧账号额度）
+            this.anonBackoffUntil = Date.now() + (Number(this.cfg.anonBackoffMin) || 5) * MIN;
+            throw e1;
+          }
           if (e1.status !== 429 || !quotaHit) throw e1;
           this.log('warn', `${anon ? '匿名' : '带 key'} 搜索额度耗尽，改用${anon ? '带 key' : '匿名'}身份重试`);
           const r = await trySearch(!anon);
@@ -1091,6 +1104,11 @@ export class Engine {
       this.offerStats.error = null;
       this.evaluateOffers(raw);
       this.offerStats.mode = sq.mode === 'focused' ? `精准搜索 ${sq.models} 个型号` : '全量搜索';
+      // 扫描完立刻租，不等下一个 20 秒 tick（廉价报价的寿命就是几分钟）。
+      // 只在"由 scanTick 触发的扫描"里这么做：手动/测试调用 scan() 后再自己调 autoRent，
+      // 否则会并发两条租用循环（2026-10-28 测试里就撞到过）。
+      if (this._autoAfterScan && this.cfg.autoRent) this.autoRent(this.instances()).catch(() => {});
+      this._autoAfterScan = false;
     } catch (e) {
       this.offerStats.error = e.message;
       if (e.status === 429) {
@@ -1278,6 +1296,18 @@ export class Engine {
       const line = this.minThPer01;
       offer.passLine = line == null ? null : offer.thPer01 >= line;
       out.push(offer);
+    }
+    // 报价寿命：记录每个 offer 的首见/末见时间，用来回答"廉价报价能活多久"
+    {
+      const now2 = Date.now();
+      const life = this.st.offerLife ||= {};
+      for (const o of out) life[String(o.id)] = { f: life[String(o.id)]?.f ?? now2, l: now2, g: o.gpuName, mb: o.minBid ?? null };
+      // 只保留 6 小时内见过的，避免 state 无限涨
+      for (const [k, v] of Object.entries(life)) if (now2 - v.l > 6 * 3600e3) delete life[k];
+      if (Object.keys(life).length > 800) {
+        const drop = Object.entries(life).sort((a, b) => a[1].l - b[1].l).slice(0, Object.keys(life).length - 800);
+        for (const [k] of drop) delete life[k];
+      }
     }
     out.sort((a, b) => (b.roi ?? -Infinity) - (a.roi ?? -Infinity));
     this.offers = out.slice(0, 150);

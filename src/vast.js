@@ -53,7 +53,8 @@ export class Vast {
       [priceKey]: { lte: maxPrice }, // 单机时租不可能超过总预算
       cuda_max_good: { gte: f.minCuda },
       inet_down: { gte: f.minInetDown },
-      order: [['flops_per_dphtotal', 'desc']],
+      // 排序：默认按"每美元算力"最优；匿名巡航用 min_bid 升序，先看最便宜的竞价机
+      order: opts.order === 'min_bid' ? [['min_bid', 'asc']] : [['flops_per_dphtotal', 'desc']],
       type: f.useSpot ? 'bid' : 'on-demand',
       limit: Math.max(20, Math.min(1000, f.scanRows || 100)),
       allocated_storage: f.disk,

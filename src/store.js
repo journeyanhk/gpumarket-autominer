@@ -69,6 +69,7 @@ export const DEFAULT_CONFIG = {
     maxHourlySpend: 0.6,    // 窗口内放宽：总时租上限
   },
   l1Default: 0.8,           // 没有样本的型号，按"份额反推算力 ÷ 矿工自报"= 0.8 保守折算
+  l1ModelCap: 1.0,          // 型号口径封顶：>1.0 的增益只允许通过房东口径使用（防跨房东虚高）
   // 场所单点降级：Gate 现货（唯一变现出口）或 Lighter 永续（唯一对冲腿）任一不可用 → 保护态
   venueGuard: { enabled: true, inventoryCapPrl: 50 },
   // 额度分桶：巡航只花 40%，60% 锁给窗口（窗口通常出现在亚洲/美国盘交叠的几小时）

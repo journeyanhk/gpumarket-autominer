@@ -48,7 +48,10 @@ e.cfg.targetProfitPct = 20; e.cfg.spotBidFloorRatio = 0.7; e.cfg.spotBidMultipli
 ok(e.bidPrice(0.30, 0) === 0.21, `入场价 0 → 按下限 $${e.bidPrice(0.30, 0)}（收入×0.7）`);
 ok(e.bidPrice(0.30, 0.10) === 0.21, `入场价×1.25 低于下限 → 仍出 $${e.bidPrice(0.30, 0.10)}`);
 ok(e.bidPrice(0.30, 0.19) === 0.2375, `入场价×1.25 落在带内 → 出 $${e.bidPrice(0.30, 0.19)}`);
-ok(e.bidPrice(0.30, 0.25) === null, '入场价×1.25 超过利润上限 → 不租（不把利润让给房东）');
+// min_bid×1.25 超过利润上限，但 min_bid 本身还在带内 → 按上限出价（恰好目标 ROI，值得租）
+ok(e.bidPrice(0.30, 0.25) === 0.25, `入场价×1.25 超过上限但 min_bid 恰在上限 → 出 $${e.bidPrice(0.30, 0.25)}`);
+// min_bid 本身已经高于上限 → 连目标 ROI 都吃不下，不租
+ok(e.bidPrice(0.30, 0.27) === null, `min_bid 高于利润上限 → 不租（${e.bidPrice(0.30, 0.27)}）`);
 e.cfg.targetProfitPct = 12;
 ok(Math.abs(e.bidPrice(0.30, 0.19) - 0.2375) < 1e-9, '目标 12% 时上限更宽，出价仍按 1.25 倍');
 e.cfg.targetProfitPct = 30;

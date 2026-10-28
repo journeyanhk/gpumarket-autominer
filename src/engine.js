@@ -151,7 +151,12 @@ export class Engine {
     const lower = revenueHr * floorRatio;
     const multi = Math.max(1, Number(this.cfg.spotBidMultiplier ?? 1.25));
     const want = minBid * multi;
-    if (want > upper) return null;                 // 加价后已无利可图 → 不租
+    if (want > upper) {
+      // 加价 1.25 倍会亏，但只要能出到 min_bid 之上、ROI 仍达标，就该按 upper 出价而不是放弃。
+      // （2026-10-28 实测：2080 Ti @ $0.0533 本来能出到 $0.0601 = 恰好 20% ROI，旧逻辑直接判无效）
+      if (upper >= minBid) return +Math.min(upper, Math.max(minBid, lower)).toFixed(4);
+      return null;                                 // 连 min_bid 都吃不下 → 不租
+    }
     return +Math.min(upper, Math.max(lower, want)).toFixed(4);
   }
 
@@ -1001,6 +1006,12 @@ export class Engine {
       return { interval: 60_000, rows: rowsWin, bucket: bk.windowLeft > 0 ? 'window' : 'cruise-borrow',
         why: `窗口期扫描：${bk.windowLeft > 0 ? `窗口桶剩 ${bk.windowLeft} 行` : `窗口桶为空，借巡航桶 ${bk.cruiseLeft} 行`}` };
     }
+    // 匿名身份可用时，账号的每日行数额度对我们无关（匿名只受 30 次/窗口的频率限制），
+    // 所以巡航不该被"账号额度耗尽"卡住 —— 固定 10 分钟一次、每次 20 行。
+    if (this.anonAvailable) {
+      return { interval: 10 * MIN, rows: Math.min(20, Number(this.cfg.cruiseScanRows) || 20), bucket: 'anon',
+        why: '匿名巡航：不消耗账号额度（仅受 30 次/窗口频率限制）' };
+    }
     // 巡航：只用巡航桶，间隔 = 剩余时间 ÷ 剩余次数，最少 10 分钟
     const rowsCruise = Math.min(Number(this.cfg.cruiseScanRows) || 30, Math.max(20, Number(this.cfg.scanRows) || 30));
     const cruiseLeft = bk.est > 0 ? bk.cruiseLeft : Math.max(0, 24 * 3600 / 600 * rowsCruise); // 没学到额度时按 10 分钟一次估
@@ -1029,17 +1040,36 @@ export class Engine {
 
   async scan(force = false) {
     if (!this.vast.ok) return;
-    if (Date.now() < this.scanPausedUntil) {
-      if (force && this.pauseReason === 'quota') throw new Error(`vast 今日搜索额度已用完，${new Date(this.scanPausedUntil).toLocaleString('zh-CN', { hour12: false })} 恢复`);
-      if (!force) return;
+    // 账号额度耗尽时，匿名身份仍然能搜（vast 按 identity 限流）。所以"额度暂停"只约束带 key 的搜索。
+    if (Date.now() < this.scanPausedUntil && this.pauseReason === 'quota') {
+      if (!force && !this.anonAvailable) return;
+      this._forceAnon = true;
     }
+    if (Date.now() < this.scanPausedUntil && this.pauseReason !== 'quota' && !force) return;
     this.lastScanAttempt = Date.now();
     const meta = {};
     try {
       let sq = this.scanQuery();
       let raw;
       const scanCfg = { ...this.cfg, scanRows: this._scanRows || this.cfg.scanRows };
-      try { raw = await this.vast.searchOffers(scanCfg, meta, sq.names); }
+      // 身份选择：巡航走匿名（不消耗账号的每日行数）、窗口走 key（账号额度留给窗口）。
+      // 任一身份 429，就换另一个身份重试一次。
+      let anon = this._forceAnon || this._scanBucket !== 'window';
+      const trySearch = async (useAnon) => this.vast.searchOffers(scanCfg, meta, sq.names, { anon: useAnon });
+      const searchWithIdentity = async () => {
+        try { const r = await trySearch(anon); this.anonAvailable = anon; return r; }
+        catch (e1) {
+          // 只有"每日行数额度"才值得换身份（那是按 identity 计的）；
+          // 普通频率限流换身份等于绕过自己的配额，不做。
+          const quotaHit = e1.body?.error === 'search_quota_exceeded' || /quota|Daily search/i.test(e1.message || '');
+          if (e1.status !== 429 || !quotaHit) throw e1;
+          this.log('warn', `${anon ? '匿名' : '带 key'} 搜索额度耗尽，改用${anon ? '带 key' : '匿名'}身份重试`);
+          const r = await trySearch(!anon);
+          this.anonAvailable = !anon;
+          return r;
+        }
+      };
+      try { raw = await searchWithIdentity(); }
       catch (e) {
         // 万一 vast 不接受按型号过滤：本次改用全量搜索，之后不再用精准搜索
         if (sq.mode !== 'focused' || e.status === 429 || !(e.status >= 400 && e.status < 500)) throw e;
@@ -1083,6 +1113,7 @@ export class Engine {
             try { this.repriceOffers(); this.log('info', `额度已耗尽，改用缓存报价重算 ${this.offers.length} 条（下单不受搜索配额限制）`); } catch { /* 重算失败就维持旧值 */ }
           }
           this.log('warn', `vast 今日搜索额度已用完（今天本程序搜了 ${u.requests} 次、${u.rows} 条${this.st.quotaEst ? `，估计每日额度约 ${this.st.quotaEst} 条` : ''}），${new Date(until).toLocaleString('zh-CN', { hour12: false })} 恢复。已租机器照常监控`);
+          if (force) throw new Error(`vast 今日搜索额度已用完（匿名身份也被限流），${new Date(until).toLocaleString('zh-CN', { hour12: false })} 恢复`);
         } else {
           this.scanPausedUntil = Date.now() + 2 * MIN;
           this.pauseReason = 'rate';
@@ -1599,7 +1630,11 @@ export class Engine {
     if (s.length < 3) return Number(this.cfg.l1Default ?? 0.8);
     const sorted = [...s].sort((a, b) => a - b);
     const mid = Math.floor(sorted.length / 2);
-    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    const med = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    // 型号口径封顶 1.0：目前 20 条 2080 Ti 样本全部来自同一个房东（1.17，疑似"假 2080 Ti"），
+    // 直接套到陌生房东会虚高。超过 1.0 的信息只能通过【房东口径】使用（那里 ≥3 样本才生效）。
+    const cap = Number(this.cfg.l1ModelCap ?? 1.0);
+    return Math.min(med, cap);
   }
 
   recordL1(gpuName, ratio, hostId = null) {
@@ -1680,14 +1715,14 @@ export class Engine {
   // 手动租用（网页手抄 offer 的通道）：搜索额度耗尽时，这是唯一还能下单的路。
   // 用户从 cloud.vast.ai/create/ 抄 offer id + 型号 + dph + min_bid，这里做与扫描同源的估价，
   // 过线才下单，避免"盲租"。
-  async rentManual({ offerId, gpuName, dph, minBid = null, numGpus = 1, geolocation = '', reliability = null, inetDown = null, force = false }) {
+  async rentManual({ offerId, gpuName, dph, minBid = null, numGpus = 1, machineId = null, geolocation = '', reliability = null, inetDown = null, force = false }) {
     if (!offerId || !gpuName || !(Number(dph) > 0)) throw new Error('需要 offerId、gpuName、dph 三个字段');
     const ref = this.thFor(gpuName);
     if (!ref) throw new Error(`未知型号 ${gpuName}（没有参考算力，无法估价）`);
     const usd = this.usdHsHr6h;
-    const { l1, source: l1Src } = this.l1ForMachine(gpuName, null);
+    const { l1, source: l1Src } = this.l1ForMachine(gpuName, machineId);
     const offer = this.priceOffer({
-      id: Number(offerId), machineId: null, gpuName, numGpus: Number(numGpus) || 1,
+      id: Number(offerId), machineId: machineId ? Number(machineId) : null, gpuName, numGpus: Number(numGpus) || 1,
       th: ref.effective * (Number(numGpus) || 1), l1, l1Src,
       dph: Number(dph), listDph: Number(dph), bid: null, spotSkip: false,
       spot: !!this.cfg.useSpot, minBid: Number(minBid ?? dph),

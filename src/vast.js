@@ -13,6 +13,9 @@ export class Vast {
   constructor(apiKey) { this.apiKey = apiKey; }
   get ok() { return !!this.apiKey; }
   h() { return { Authorization: `Bearer ${this.apiKey}` }; }
+  // 匿名头：不带 Authorization。vast 的限流按 identity 计（bearer token / session / api_key / client IP），
+  // 所以匿名请求是另一个身份 —— 账号的每日搜索行数额度被烧光后，匿名仍能搜（只受 30 次/窗口的频率限制）。
+  hAnon() { return {}; }
 
   async user() {
     return request(`${BASE}/users/current/`, { headers: this.h() });
@@ -37,7 +40,7 @@ export class Vast {
   // vast 按「返回的条数」计每日搜索额度（UTC 0 点重置），所以只取每美元算力最高的前 N 条
   // names：只搜这些型号（vast 的 gpu_name 原样字符串），省掉不适合挖矿的卡占用的搜索条数
   // 竞价（bid）时按 min_bid 过滤：挂牌价常常是入场价的 3 倍，用挂牌价过滤会把能租的机器全滤掉
-  async searchOffers(f, meta, names) {
+  async searchOffers(f, meta, names, opts = {}) {
     const maxPrice = Math.max(0.01, f.maxHourlySpend);
     const priceKey = f.useSpot && this.spotFilterOk !== false ? 'min_bid' : 'dph_total';
     const body = {
@@ -57,7 +60,7 @@ export class Vast {
       ...(names?.length ? { gpu_name: { in: names } } : {}),
     };
     try {
-      const r = await request(`${BASE}/bundles/`, { method: 'POST', headers: this.h(), body, timeoutMs: 45000, meta });
+      const r = await request(`${BASE}/bundles/`, { method: 'POST', headers: opts.anon ? this.hAnon() : this.h(), body, timeoutMs: 45000, meta });
       return r?.offers || [];
     } catch (e) {
       // 4xx（非 429）= vast 不接受这个过滤字段：退回按挂牌价过滤并记住，只多打这一次

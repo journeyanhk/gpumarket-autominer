@@ -49,7 +49,12 @@ globalThis.fetch = async (url, opt = {}) => {
   const m = (opt.method || 'GET').toUpperCase();
   const body = opt.body ? JSON.parse(opt.body) : null;
   if (u.host === 'console.vast.ai') {
-    if (opt.headers?.Authorization !== 'Bearer test-key') return json({ error: 'unauthorized', msg: 'bad key' }, 401);
+    // 匿名搜索是合法身份（vast 的限流按 identity 计）：/bundles/ 允许不带 Authorization，
+    // 其他端点仍然要求 key；带了错误的 key 一律 401。
+    const auth = opt.headers?.Authorization;
+    if (auth == null && u.pathname === '/api/v0/bundles/' && (opt.method || 'GET').toUpperCase() === 'POST') {
+      globalThis.__anonSearches = (globalThis.__anonSearches || 0) + 1;
+    } else if (auth !== 'Bearer test-key') return json({ error: 'unauthorized', msg: 'bad key' }, 401);
     if (u.pathname === '/api/v0/users/current/') return json({ credit: 9.98 - sec() * 0.0003, email: 'demo@example.com' });
     if (u.pathname === '/api/v0/bundles/' && m === 'POST') {
       if (!body.order || !['on-demand', 'bid'].includes(body.type)) return json({ error: 'bad query' }, 400);

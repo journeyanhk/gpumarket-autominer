@@ -489,6 +489,14 @@ export class Engine {
               // 矿工已经报出算力 = 矿工起来了（和「矿池开始计酬」是两件事，分开记）
               l.tMinerUp ||= Date.now();
             }
+            // L1 样本：累计份额反推算力 ÷ 矿工自报（至少跑 10 分钟才采，避免爬坡污染）
+            {
+              const secs = l.tFirstShare ? (Date.now() - l.tFirstShare) / 1000 : 0;
+              if (secs > 600 && l.sharesAccepted > 0 && Number(l.difficulty) > 0 && Number(l.lastHs) > 0) {
+                const derived = l.sharesAccepted * Number(l.difficulty) * 4294967296 / secs;
+                this.recordL1(m.gpuName, derived / Number(l.lastHs));
+              }
+            }
             const sh = this.sharesOf(i.id);
             if (sh) {
               l.sharesAccepted = Math.max(l.sharesAccepted || 0, sh.accepted || 0);
@@ -1007,6 +1015,7 @@ export class Engine {
       this.offerStats.error = null;
       this.evaluateOffers(raw);
       this.offerStats.mode = sq.mode === 'focused' ? `精准搜索 ${sq.models} 个型号` : '全量搜索';
+      this.updateWindowMode();
     } catch (e) {
       this.offerStats.error = e.message;
       if (e.status === 429) {
@@ -1113,9 +1122,12 @@ export class Engine {
       const listDph = Number(o.dph_total) || 0;
       if (listDph <= 0) continue;
       const bl = this.st.blacklist[o.machine_id];
+      // 参考算力来自矿工自报，必须乘实测 L1 才是能卖出去的算力（否则系统性高估 20~30%）
+      const l1 = this.l1For(o.gpu_name);
+      const thRaw = ref.effective * (o.num_gpus || 1);
       const offer = this.priceOffer({
         id: o.id, machineId: o.machine_id, gpuName: o.gpu_name, numGpus: o.num_gpus || 1,
-        th: ref.effective * (o.num_gpus || 1), dph: listDph, listDph, bid: null, spotSkip: false,
+        th: thRaw * l1, thRaw, l1, dph: listDph, listDph, bid: null, spotSkip: false,
         spot: this.cfg.useSpot, minBid: Number(o.min_bid ?? o.dph_total) || 0,
         reliability: o.reliability2 ?? o.reliability,
         geolocation: o.geolocation || '', inetDown: o.inet_down, cuda: o.cuda_max_good,
@@ -1153,7 +1165,7 @@ export class Engine {
     const old = arr.find(x => now - x.t >= 20 * MIN);   // 至少 20 分钟前的样本
     if (!old) return { unstable: false, changePct: null, spanMin: null };
     const pct = (Number(minBid) / old.mb - 1) * 100;
-    const limit = Number(this.cfg.minBidStablePct ?? 10);
+    const limit = this.effectiveLimits(now).minBidStablePct;
     return { unstable: Math.abs(pct) > limit, changePct: +pct.toFixed(1), spanMin: Math.round((now - old.t) / MIN) };
   }
 
@@ -1309,7 +1321,7 @@ export class Engine {
     return {
       count: active.length, spend,
       roomCount: this.cfg.maxInstances - active.length,
-      roomSpend: this.cfg.maxHourlySpend - spend,
+      roomSpend: this.effectiveLimits().maxHourlySpend - spend,
       roomBalance: (this.account.vastBalance ?? 0) - this.cfg.minBalanceReserve,
       spendCapByRunway: this.cfg.runwayGuard ? Math.max(0, ((this.account.vastBalance ?? 0) - this.cfg.minBalanceReserve) / this.cfg.minRunwayHours) : null, // null = 续航保护已关闭
     };
@@ -1332,6 +1344,113 @@ export class Engine {
     this.save();
   }
 
+  // ---------- 窗口模式 ----------
+  // 两种触发：
+  //   A. PRL 1 小时涨幅 ≥ chg1hPct（消息驱动的窗口）
+  //   B. 最优报价的「收入密度 ÷ 地板」≥ ratio 且密度 24h 上升 ≥ densityRise24hPct（算力回落型窗口）
+  // 这周的窗口就是 B 类：全世界算力从 94 掉到 76 EH/s，币价没涨但密度回升 20%——只盯币价会漏掉。
+  windowInfo(now = Date.now()) {
+    const H = this.st.history || [];
+    const chg = (ms) => {
+      const past = [...H].reverse().find(h => h.t <= now - ms);
+      if (!past || !(past.price > 0) || !(this.market.price > 0)) return null;
+      return +((this.market.price / past.price - 1) * 100).toFixed(2);
+    };
+    // densitySamples 里存的是 v = $/H/s/小时，换算成 $/TH·天 才能和挂牌价（$/h）比
+    const dens = this.densitySamples || [];
+    const toThDay = v => v * 1e12 * 24;
+    const recent = dens.filter(x => now - x.t <= 6 * 3600e3).map(x => toThDay(x.v));
+    const d6 = recent.length ? recent.reduce((a, b) => a + b, 0) / recent.length : 0;
+    const old24 = [...dens].reverse().find(x => x.t <= now - 24 * 3600e3);
+    const d24 = old24 ? toThDay(old24.v) : null;
+    const rise = d24 > 0 && d6 > 0 ? +((d6 / d24 - 1) * 100).toFixed(1) : null;
+    // 地板：当前报价里「每 TH 每小时的挂牌价」最低值
+    const offers = (this.offers || []).filter(o => o.dph > 0 && o.th > 0);
+    let ratio = null;
+    if (offers.length && d6 > 0) {
+      const best = offers.reduce((a, o) => Math.max(a, (o.th * d6 / 24) / o.dph), 0);
+      ratio = +best.toFixed(3);
+    }
+    return { chg1h: chg(3600e3), density6h: +d6.toFixed(5), densityRise24hPct: rise, ratio };
+  }
+
+  // 每轮扫描算一次；触发则进入窗口（最长 minutes 分钟），到点自动退出
+  updateWindowMode(now = Date.now()) {
+    const cfg = this.cfg.windowMode || {};
+    const st = this.st.windowState ||= { active: false, until: 0, reason: null, startedAt: 0 };
+    if (st.active && now >= st.until) {
+      st.active = false; st.reason = null;
+      this.save();
+      this.log('info', '窗口模式结束：阈值已恢复（minBidStablePct / dailyFailBudget / maxHourlySpend）');
+      this.assertProductionLimits();
+      return st;
+    }
+    if (st.active || cfg.enabled === false) return st;
+    const info = this.windowInfo(now);
+    let why = null;
+    if (info.chg1h != null && info.chg1h >= Number(cfg.chg1hPct ?? 8)) why = `PRL 1h ${info.chg1h > 0 ? '+' : ''}${info.chg1h}% ≥ ${cfg.chg1hPct}%`;
+    else if (info.ratio != null && info.ratio >= Number(cfg.ratio ?? 1) && info.densityRise24hPct != null && info.densityRise24hPct >= Number(cfg.densityRise24hPct ?? 15)) {
+      why = `密度÷地板 ${info.ratio} ≥ ${cfg.ratio} 且密度 24h ${info.densityRise24hPct > 0 ? '+' : ''}${info.densityRise24hPct}%`;
+    }
+    if (!why) return st;
+    st.active = true; st.startedAt = now; st.until = now + Number(cfg.minutes ?? 360) * MIN; st.reason = why;
+    this.save();
+    this.log('warn', `进入窗口模式（${why}）：放宽 minBidStablePct→${cfg.minBidStablePct}%、失败封顶→$${cfg.failBudgetUsd}/窗口、时租上限→$${cfg.maxHourlySpend}/h，${cfg.minutes} 分钟后自动退出；追价保持关闭`);
+    return st;
+  }
+
+  // 退出窗口后核对：这三项必须回到生产值，否则报错（防止"放宽后忘了收"）
+  assertProductionLimits() {
+    const bad = [];
+    const want = { minBidStablePct: this.cfg.minBidStablePct, dailyFailBudget: this.cfg.dailyFailBudget, maxHourlySpend: this.cfg.maxHourlySpend, maxBidRaises: this.cfg.maxBidRaises };
+    if (Number(want.maxBidRaises) !== 0) bad.push(`maxBidRaises=${want.maxBidRaises}（应为 0）`);
+    if (bad.length) this.log('error', `阈值恢复断言失败：${bad.join('、')}`);
+    return bad;
+  }
+
+  // 有效阈值：窗口期内只有这三项被放宽，其余一律用生产值
+  effectiveLimits(now = Date.now()) {
+    const st = this.st.windowState || {};
+    const w = this.cfg.windowMode || {};
+    const base = {
+      minBidStablePct: Number(this.cfg.minBidStablePct),
+      dailyFailBudget: Number(this.cfg.dailyFailBudget),
+      maxHourlySpend: Number(this.cfg.maxHourlySpend),
+      window: false,
+    };
+    if (!st.active || now >= (st.until || 0)) return base;
+    return {
+      minBidStablePct: Number(w.minBidStablePct ?? base.minBidStablePct),
+      dailyFailBudget: Number(w.failBudgetUsd ?? base.dailyFailBudget),
+      maxHourlySpend: Number(w.maxHourlySpend ?? base.maxHourlySpend),
+      window: true,
+    };
+  }
+
+  // ---------- 份额反推 L1（按型号） ----------
+  // L1 = 份额反推算力 ÷ 矿工自报。出价评估用的是"参考算力"，而参考算力来自矿工自报，
+  // 所以必须乘 L1 才是真实可卖的算力；样本不足 3 的型号用全局保守值 0.8。
+  l1For(gpuName) {
+    const k = gpuKey(gpuName);
+    const rec = (this.st.l1ByModel || {})[k];
+    const s = (rec?.samples || []).filter(x => Number.isFinite(x) && x > 0.3 && x < 1.5);
+    if (s.length < 3) return Number(this.cfg.l1Default ?? 0.8);
+    const sorted = [...s].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
+  recordL1(gpuName, ratio) {
+    if (!(ratio > 0.3 && ratio < 1.5)) return;
+    const k = gpuKey(gpuName);
+    const st = this.st.l1ByModel ||= {};
+    const rec = st[k] ||= { samples: [] };
+    rec.samples.push(+ratio.toFixed(3));
+    if (rec.samples.length > 20) rec.samples.splice(0, rec.samples.length - 20);
+    rec.n = rec.samples.length;
+    rec.median = this.l1For(gpuName);
+  }
+
   rentAllowed(now = Date.now()) {
     // 总开关：余额见底或行情全部失效时，一切新租停止（与 fail-closed 配套的最后一道闸）
     const bal = this.account.vastBalance;
@@ -1343,8 +1462,15 @@ export class Engine {
     if (now < (this.preemptCooldownUntil || 0)) return { ok: false, why: `竞价被收回后的冷静期（剩 ${Math.ceil((this.preemptCooldownUntil - now) / 60000)} 分钟）` };
     // 每日失败成本封顶：租到的机器一台都没出过份额就被收回/退租的钱，
     // 单独累计（不算正常租用），到顶就停到明天——否则"等待模式"的上限无界。
+    const lim = this.effectiveLimits(now);
     const fs = this.failSpendToday(now);
-    const fsCap = Number(this.cfg.dailyFailBudget ?? 0.3);
+    const fsCap = Number(lim.dailyFailBudget ?? 0.3);
+    if (fsCap > 0 && fs.usd >= fsCap && lim.window) {
+      // 窗口期内封顶是绝对额（$1/窗口），达到就退出窗口，避免"窗口里无限烧"
+      this.st.windowState = { ...(this.st.windowState || {}), active: false, reason: null };
+      this.save();
+      this.log('warn', `窗口内失败成本 $${fs.usd.toFixed(2)} 达到上限 $${fsCap}，提前退出窗口模式`);
+    }
     if (fsCap > 0 && fs.usd >= fsCap) return { ok: false, why: `今日失败成本 $${fs.usd.toFixed(2)} 已达上限 $${fsCap}（停机到明天）` };
     this.rentTimes = (this.rentTimes || []).filter(t => now - t < 60 * MIN);
     if (this.rentTimes.length >= (this.cfg.maxRentsPerHour || 3)) return { ok: false, why: `本小时已租 ${this.rentTimes.length} 台（上限 ${this.cfg.maxRentsPerHour}）` };
@@ -2019,6 +2145,8 @@ export class Engine {
       deployAvg: this.deployAverage(),
       // 租约台账：按型号/按房东的每机时净收益（决策口径，不是 ROI 均值）
       leases: this.leaseReport(),
+      window: { ...(this.st.windowState || { active: false }), limits: this.effectiveLimits(), info: this.windowInfo() },
+      l1: Object.fromEntries(Object.entries(this.st.l1ByModel || {}).map(([k, v]) => [k, { n: v.n, median: v.median }])),
       pools: this.poolsSnapshot(list),
       compare: { h24: this.compare(24), d7: this.compare(24 * 7), all: this.compare(null) },
       failovers: this.st.failovers.slice(-10).reverse(),

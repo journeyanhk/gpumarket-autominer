@@ -278,6 +278,71 @@ console.log('— 累计到账必须单调：矿池打款不能把同一笔记两
 }
 
 
+console.log('— 窗口模式：两种触发 / 只放宽三项 / 自动退出');
+{
+  const e = new Engine();
+  e.log = () => {};
+  const now = Date.now();
+  e.cfg.minBidStablePct = 10; e.cfg.dailyFailBudget = 0.3; e.cfg.maxHourlySpend = 0.2; e.cfg.maxBidRaises = 0;
+  e.cfg.windowMode = { enabled: true, chg1hPct: 8, ratio: 1.0, densityRise24hPct: 15, minutes: 360, minBidStablePct: 50, failBudgetUsd: 1.0, maxHourlySpend: 0.6 };
+  e.st.windowState = null; e.st.history = []; e.densitySamples = []; e.offers = [];
+  e.market.price = 1.7;
+
+  ok(!e.updateWindowMode(now).active, '平时不进窗口（没有涨幅也没有比值）');
+  const base = e.effectiveLimits(now);
+  ok(base.minBidStablePct === 10 && base.dailyFailBudget === 0.3 && base.maxHourlySpend === 0.2 && !base.window, '生产阈值：10% / $0.3 / $0.2');
+
+  // 触发 A：1 小时涨幅 ≥ 8%
+  e.market.price = 1.85;
+  e.st.history = [{ t: now - 3600e3, price: 1.70 }];
+  let w = e.updateWindowMode(now);
+  ok(w.active && /1h/.test(w.reason || ''), `触发 A：${w.reason}`);
+  const lim = e.effectiveLimits(now);
+  ok(lim.window && lim.minBidStablePct === 50 && lim.dailyFailBudget === 1.0 && lim.maxHourlySpend === 0.6, '窗口内放宽三项：50% / $1.0 / $0.6');
+  ok(!('maxBidRaises' in lim) && Number(e.cfg.maxBidRaises) === 0, '**不放宽追价**（maxBidRaises 仍是 0，这是花钱买来的结论）');
+
+  // 自动退出
+  e.st.windowState.until = now - 1;
+  w = e.updateWindowMode(now);
+  ok(!w.active, '到点自动退出');
+  const after = e.effectiveLimits(now);
+  ok(after.minBidStablePct === 10 && after.dailyFailBudget === 0.3 && after.maxHourlySpend === 0.2, '退出后三项全部恢复生产值');
+
+  // 触发 B：密度÷地板 ≥ 1 且密度 24h +15%（币价没涨也算窗口）
+  e.market.price = 1.70; e.st.history = [];
+  e.st.windowState = null;
+  // densitySamples 的单位是 $/H/s/小时：$0.020/TH·天 = 0.020/24e12
+  const toV = thDay => thDay / 24e12;
+  e.densitySamples = [{ t: now - 25 * 3600e3, v: toV(0.020) }, { t: now - 1 * 3600e3, v: toV(0.030) }];
+  e.offers = [{ dph: 0.10, th: 100 }];
+  w = e.updateWindowMode(now);
+  ok(w.active && /密度/.test(w.reason || ''), `触发 B：${w.reason}`);
+
+  // 窗口内失败成本达到绝对上限 → 提前退出
+  e.st.failSpend = { day: new Date(now).toISOString().slice(0, 10), usd: 1.0 };
+  e.account.vastBalance = 100; e.market.updatedAt = now; e.rentCooldownUntil = 0; e.preemptCooldownUntil = 0; e.rentTimes = [];
+  e.rentAllowed(now);
+  ok(!e.st.windowState.active, '窗口内失败成本到 $1 → 提前退出窗口（不是无限放宽）');
+}
+
+console.log('— L1（份额反推算力 ÷ 矿工自报）按型号维护');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.cfg.l1Default = 0.8;
+  e.st.l1ByModel = {};
+  ok(e.l1For('RTX 3080') === 0.8, '没有样本的型号用全局保守值 0.8');
+  e.recordL1('RTX 3080', 0.70);
+  e.recordL1('RTX 3080', 0.90);
+  ok(e.l1For('RTX 3080') === 0.8, '样本 <3 仍用全局值（不拿两台机器当结论）');
+  e.recordL1('RTX 3080', 0.95);
+  ok(Math.abs(e.l1For('RTX 3080') - 0.90) < 1e-9, `样本 3 条 → 中位数 ${e.l1For('RTX 3080')}`);
+  e.recordL1('RTX 3080', 5);      // 明显异常值
+  ok(e.l1For('RTX 3080') <= 1.5, '异常值被过滤（>1.5 不进样本）');
+  ok(e.l1For('RTX 4090') === 0.8, '别的型号不受影响');
+}
+
+
 console.log('— 同一房东 1 小时收回 ≥2 台 → 拉黑该房东已知机器 24h');
 {
   const e = new Engine();

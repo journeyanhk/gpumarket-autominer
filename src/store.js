@@ -55,6 +55,20 @@ export const DEFAULT_CONFIG = {
   expOverride: null,
   dailyFailBudget: 0.3,   // 每日"失败成本"（租到手却没出过一份份额的租金）上限，到顶停租到明天
   minBidStablePct: 10,    // 竞价机 min_bid 30 分钟内变动超过这个百分比就跳过（正在被抢）
+  // 窗口模式：利润只在"收入密度 ÷ 租金地板"越过 1 的时候出现，而平时的风控（稳定性过滤、
+  // 失败成本封顶、时租上限）恰好会在窗口期挡住下单。这里只放宽这三项——
+  // **绝不放宽 maxBidRaises**：追价 9 台 0 次救活、机制上是房东收回而非价高者得，窗口期也一样。
+  windowMode: {
+    enabled: true,
+    chg1hPct: 8,            // 触发 A：PRL 1 小时涨幅 ≥ 8%
+    ratio: 1.0,             // 触发 B：最优报价的「收入密度 ÷ 地板」≥ 1.0
+    densityRise24hPct: 15,  //        且密度 24 小时上升 ≥ 15%（币价没涨也算窗口）
+    minutes: 360,           // 单次窗口最长 6 小时，到点自动退出
+    minBidStablePct: 50,    // 窗口内放宽：min_bid 波动阈值
+    failBudgetUsd: 1.0,     // 窗口内放宽：失败成本封顶改成绝对额 $1/窗口（不是无限）
+    maxHourlySpend: 0.6,    // 窗口内放宽：总时租上限
+  },
+  l1Default: 0.8,           // 没有样本的型号，按"份额反推算力 ÷ 矿工自报"= 0.8 保守折算
   minBalanceStop: 5,        // 总开关：余额低于此值，一切新租停止
   maxSourceStaleMin: 60,    // 总开关：行情三源全部失效超过这么久，停止新租
   minBalanceReserve: 2,     // 余额低于它就停止新租
@@ -121,6 +135,8 @@ export function loadState() {
     history: [],     // [{ t, price, netEh, usdPerThDay, spend, revenue }]
     leases: [],      // 租约台账：一台机器一条完整生命周期记录（见 src/leases.js）
     hostStats: {},   // 房东维度：1 小时内收回 ≥2 台 → 该房东已知机器拉黑 24h
+    l1ByModel: {},   // gpuKey -> { samples: [], median, n }：实测「份额反推算力 ÷ 矿工自报」
+    windowState: null, // { active, until, reason, startedAt }：窗口模式状态
     failSpend: { day: '', usd: 0 },   // 每日失败成本（部署失败/刚下就被收回的租金）
     minBidHist: {},  // machineId -> [{t, mb}]，用于 min_bid 30 分钟稳定性过滤
     ...readJson(stateFile, {}),

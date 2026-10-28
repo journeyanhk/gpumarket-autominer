@@ -325,6 +325,7 @@ console.log('— 额度分桶：巡航 40% / 窗口 60%');
   const e = new Engine();
   e.log = () => {};
   e.cfg.autoRent = true; e.account.vastBalance = 100; e.market.updatedAt = Date.now();
+  e.anonAvailable = false;   // 本用例测账号额度分桶路径，先关掉匿名巡航
   e.st.quotaEst = 19860;   // 今天学到的额度
   e.st.searchUsage = { day: e.utcDay(), requests: 0, rows: 0, cruiseRows: 0, windowRows: 0 };
   e.st.windowState = { active: false };

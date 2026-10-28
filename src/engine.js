@@ -73,6 +73,9 @@ export class Engine {
     // 租约台账：每台机器一份完整生命周期记录，用来回答「哪个型号/哪个房东值得租」。
     // 决策口径是每机时净收益（见 src/leases.js），不是 ROI 均值。
     this.leases = this.st.leases ||= [];
+    // 匿名搜索是已知可用的（vast 按 identity 限流）；默认乐观，失败由退避与回落处理。
+    // 落盘保存，避免重启后把"匿名可用"这件事忘掉又静默停摆。
+    this.anonAvailable = this.st.anonAvailable !== false;
     // 重启后把上次的报价缓存载回来（额度耗尽期间这是唯一能出价的东西）
     try { this._loadedOffers = this.loadOffers(); } catch { this._loadedOffers = 0; }
     this.trimLeases();
@@ -1035,7 +1038,9 @@ export class Engine {
   async scanTick() {
     if (!this.vast.ok) return;
     const now = Date.now();
-    if (now < this.scanPausedUntil) return;
+    // 只有"非额度类"的暂停才整体拦住 tick；额度暂停只挡带 key 的搜索，
+    // 匿名巡航照跑（否则账号额度一耗尽，连匿名都再也扫不了 —— 2026-10-28 静默停了 117 分钟）。
+    if (now < this.scanPausedUntil && this.pauseReason !== 'quota' && !this.anonAvailable) return;
     const plan = this.scanPlan();
     this.offerStats.plan = plan.why || '';
     this.offerStats.nextScanAt = plan.skip ? null : (this.lastScanAttempt || 0) + plan.interval;
@@ -1068,7 +1073,7 @@ export class Engine {
       const trySearch = async (useAnon) => this.vast.searchOffers(scanCfg, meta, sq.names,
         { anon: useAnon, order: this._scanOrder || null });
       const searchWithIdentity = async () => {
-        try { const r = await trySearch(anon); this.anonAvailable = anon; return r; }
+        try { const r = await trySearch(anon); this.anonAvailable = anon; this.st.anonAvailable = anon; return r; }
         catch (e1) {
           // 只有"每日行数额度"才值得换身份（那是按 identity 计的）；
           // 普通频率限流换身份等于绕过自己的配额，不做。

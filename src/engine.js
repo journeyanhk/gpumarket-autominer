@@ -73,6 +73,8 @@ export class Engine {
     // 租约台账：每台机器一份完整生命周期记录，用来回答「哪个型号/哪个房东值得租」。
     // 决策口径是每机时净收益（见 src/leases.js），不是 ROI 均值。
     this.leases = this.st.leases ||= [];
+    // 重启后把上次的报价缓存载回来（额度耗尽期间这是唯一能出价的东西）
+    try { this._loadedOffers = this.loadOffers(); } catch { this._loadedOffers = 0; }
     this.trimLeases();
     // 部署用的是 miners/manifest.json 的 pin；这里只保存「上次看到的最新版」用于日志去重，不落盘
     this.wrSeen = null;
@@ -953,7 +955,10 @@ export class Engine {
   // 当前应该隔多久扫一次（毫秒）以及原因
   scanPlan() {
     const now = Date.now();
-    const base = this.cfg.scanIntervalSec * 1000;
+    // 基础间隔取「用户设定」与「额度可持续间隔」的较大者：额度只有 ~331 次/天，
+    // 90 秒扫一次会在下午就烧穿（2026-10-28 实测）。
+    const sus = this.sustainableScanSec();
+    const base = Math.max(Number(this.cfg.scanIntervalSec) || 90, sus) * 1000;
     const rows = this.cfg.scanRows;
     if (!this.cfg.autoRent) return { interval: Math.max(base, 15 * MIN), why: '自动租用未开，15 分钟看一次行情' };
     // 已到台数 / 预算上限：扫了也租不了，不浪费额度
@@ -1017,7 +1022,6 @@ export class Engine {
       this.offerStats.error = null;
       this.evaluateOffers(raw);
       this.offerStats.mode = sq.mode === 'focused' ? `精准搜索 ${sq.models} 个型号` : '全量搜索';
-      this.updateWindowMode();
     } catch (e) {
       this.offerStats.error = e.message;
       if (e.status === 429) {
@@ -1035,6 +1039,11 @@ export class Engine {
             if (u.rows > 0) { this.st.quotaEst = this.st.quotaEst ? Math.round(this.st.quotaEst * 0.5 + u.rows * 0.5) : u.rows; this.st.quotaEstSource = 'learned'; }
           }
           this.save();
+          // 额度耗尽 ≠ 不能出价：下单走的是 /asks/，不吃搜索行数配额。
+          // 用缓存报价按「当前币价 + 当前密度」重算一遍 roi/bid，窗口期照样能抢。
+          if ((this.offers || []).length) {
+            try { this.repriceOffers(); this.log('info', `额度已耗尽，改用缓存报价重算 ${this.offers.length} 条（下单不受搜索配额限制）`); } catch { /* 重算失败就维持旧值 */ }
+          }
           this.log('warn', `vast 今日搜索额度已用完（今天本程序搜了 ${u.requests} 次、${u.rows} 条${this.st.quotaEst ? `，估计每日额度约 ${this.st.quotaEst} 条` : ''}），${new Date(until).toLocaleString('zh-CN', { hour12: false })} 恢复。已租机器照常监控`);
         } else {
           this.scanPausedUntil = Date.now() + 2 * MIN;
@@ -1045,8 +1054,44 @@ export class Engine {
     }
   }
 
+  // 报价缓存落盘：offers 只在内存里的话，重启 + 额度耗尽 = 一整天无法出价
+  // （2026-10-28 18:08 的窗口就是这么错过的：windowMode 修好了，但 offers 已被重启清空）。
+  saveOffers() {
+    const rows = (this.offers || []).slice(0, 80).map(o => ({
+      id: o.id, machineId: o.machineId, gpuName: o.gpuName, numGpus: o.numGpus, dph: o.dph, listDph: o.listDph,
+      minBid: o.minBid, spot: o.spot, reliability: o.reliability, geolocation: o.geolocation, inetDown: o.inetDown,
+      cuda: o.cuda, source: o.source, autoOk: o.autoOk, l1: o.l1, hostId: o.hostId,
+    }));
+    if (!rows.length) return;
+    this.st.offersCache = { at: Date.now(), rows };
+  }
+
+  loadOffers() {
+    const c = this.st.offersCache;
+    if (!c?.rows?.length) return 0;
+    // 超过 12 小时的缓存不再用（机器早被租走/下架了）
+    if (Date.now() - c.at > 12 * 3600e3) return 0;
+    this.offers = c.rows.map(r => ({ ...r, bid: null, spotSkip: false, roi: null, stale: true }));
+    try { this.repriceOffers(); } catch { /* 重算失败就保留空 roi */ }
+    return this.offers.length;
+  }
+
   // 精准搜索：只搜「有算力数据、按当前币价有可能达到目标收益率」的型号。
   // vast 的型号名要原样匹配，所以从全量搜索结果里学；每 6 次搜索做一次全量，发现新型号
+  // 扫描的"可持续"间隔：每日额度 ÷ 每次行数 = 每日可用次数，再按 24h 均摊（留 20% 余量）。
+  // 90 秒一扫等于每天 960 次，而额度只够 ~331 次 —— 2026-10-28 就是这么在下午烧穿、
+  // 恰好错过 18:08 那个 +10% 窗口的。
+  sustainableScanSec(now = Date.now()) {
+    const est = Number(this.st.quotaEst) || 0;
+    const rows = Math.max(1, Number(this.cfg.scanRows) || 60);
+    if (!(est > 0)) return Number(this.cfg.scanIntervalSec) || 300;
+    // 留 10% 余量，再扣掉最后一次（额度到顶前收手），然后按"剩余时间 ÷ 剩余次数"摊
+    const perDay = Math.floor(est * 0.9 / rows) - 1;
+    if (perDay < 1) return 24 * 3600;
+    const remainingMs = Math.max(5 * MIN, this.nextUtcMidnight() - now);
+    return Math.round(remainingMs / perDay / 1000);
+  }
+
   scanQuery() {
     this.scanN = (this.scanN || 0) + 1;
     const usd = this.usdHsHr, names = this.st.vastNames || {};
@@ -1156,6 +1201,7 @@ export class Engine {
     }
     out.sort((a, b) => (b.roi ?? -Infinity) - (a.roi ?? -Infinity));
     this.offers = out.slice(0, 150);
+    if (!this._offersSavedAt || Date.now() - this._offersSavedAt > 2 * MIN) { this._offersSavedAt = Date.now(); this.saveOffers(); this.save(); }
     this.offerStats = {
       total: raw.length, known, profitable: out.filter(x => x.roi !== null && x.roi >= this.cfg.targetProfitPct).length,
       scannedAt: now, error: null,
@@ -1190,6 +1236,9 @@ export class Engine {
     await this.failover(list);
     list = this.instances();
     await this.refreshVenueHealth().catch(() => {});
+    // 窗口判定必须每轮都跑：它依赖的是行情(1h 涨幅)与密度，跟"扫描有没有成功"无关。
+    // 之前放在 scan() 里，一旦 429/额度耗尽就永远不触发（2026-10-28 18:08 的窗口就是这么漏掉的）。
+    this.updateWindowMode();
     if (this.cfg.autoDestroy) await this.autoDestroy(list);
     await this.pollStats(list);
     if (this.cfg.autoRent) await this.autoRent(list);

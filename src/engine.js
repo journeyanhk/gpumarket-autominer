@@ -964,11 +964,13 @@ export class Engine {
     const windowBudget = Math.floor(est * 0.6);
     const cruiseRows = Number(u.cruiseRows) || 0;
     const windowRows = Number(u.windowRows) || 0;
-    return {
-      est, cruiseBudget, windowBudget, cruiseRows, windowRows,
-      cruiseLeft: Math.max(0, cruiseBudget - cruiseRows),
-      windowLeft: Math.max(0, windowBudget - windowRows),
-    };
+    const lastQuota = this.st.lastQuota || {};
+    const totalLeft = Number.isFinite(Number(lastQuota.remaining)) ? Number(lastQuota.remaining) : null;
+    let cruiseLeft = Math.max(0, cruiseBudget - cruiseRows);
+    let windowLeft = Math.max(0, windowBudget - windowRows);
+    // vast 响应头是"真实剩余"的唯一来源：一旦它比我们的记账更小，两边一起夹住
+    if (totalLeft != null) { cruiseLeft = Math.min(cruiseLeft, totalLeft); windowLeft = Math.min(windowLeft, totalLeft); }
+    return { est, cruiseBudget, windowBudget, cruiseRows, windowRows, cruiseLeft, windowLeft, totalLeft };
   }
 
   // 当前应该隔多久扫一次（毫秒）以及原因
@@ -992,9 +994,12 @@ export class Engine {
     const bk = this.quotaBuckets(now);
     const winActive = !!this.st.windowState?.active;
     // 窗口期：用窗口桶，60 秒一次、100 行（把额度花在刀刃上）
-    if (winActive && bk.windowLeft > 0) {
-      const rowsWin = Math.min(100, Math.max(30, Number(this.cfg.windowScanRows) || 100));
-      return { interval: 60_000, rows: rowsWin, bucket: 'window', why: `窗口期扫描：窗口桶剩 ${bk.windowLeft} 行` };
+    // 窗口期可以用窗口桶；窗口桶空了但巡航还有余量 → 允许单向借用（否则会出现"窗口有余额、巡航归零"的死角）
+    const winLeft = bk.windowLeft > 0 ? bk.windowLeft : bk.cruiseLeft;
+    if (winActive && winLeft > 0) {
+      const rowsWin = Math.min(100, Math.max(30, Number(this.cfg.windowScanRows) || 100), winLeft);
+      return { interval: 60_000, rows: rowsWin, bucket: bk.windowLeft > 0 ? 'window' : 'cruise-borrow',
+        why: `窗口期扫描：${bk.windowLeft > 0 ? `窗口桶剩 ${bk.windowLeft} 行` : `窗口桶为空，借巡航桶 ${bk.cruiseLeft} 行`}` };
     }
     // 巡航：只用巡航桶，间隔 = 剩余时间 ÷ 剩余次数，最少 10 分钟
     const rowsCruise = Math.min(Number(this.cfg.cruiseScanRows) || 30, Math.max(20, Number(this.cfg.scanRows) || 30));
@@ -1047,7 +1052,7 @@ export class Engine {
       const u = this.usageToday();
       u.requests++; u.rows += raw.length;
       if (this._scanBucket === 'window') u.windowRows = (u.windowRows || 0) + raw.length;
-      else u.cruiseRows = (u.cruiseRows || 0) + raw.length;
+      else u.cruiseRows = (u.cruiseRows || 0) + raw.length;   // cruise 与 cruise-borrow 都记巡航桶
       this.readQuotaHeaders(meta.headers);
       this.save();
       this.offerStats.error = null;
@@ -1058,6 +1063,8 @@ export class Engine {
       if (e.status === 429) {
         const quota = e.body?.error === 'search_quota_exceeded' || /quota/i.test(e.message);
         if (quota) {
+          // 429 的响应头也带额度信息（remaining=0），这才是"vast 侧真实余量"，用它夹住分桶
+          try { this.readQuotaHeaders(e.headers || {}); } catch {}
           const reset = Number(e.headers?.['x-ratelimit-reset']);
           const until = reset > 1e9 ? reset * 1000 : this.nextUtcMidnight();
           this.scanPausedUntil = until;
@@ -1660,6 +1667,32 @@ export class Engine {
     const gap = (this.cfg.rentMinIntervalMin || 10) * MIN;
     if (last && now - last < gap) return { ok: false, why: `距上次租用不足 ${this.cfg.rentMinIntervalMin} 分钟` };
     return { ok: true };
+  }
+
+  // 手动租用（网页手抄 offer 的通道）：搜索额度耗尽时，这是唯一还能下单的路。
+  // 用户从 cloud.vast.ai/create/ 抄 offer id + 型号 + dph + min_bid，这里做与扫描同源的估价，
+  // 过线才下单，避免"盲租"。
+  async rentManual({ offerId, gpuName, dph, minBid = null, numGpus = 1, geolocation = '', reliability = null, inetDown = null, force = false }) {
+    if (!offerId || !gpuName || !(Number(dph) > 0)) throw new Error('需要 offerId、gpuName、dph 三个字段');
+    const ref = this.thFor(gpuName);
+    if (!ref) throw new Error(`未知型号 ${gpuName}（没有参考算力，无法估价）`);
+    const usd = this.usdHsHr6h;
+    const { l1, source: l1Src } = this.l1ForMachine(gpuName, null);
+    const offer = this.priceOffer({
+      id: Number(offerId), machineId: null, gpuName, numGpus: Number(numGpus) || 1,
+      th: ref.effective * (Number(numGpus) || 1), l1, l1Src,
+      dph: Number(dph), listDph: Number(dph), bid: null, spotSkip: false,
+      spot: !!this.cfg.useSpot, minBid: Number(minBid ?? dph),
+      reliability, geolocation, inetDown, cuda: null, source: '手抄', autoOk: ref.autoOk,
+    }, usd);
+    offer.thPer01 = offer.th / (offer.dph / 0.1);
+    const line = this.minThPer01;
+    offer.passLine = line == null ? null : offer.thPer01 >= line;
+    const est = { gpu: gpuName, dph: offer.dph, bid: offer.bid, revenueHr: +offer.revenueHr.toFixed(4), roi: +(offer.roi ?? 0).toFixed(1), th: +offer.th.toFixed(1), thPer01: Math.round(offer.thPer01), passLine: offer.passLine, l1, l1Src, spotSkip: offer.spotSkip };
+    const ok = force || (!offer.spotSkip && offer.roi != null && offer.roi >= this.cfg.targetProfitPct && offer.passLine !== false);
+    if (!ok) throw Object.assign(new Error(`估价不过线：ROI ${est.roi}%（目标 ${this.cfg.targetProfitPct}%）、thPer01 ${est.thPer01}（线 ${line == null ? '—' : Math.round(line)}）${offer.spotSkip ? '、出价无效' : ''}`), { est });
+    const id = await this.rent(offer, 'manual');
+    return { id, est };
   }
 
   async autoRent(list) {

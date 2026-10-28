@@ -65,6 +65,16 @@ if (boot.proxy && !process.env.PRL_PROXY_APPLIED) {
         const id = await engine.rent(offer, 'manual');
         return send(res, 200, { ok: true, id });
       }
+      // 手动租用（网页手抄 offer 的通道）：搜索额度耗尽时唯一还能下单的路。
+      // body: { offerId, gpuName, dph, minBid?, numGpus?, geolocation?, force? }
+      if (p === '/api/rent-manual' && req.method === 'POST') {
+        try {
+          const out = await engine.rentManual(await body(req));
+          return send(res, 200, { ok: true, ...out });
+        } catch (e) {
+          return send(res, e.est ? 409 : 400, { error: e.message, est: e.est || null });
+        }
+      }
       if ((m = p.match(/^\/api\/instances\/(\d+)\/destroy$/)) && req.method === 'POST') {
         await engine.destroy(m[1], '手动退租');
         return send(res, 200, { ok: true });

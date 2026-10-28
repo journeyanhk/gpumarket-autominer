@@ -278,6 +278,47 @@ console.log('— 累计到账必须单调：矿池打款不能把同一笔记两
 }
 
 
+console.log('— L1 按房东维护（型号可能被标错，份额不会）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.st.l1ByModel = {}; e.st.l1ByHost = {}; e.st.machineHost = {};
+  e.cfg.l1Default = 0.8;
+  e.st.machineHost['146614'] = 482330;
+  ok(e.l1ForHost(482330) === null, '样本 <3 的房东返回 null');
+  e.recordL1('RTX 2080 Ti', 1.19, 482330);
+  ok(e.l1ForHost(482330) === null, '1 条样本仍不算数');
+  e.recordL1('RTX 2080 Ti', 1.21, 482330);
+  e.recordL1('RTX 2080 Ti', 1.17, 482330);
+  const m = e.l1ForMachine('RTX 2080 Ti', '146614');
+  ok(m.source === 'host' && Math.abs(m.l1 - 1.19) < 1e-9, `房东口径优先：L1=${m.l1}（source=${m.source}）`);
+  ok(m.hostId === 482330, '机器 → 房东的映射记住了');
+  // 没有 host 记录的机器回退型号口径
+  const m2 = e.l1ForMachine('RTX 3080', '999999');
+  ok(m2.source === 'model', '未知机器回退到型号口径');
+  // 对照：型号口径被这台假 2080 Ti 污染
+  ok(Math.abs(e.l1For('RTX 2080 Ti') - 1.19) < 0.02, `型号中位也变成 ${e.l1For('RTX 2080 Ti')}（所以才要房东口径）`);
+}
+
+console.log('— 场所单点降级：库存超上限才停租');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.cfg.venueGuard = { enabled: true, inventoryCapPrl: 50 };
+  e.account.vastBalance = 100; e.market.updatedAt = Date.now();
+  e.rentCooldownUntil = 0; e.preemptCooldownUntil = 0; e.rentTimes = []; e.st.failSpend = { day: '', usd: 0 };
+  e.st.venueGuard = { down: false, why: null, since: 0 };
+  ok(e.rentAllowed().ok, '场所正常时正常放行');
+  e.st.venueGuard = { down: true, why: 'gate:trade_status=sell_only', since: Date.now() };
+  e.account.prlBalance = 10; e.kx = { earned: { balance: 5 } };
+  ok(e.rentAllowed().ok, `降级但库存 ${e.inventoryPrl()} PRL < 50 → 仍可租（只挖不卖）`);
+  e.account.prlBalance = 60; e.account.prlPending = 0;
+  const g = e.rentAllowed();
+  ok(!g.ok && /场所降级/.test(g.why), `库存 ${e.inventoryPrl()} PRL > 50 → 停租（${g.why}）`);
+  e.st.venueGuard = { down: false };
+  ok(e.rentAllowed().ok, '场所恢复后自动解除');
+}
+
 console.log('— 窗口模式：两种触发 / 只放宽三项 / 自动退出');
 {
   const e = new Engine();

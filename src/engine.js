@@ -481,6 +481,8 @@ export class Engine {
             l.raises = (m.bidRaises || []).length;
             l.geo ||= i.geolocation || '';
             l.hostId ??= i.host_id ?? m.hostId ?? null;
+            // 搜索接口不返回 host_id：租过一次就记住，下次评估这台机器时能用房东口径的 L1
+            if (l.hostId != null && m.machineId != null) (this.st.machineHost ||= {})[String(m.machineId)] = l.hostId;
             if (String(i.actual_status) === 'running' && !l.tRunning) l.tRunning = Date.now();
             const lh = this.localHsOf(i.id);
             if (lh) {
@@ -494,7 +496,7 @@ export class Engine {
               const secs = l.tFirstShare ? (Date.now() - l.tFirstShare) / 1000 : 0;
               if (secs > 600 && l.sharesAccepted > 0 && Number(l.difficulty) > 0 && Number(l.lastHs) > 0) {
                 const derived = l.sharesAccepted * Number(l.difficulty) * 4294967296 / secs;
-                this.recordL1(m.gpuName, derived / Number(l.lastHs));
+                this.recordL1(m.gpuName, derived / Number(l.lastHs), l.hostId ?? i.host_id ?? null);
               }
             }
             const sh = this.sharesOf(i.id);
@@ -1127,9 +1129,11 @@ export class Engine {
       if (listDph <= 0) continue;
       const bl = this.st.blacklist[o.machine_id];
       // 参考算力来自矿工自报，必须乘实测 L1 才是能卖出去的算力（否则系统性高估 20~30%）
+      // 房东优先的 L1：同一房东的型号可能被标错（"假 2080 Ti"），但份额口径不会骗人
+      const { l1, source: l1Src, hostId } = this.l1ForMachine(o.gpu_name, o.machine_id);
       const offer = this.priceOffer({
         id: o.id, machineId: o.machine_id, gpuName: o.gpu_name, numGpus: o.num_gpus || 1,
-        th: ref.effective * (o.num_gpus || 1), dph: listDph, listDph, bid: null, spotSkip: false,
+        th: ref.effective * (o.num_gpus || 1), l1, l1Src, hostId, dph: listDph, listDph, bid: null, spotSkip: false,
         spot: this.cfg.useSpot, minBid: Number(o.min_bid ?? o.dph_total) || 0,
         reliability: o.reliability2 ?? o.reliability,
         geolocation: o.geolocation || '', inetDown: o.inet_down, cuda: o.cuda_max_good,
@@ -1139,7 +1143,12 @@ export class Engine {
       // min_bid 30 分钟稳定性：竞价机的 min_bid 是房东/市场的挂牌地板，
       // 半小时内跳 >10% 说明这台机器正在被抢（或房东在试探），此时出价大概率刚租就被收。
       offer.minBidTrend = this.recordMinBid(o.machine_id, offer.minBid, now);
-      if (offer.spot && offer.minBidTrend && offer.minBidTrend.unstable) offer.spotSkip = true;
+      // 房东口径 L1 > 1.1 = 这台机器比别人更值钱（"假 2080 Ti"那种），
+      // 对它的 min_bid 波动放宽，否则会因为它被抢得凶反而先被过滤掉。
+      const trustedHost = l1Src === 'host' && l1 > 1.1;
+      if (offer.spot && offer.minBidTrend?.unstable && !trustedHost) offer.spotSkip = true;
+      // 房东口径 L1 < 0.8 = 交不出份额，按 24GB 卡同样处理：回避
+      if (l1Src === 'host' && l1 < 0.8) { offer.spotSkip = true; offer.avoidHost = true; }
       offer.thPer01 = offer.th / (offer.dph / 0.1);
       const line = this.minThPer01;
       offer.passLine = line == null ? null : offer.thPer01 >= line;
@@ -1180,6 +1189,7 @@ export class Engine {
     await this.checkSwitches(list);
     await this.failover(list);
     list = this.instances();
+    await this.refreshVenueHealth().catch(() => {});
     if (this.cfg.autoDestroy) await this.autoDestroy(list);
     await this.pollStats(list);
     if (this.cfg.autoRent) await this.autoRent(list);
@@ -1346,6 +1356,53 @@ export class Engine {
     this.save();
   }
 
+  // ---------- 场所单点降级（Gate 现货 / Lighter 永续） ----------
+  // Pearl 的变现只有 Gate 现货、对冲只有 Lighter 永续，任一条断掉就必须进入保护态：
+  // 停止新开空、库存超过上限就停租，而不是继续把裸露库存堆高。
+  async refreshVenueHealth(now = Date.now()) {
+    const cfg = this.cfg.venueGuard || {};
+    if (cfg.enabled === false) return this.st.venueHealth;
+    if (this.st.venueHealth?.at && now - this.st.venueHealth.at < 10 * MIN) return this.st.venueHealth;
+    const gate = { ok: false, why: null };
+    try {
+      const [cur, pair] = await Promise.all([
+        request('https://api.gateio.ws/api/v4/spot/currencies/PEARL', { timeoutMs: 15000 }),
+        request('https://api.gateio.ws/api/v4/spot/currency_pairs/PEARL_USDT', { timeoutMs: 15000 }),
+      ]);
+      const dep = cur?.deposit_disabled === true;
+      const wd = cur?.withdraw_disabled === true;
+      const tradable = String(pair?.trade_status || '').toLowerCase() === 'tradable';
+      gate.ok = !wd && tradable;
+      gate.why = [dep && 'deposit_disabled', wd && 'withdraw_disabled', !tradable && `trade_status=${pair?.trade_status ?? '?'}`].filter(Boolean).join(',') || null;
+    } catch (e) { gate.ok = false; gate.why = e.message.slice(0, 90); }
+
+    const lighter = { ok: false, why: null };
+    try {
+      const d = await request('https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails?market_id=4097', { timeoutMs: 15000 });
+      const ob = d?.order_book_details?.[0];
+      const st = String(ob?.status || '').toLowerCase();
+      lighter.ok = !!ob && (st === '' || st === 'active') && (ob?.market_type === undefined || String(ob.market_type).toLowerCase().includes('perp'));
+      lighter.why = lighter.ok ? null : `lighter market status=${ob?.status ?? 'missing'}`;
+    } catch (e) { lighter.ok = false; lighter.why = e.message.slice(0, 90); }
+
+    const down = !(gate.ok && lighter.ok);
+    const prev = this.st.venueGuard || {};
+    this.st.venueHealth = { at: now, gate, lighter };
+    this.st.venueGuard = { down, why: [gate.why && `gate:${gate.why}`, lighter.why && `lighter:${lighter.why}`].filter(Boolean).join(' | ') || null, since: down ? (prev.down ? prev.since : now) : 0 };
+    this.save();
+    if (down && !prev.down) this.log('error', `场所降级：${this.st.venueGuard.why}｜停止新开空，库存超过上限即停租`);
+    if (!down && prev.down) this.log('warn', '场所已恢复（Gate/Lighter 均可用）——是否恢复对冲需人工确认');
+    return this.st.venueHealth;
+  }
+
+  // 库存（已到账 + 已确认 + 待结算）：用于降级态下的停租判断
+  inventoryPrl() {
+    const kx = Number(this.kx?.earned?.balance) || 0;
+    const ph = Number(this.account.prlBalance) || 0;
+    const pend = Number(this.account.prlPending) || 0;
+    return +(kx + ph + pend).toFixed(6);
+  }
+
   // ---------- 窗口模式 ----------
   // 两种触发：
   //   A. PRL 1 小时涨幅 ≥ chg1hPct（消息驱动的窗口）
@@ -1442,8 +1499,8 @@ export class Engine {
     return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   }
 
-  recordL1(gpuName, ratio) {
-    if (!(ratio > 0.3 && ratio < 1.5)) return;
+  recordL1(gpuName, ratio, hostId = null) {
+    if (!(ratio > 0.3 && ratio < 2.0)) return;
     const k = gpuKey(gpuName);
     const st = this.st.l1ByModel ||= {};
     const rec = st[k] ||= { samples: [] };
@@ -1451,6 +1508,34 @@ export class Engine {
     if (rec.samples.length > 20) rec.samples.splice(0, rec.samples.length - 20);
     rec.n = rec.samples.length;
     rec.median = this.l1For(gpuName);
+    // 房东维度：同一房东的机器口径更稳——型号可能被房东标错（"假 2080 Ti"就是这么来的），
+    // 而份额不会骗人。样本 ≥3 才用。
+    if (hostId != null) {
+      const h = this.st.l1ByHost ||= {};
+      const hr = h[String(hostId)] ||= { samples: [] };
+      hr.samples.push(+ratio.toFixed(3));
+      if (hr.samples.length > 20) hr.samples.splice(0, hr.samples.length - 20);
+      hr.n = hr.samples.length;
+      hr.median = this.l1ForHost(hostId);
+    }
+  }
+
+  l1ForHost(hostId) {
+    if (hostId == null) return null;
+    const rec = (this.st.l1ByHost || {})[String(hostId)];
+    const s = (rec?.samples || []).filter(x => Number.isFinite(x) && x > 0.3 && x < 2.0);
+    if (s.length < 3) return null;
+    const sorted = [...s].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
+  // 选机用的 L1：房东优先、型号兜底
+  l1ForMachine(gpuName, machineId) {
+    const hostId = machineId != null ? this.st.machineHost?.[String(machineId)] : null;
+    const byHost = this.l1ForHost(hostId);
+    if (byHost != null) return { l1: byHost, source: 'host', hostId };
+    return { l1: this.l1For(gpuName), source: 'model', hostId: hostId ?? null };
   }
 
   rentAllowed(now = Date.now()) {
@@ -1458,6 +1543,13 @@ export class Engine {
     const bal = this.account.vastBalance;
     const minBal = Number(this.cfg.minBalanceStop ?? 5);
     if (bal != null && bal < minBal) return { ok: false, why: `余额 $${bal.toFixed(2)} < 下限 $${minBal}` };
+    // 场所单点降级：库存超过上限就停租（不拦已有机器，交止损处理）
+    const vg = this.st.venueGuard || {};
+    if (vg.down) {
+      const inv = this.inventoryPrl();
+      const cap = Number(this.cfg.venueGuard?.inventoryCapPrl ?? 50);
+      if (inv > cap) return { ok: false, why: `场所降级（${vg.why}）且库存 ${inv.toFixed(1)} PRL > 上限 ${cap}，停租` };
+    }
     const staleMin = this.market.updatedAt ? (now - this.market.updatedAt) / MIN : 999;
     if (staleMin > Number(this.cfg.maxSourceStaleMin ?? 60)) return { ok: false, why: `行情已 ${Math.round(staleMin)} 分钟没更新` };
     if (now < (this.rentCooldownUntil || 0)) return { ok: false, why: '429 退避中' };
@@ -1955,6 +2047,21 @@ export class Engine {
     num('rentMinIntervalMin', 1, 180); num('maxRentsPerHour', 1, 20); num('preemptCooldownMin', 0, 120);
     num('maxBidRaises', 0, 10);   // 0 = 不追价（默认）；>0 才允许被顶后加价保活
     num('dailyFailBudget', 0, 100); num('minBidStablePct', 0, 100);
+    if (patch.venueGuard !== undefined) {
+      const v = patch.venueGuard;
+      if (v === null) next.venueGuard = null;
+      else if (typeof v !== 'object') throw new Error('「venueGuard」必须是对象或 null');
+      else {
+        const out = { ...(next.venueGuard || {}) };
+        if (v.enabled !== undefined) out.enabled = !!v.enabled;
+        if (v.inventoryCapPrl !== undefined) {
+          const n = Number(v.inventoryCapPrl);
+          if (!Number.isFinite(n) || n < 0 || n > 100000) throw new Error('「venueGuard.inventoryCapPrl」应在 0~100000 之间');
+          out.inventoryCapPrl = n;
+        }
+        next.venueGuard = out;
+      }
+    }
     // 实验参数覆盖：只允许挂在 pinned 机器上（作用域收窄），键名与范围都校验
     if (patch.expOverride !== undefined) {
       const o = patch.expOverride;
@@ -2149,6 +2256,8 @@ export class Engine {
       leases: this.leaseReport(),
       window: { ...(this.st.windowState || { active: false }), limits: this.effectiveLimits(), info: this.windowInfo() },
       l1: Object.fromEntries(Object.entries(this.st.l1ByModel || {}).map(([k, v]) => [k, { n: v.n, median: v.median }])),
+      l1Host: Object.fromEntries(Object.entries(this.st.l1ByHost || {}).map(([k, v]) => [k, { n: v.n, median: v.median, machines: Object.entries(this.st.machineHost || {}).filter(([, h]) => String(h) === String(k)).map(([mid]) => mid) }])),
+      venue: { health: this.st.venueHealth, guard: this.st.venueGuard, inventoryPrl: this.inventoryPrl(), capPrl: this.cfg.venueGuard?.inventoryCapPrl ?? 50 },
       pools: this.poolsSnapshot(list),
       compare: { h24: this.compare(24), d7: this.compare(24 * 7), all: this.compare(null) },
       failovers: this.st.failovers.slice(-10).reverse(),

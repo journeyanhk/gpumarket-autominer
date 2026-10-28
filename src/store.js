@@ -69,6 +69,8 @@ export const DEFAULT_CONFIG = {
     maxHourlySpend: 0.6,    // 窗口内放宽：总时租上限
   },
   l1Default: 0.8,           // 没有样本的型号，按"份额反推算力 ÷ 矿工自报"= 0.8 保守折算
+  // 场所单点降级：Gate 现货（唯一变现出口）或 Lighter 永续（唯一对冲腿）任一不可用 → 保护态
+  venueGuard: { enabled: true, inventoryCapPrl: 50 },
   minBalanceStop: 5,        // 总开关：余额低于此值，一切新租停止
   maxSourceStaleMin: 60,    // 总开关：行情三源全部失效超过这么久，停止新租
   minBalanceReserve: 2,     // 余额低于它就停止新租
@@ -136,6 +138,10 @@ export function loadState() {
     leases: [],      // 租约台账：一台机器一条完整生命周期记录（见 src/leases.js）
     hostStats: {},   // 房东维度：1 小时内收回 ≥2 台 → 该房东已知机器拉黑 24h
     l1ByModel: {},   // gpuKey -> { samples: [], median, n }：实测「份额反推算力 ÷ 矿工自报」
+    l1ByHost: {},    // hostId -> { samples: [], median, n }：同一房东的机器口径更稳（型号可能被标错）
+    machineHost: {}, // machineId -> hostId：搜索接口不返回 host_id，租过一次就记住
+    venueHealth: null, // { at, gate:{ok,why}, lighter:{ok,why} } 场所可用性
+    venueGuard: { down: false, why: null, since: 0 }, // 单点降级总开关
     windowState: null, // { active, until, reason, startedAt }：窗口模式状态
     failSpend: { day: '', usd: 0 },   // 每日失败成本（部署失败/刚下就被收回的租金）
     minBidHist: {},  // machineId -> [{t, mb}]，用于 min_bid 30 分钟稳定性过滤

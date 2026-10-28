@@ -25,6 +25,9 @@ let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log('  ✓', m); } else { fail++; console.log('  ✗', m); } };
 
 const e = new Engine();
+// L1 折算（份额反推算力 ÷ 矿工自报）会整体压低报价；这些用例测的是别的逻辑，
+// 所以这里把它设成 1，L1 本身由 lease-test 的「L1 按型号维护」一节覆盖。
+e.cfg.l1Default = 1;
 const logs = [];
 e.log = (lvl, msg) => logs.push(`${lvl} ${msg}`);
 await e.refreshMarket(); await e.refreshVast(); await e.scan(true);

@@ -1081,7 +1081,11 @@ export class Engine {
   // 否则同一台机器会在「扫描结果」和「每 20 秒重算」之间反复出现/消失（review #7）。
   priceOffer(o, usd) {
     const ref = this.thFor(o.gpuName);
-    if (ref) { o.th = ref.effective * o.numGpus; o.source = ref.source; o.autoOk = ref.autoOk; }
+    if (ref) { o.thRaw = ref.effective * o.numGpus; o.source = ref.source; o.autoOk = ref.autoOk; }
+    // L1 折算必须收敛在这里：参考算力来自矿工自报，卖出去的只有 0.76~0.93 倍。
+    // 之前 evaluateOffers 里乘过 L1，但这里又用 ref.effective 覆盖了 o.th，等于白乘。
+    o.l1 = Number.isFinite(Number(o.l1)) ? Number(o.l1) : this.l1For(o.gpuName);
+    o.th = (Number(o.thRaw) || Number(o.th) || 0) * o.l1;
     o.revenueHr = o.th * 1e12 * usd;
     if (!o.spot) {
       o.spotSkip = false;
@@ -1123,11 +1127,9 @@ export class Engine {
       if (listDph <= 0) continue;
       const bl = this.st.blacklist[o.machine_id];
       // 参考算力来自矿工自报，必须乘实测 L1 才是能卖出去的算力（否则系统性高估 20~30%）
-      const l1 = this.l1For(o.gpu_name);
-      const thRaw = ref.effective * (o.num_gpus || 1);
       const offer = this.priceOffer({
         id: o.id, machineId: o.machine_id, gpuName: o.gpu_name, numGpus: o.num_gpus || 1,
-        th: thRaw * l1, thRaw, l1, dph: listDph, listDph, bid: null, spotSkip: false,
+        th: ref.effective * (o.num_gpus || 1), dph: listDph, listDph, bid: null, spotSkip: false,
         spot: this.cfg.useSpot, minBid: Number(o.min_bid ?? o.dph_total) || 0,
         reliability: o.reliability2 ?? o.reliability,
         geolocation: o.geolocation || '', inetDown: o.inet_down, cuda: o.cuda_max_good,

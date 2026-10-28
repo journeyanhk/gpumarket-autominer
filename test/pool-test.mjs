@@ -23,6 +23,9 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
 const logs = [];
 
 const e = new Engine();
+// L1 折算（份额反推算力 ÷ 矿工自报）会整体压低报价；这些用例测的是别的逻辑，
+// 所以这里把它设成 1，L1 本身由 lease-test 的「L1 按型号维护」一节覆盖。
+e.cfg.l1Default = 1;
 e.log = (lv, msg) => logs.push(`[${lv}] ${msg}`);
 await e.refreshMarket(); await e.refreshWildrig(); await e.refreshVast(); await e.refreshKryptex(); await e.scan(true);
 

@@ -949,6 +949,8 @@ export class Engine {
     const day = this.utcDay();
     let u = this.st.searchUsage;
     if (!u || u.day !== day) u = this.st.searchUsage = { day, requests: 0, rows: 0, exhaustedAt: null };
+    // 分桶上线前的历史用量全部算进巡航桶（保守：不虚报窗口余量）
+    if (u.cruiseRows == null && u.windowRows == null) { u.cruiseRows = u.rows || 0; u.windowRows = 0; }
     u.cruiseRows ||= 0; u.windowRows ||= 0;
     return u;
   }
@@ -1507,6 +1509,10 @@ export class Engine {
     if (offers.length && d6 > 0) {
       const best = offers.reduce((a, o) => Math.max(a, (o.th * d6 / 24) / o.dph), 0);
       ratio = +best.toFixed(3);
+      // 记住上次能用到的地板（每 TH 每小时的挂牌价），额度耗尽/缓存为空时还能算比值
+      this.st.lastFloorPerTh = +offers.reduce((a, o) => Math.min(a, o.dph / o.th), Infinity).toFixed(8);
+    } else if (d6 > 0 && Number(this.st.lastFloorPerTh) > 0) {
+      ratio = +((d6 / 24) / Number(this.st.lastFloorPerTh)).toFixed(3);
     }
     return { chg1h: chg(3600e3), chg6h: chg(6 * 3600e3), density6h: +d6.toFixed(5), densityRise24hPct: rise, ratio };
   }

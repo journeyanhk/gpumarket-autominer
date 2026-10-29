@@ -348,6 +348,9 @@ console.log('— 失败成本：短命机器按净亏计入');
   mkLease(90, 0.30);       // 90 分钟、赚了钱 → 不计失败
   e.closeLeaseFor(e.leases[1].id, { reason: '手动退租' });
   ok(e.failSpendToday(now).usd === 0, '活得久的机器即使被退租也不计失败成本');
+  const fb = e.st.failBreakdown || {};
+  ok((fb.shortNet || 0) > 0, `三列拆分：短命净亏 $${(fb.shortNet || 0).toFixed(4)}（封顶项）`);
+  ok(fb.stopLossNet !== undefined, '止损退出净亏单独一列（不计入封顶）');
 }
 
 console.log('— L1 按房东维护（型号可能被标错，份额不会）');
@@ -409,11 +412,16 @@ console.log('— 额度分桶：巡航 40% / 窗口 60%');
   ok(bk.cruiseLeft === 0 && bk.windowLeft === bk.windowBudget, '巡航用光后窗口桶仍然是满的（这就是改成 40/60 的意义）');
   const planCruise = e.scanPlan();
   ok(/巡航额度已用完/.test(planCruise.why || ''), `巡航桶耗尽 → 只等窗口（${planCruise.why}）`);
-  // 窗口开启后改用窗口桶：60 秒一次、100 行
+  // 窗口开启后，只有"匿名已看到过线报价"才动用 key 桶（二次确认），节奏 90 秒 / 50 行
   e.st.windowState = { active: true, until: Date.now() + 3600e3 };
+  e.cfg.windowScanRows = 50; e.cfg.windowScanIntervalSec = 90;
+  e.offers = [];   // 没有过线报价 → 不动用 key 桶
+  const planNoPass = e.scanPlan();
+  ok(planNoPass.bucket !== 'window', `匿名没有过线报价时不动用 key 桶（${planNoPass.bucket}）`);
+  e.offers = [{ spotSkip: false, roi: 45, expRoi: 30 }];
   const planWin = e.scanPlan();
-  ok(planWin.interval === 60_000 && planWin.rows === 40 && planWin.bucket === 'window',
-     `窗口期扫描：每 ${planWin.interval / 1000}s、${planWin.rows} 行、桶=${planWin.bucket}`);
+  ok(planWin.interval === 90_000 && planWin.rows === 50 && planWin.bucket === 'window',
+     `窗口期二次确认：每 ${planWin.interval / 1000}s、${planWin.rows} 行、桶=${planWin.bucket}`);
   // 窗口桶也用光 → 回落到巡航节奏（不会无限扫）
   e.st.searchUsage.windowRows = bk.windowBudget;
   const planWin2 = e.scanPlan();

@@ -746,13 +746,20 @@ export class Engine {
     {
       const h = Math.max(0, (l.tEnd - l.tRent) / 3_600_000);
       const paid = (Number(l.dphTotalActual ?? l.bidFinal ?? 0) || 0) * h;
+      const earned = (Number(l.creditedPrl) || 0) * (this.market.price || 0);
+      const netLoss = Math.max(0, paid - earned);
       const lifeMin = h * 60;
       const shortLife = lifeMin < Number(this.cfg.survivalMinLifeMin ?? 30);
-      if (!l.tFirstShare) this.addFailSpend(paid);
-      else if (shortLife) {
-        const earned = (Number(l.creditedPrl) || 0) * (this.market.price || 0);
-        this.addFailSpend(Math.max(0, paid - earned));
-      }
+      // 三列拆分（用户 2026-10-29 要求）：$0.30 封顶只覆盖第一列，不是"每日总亏损上限"
+      //   ① 短命净亏（<30 分钟）→ 计入 dailyFailBudget，触发停租
+      //   ② 活够久但因密度下滑/止损退出 → 单独统计，不影响封顶
+      //   ③ 对冲资金费与管道费用 → 系统外，由 hedge/pipeline 脚本统计
+      this.st.failBreakdown ||= { day: this.utcDay(), shortNet: 0, stopLossNet: 0, other: 0 };
+      const fb = this.st.failBreakdown;
+      if (fb.day !== this.utcDay()) Object.assign(fb, { day: this.utcDay(), shortNet: 0, stopLossNet: 0, other: 0 });
+      if (!l.tFirstShare) { this.addFailSpend(paid); fb.shortNet = +(fb.shortNet + paid).toFixed(4); }
+      else if (shortLife) { this.addFailSpend(netLoss); fb.shortNet = +(fb.shortNet + netLoss).toFixed(4); }
+      else if (netLoss > 0) fb.stopLossNet = +(fb.stopLossNet + netLoss).toFixed(4);
     }
     this.save();
     return l;
@@ -1016,10 +1023,14 @@ export class Engine {
     // 窗口期：用窗口桶，60 秒一次、100 行（把额度花在刀刃上）
     // 窗口期可以用窗口桶；窗口桶空了但巡航还有余量 → 允许单向借用（否则会出现"窗口有余额、巡航归零"的死角）
     const winLeft = bk.windowLeft > 0 ? bk.windowLeft : bk.cruiseLeft;
-    if (winActive && winLeft > 0) {
-      const rowsWin = Math.min(100, Math.max(30, Number(this.cfg.windowScanRows) || 100), winLeft);
-      return { interval: 60_000, rows: rowsWin, bucket: bk.windowLeft > 0 ? 'window' : 'cruise-borrow',
-        why: `窗口期扫描：${bk.windowLeft > 0 ? `窗口桶剩 ${bk.windowLeft} 行` : `窗口桶为空，借巡航桶 ${bk.cruiseLeft} 行`}` };
+    // key 桶只在"匿名已经看到过线报价"时才动用（二次确认）：匿名 40 条已够发现机会，
+    // key 的价值是字段更全/更快，不该拿它去空转烧额度（100 行/60 秒 45 分钟就烧光）。
+    const anonHasPass = (this.offers || []).some(o => !o.spotSkip && (o.expRoi ?? o.roi) != null && (o.expRoi ?? o.roi) >= this.cfg.targetProfitPct);
+    if (winActive && winLeft > 0 && anonHasPass) {
+      const rowsWin = Math.min(Number(this.cfg.windowScanRows) || 50, winLeft);
+      return { interval: (Number(this.cfg.windowScanIntervalSec) || 90) * 1000, rows: rowsWin,
+        bucket: bk.windowLeft > 0 ? 'window' : 'cruise-borrow',
+        why: `窗口期二次确认：${rowsWin} 行 / ${this.cfg.windowScanIntervalSec || 90} 秒（${bk.windowLeft > 0 ? `窗口桶剩 ${bk.windowLeft} 行` : `借巡航桶 ${bk.cruiseLeft} 行`}）` };
     }
     // 匿名身份可用时，账号的每日行数额度对我们无关（匿名只受 30 次/窗口的频率限制），
     // 所以巡航不该被"账号额度耗尽"卡住 —— 固定 10 分钟一次、每次 20 行。
@@ -1324,7 +1335,11 @@ export class Engine {
         const deployPct = (Number(this.cfg.deployCostMin) || 2) / 60 * 100;
         offer.expRoi = offer.roi == null ? null : +(offer.roi * sv.p - deployPct).toFixed(1);
         const ban = this.hostBanned(hostId, now);
-        if (ban) { offer.spotSkip = true; offer.hostBanned = ban.why; }
+        if (ban?.state === 'banned') { offer.spotSkip = true; offer.hostBanned = ban.why; }
+        else if (ban?.state === 'parole') {
+          offer.hostParole = true;
+          if (this.paroleHostInUse(hostId) >= 1) { offer.spotSkip = true; offer.hostBanned = `假释期内已有 1 台在跑（${ban.why}）`; }
+        }
         else if (this.cfg.survivalGate !== false && offer.expRoi != null && offer.expRoi < this.cfg.targetProfitPct && !offer.spotSkip) {
           offer.spotSkip = true; offer.expRoiSkip = true;
         }
@@ -1623,10 +1638,31 @@ export class Engine {
     return applied;
   }
 
+  // 房东状态：banned（在期限内）/ parole（假释：只许试 1 台，活过 30 分钟才解除）/ null
+  // 理由：房东行为会变（AI 任务结束机器长期空闲），永久拉黑会把池子越筛越小。
   hostBanned(hostId, now = Date.now()) {
     if (hostId == null) return null;
     const b = (this.st.hostBans || {})[String(hostId)];
-    return b && b.until > now ? b : null;
+    if (!b) return null;
+    if (b.until > now) return { ...b, state: 'banned' };
+    // 假释期：到期后 7 天内只允许 1 台试探；此期间若有租约活过 30 分钟则彻底解除
+    const paroleDays = Number(this.cfg.hostBan?.paroleDays ?? 7);
+    const paroleUntil = b.until + paroleDays * 24 * 60 * MIN;
+    if (now < paroleUntil) {
+      const proved = this.leases.some(l => String(l.hostId) === String(hostId) && l.tEnd && (l.tEnd - l.tRent) / 60000 >= Number(this.cfg.survivalMinLifeMin ?? 30));
+      if (proved) { delete this.st.hostBans[String(hostId)]; this.save(); return null; }
+      return { ...b, state: 'parole', paroleUntil };
+    }
+    delete this.st.hostBans[String(hostId)];
+    this.save();
+    return null;
+  }
+
+  // 当前有多少台正在跑/待跑来自假释房东（假释期内每房东只许 1 台）
+  paroleHostInUse(hostId) {
+    if (hostId == null) return 0;
+    const open = this.leases.filter(l => !l.tEnd && String(l.hostId) === String(hostId));
+    return open.length;
   }
 
   // ---------- 场所单点降级（Gate 现货 / Lighter 永续） ----------
@@ -2586,6 +2622,7 @@ export class Engine {
       l1: Object.fromEntries(Object.entries(this.st.l1ByModel || {}).map(([k, v]) => [k, { n: v.n, median: v.median }])),
       l1Host: Object.fromEntries(Object.entries(this.st.l1ByHost || {}).map(([k, v]) => [k, { n: v.n, median: v.median, machines: Object.entries(this.st.machineHost || {}).filter(([, h]) => String(h) === String(k)).map(([mid]) => mid) }])),
       venue: { health: this.st.venueHealth, guard: this.st.venueGuard, inventoryPrl: this.inventoryPrl(), capPrl: this.cfg.venueGuard?.inventoryCapPrl ?? 50 },
+      failBreakdown: { ...(this.st.failBreakdown || {}), capUsd: Number(this.cfg.dailyFailBudget ?? 0.3), usedUsd: this.failSpendToday().usd },
       pools: this.poolsSnapshot(list),
       compare: { h24: this.compare(24), d7: this.compare(24 * 7), all: this.compare(null) },
       failovers: this.st.failovers.slice(-10).reverse(),

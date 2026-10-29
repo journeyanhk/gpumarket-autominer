@@ -74,13 +74,14 @@ export const DEFAULT_CONFIG = {
   venueGuard: { enabled: true, inventoryCapPrl: 50 },
   // 房东存活率（用户 2026-10-29 定）：收回率 >60% 且中位存活 <20 分钟 → 7 天不租；
   // 收回 ≥2 次 → 24 小时；样本=1 且短命 → 24 小时观察期。
-  hostBan: { ratePct: 60, medianMin: 20, days: 7, probationHours: 24, minSamplesForLong: 2 },
+  hostBan: { ratePct: 60, medianMin: 20, days: 7, probationHours: 24, minSamplesForLong: 2, paroleDays: 7 },
+  windowScanIntervalSec: 90,  // 窗口期二次确认的间隔（原 60 秒太快，45 分钟就把窗口桶烧光）
   survivalMinLifeMin: 30,   // 「活下来」的门槛：存活 ≥ 30 分钟才算成功样本
   deployCostMin: 2,         // 部署成本（分钟），计入期望 ROI
   unknownHostMaxConcurrent: 1, // 没有历史的房东，同时最多试 1 台
   // 额度分桶：巡航只花 40%，60% 锁给窗口（窗口通常出现在亚洲/美国盘交叠的几小时）
   cruiseScanRows: 20,     // 巡航每次取多少行（vast 按"返回行数"计费，越小能扫越多次）
-  windowScanRows: 40,     // 窗口期每次取多少行（要覆盖面，但每次仍按行数扣）
+  windowScanRows: 50,     // 窗口期每次取多少行（只在匿名发现过线时才动用 key 桶）
   chg6hPct: 8,            // 第三种窗口触发：6 小时涨幅 ≥ 8%
   stairRatio: 1.1,        //                   且 密度÷地板 ≥ 1.1（阶梯式上涨）
   offerCacheMaxMin: 30,   // 缓存报价可用于下单的最大年龄（额度耗尽时的应急通道）

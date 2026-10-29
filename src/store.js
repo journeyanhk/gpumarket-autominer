@@ -95,7 +95,7 @@ export const DEFAULT_CONFIG = {
   netDrop72hPct: 20,      // 第四种（过渡期）：全网算力较 72h 前下降 ≥ 20%（7d 密度样本不足时用它）
   stairRatio: 1.1,        //                   且 密度÷地板 ≥ 1.1（阶梯式上涨）
   offerCacheMaxMin: 30,   // 缓存报价可用于下单的最大年龄（额度耗尽时的应急通道）
-  anonCruiseIntervalMin: 2, // 匿名巡航间隔（分钟）：廉价竞价机寿命只有几分钟
+  anonCruiseIntervalMin: 3, // 匿名巡航间隔（分钟）：每小时 20 次，给启动装缓存与窗口二次确认留余量
   anonCruiseRows: 30,       // 匿名巡航每次取 30 行（按 min_bid 升序）
   anonBackoffMin: 5,        // 匿名被频率锁时的退避
   minBalanceStop: 5,        // 总开关：余额低于此值，一切新租停止

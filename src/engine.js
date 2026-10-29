@@ -986,7 +986,7 @@ export class Engine {
     if (!u || u.day !== day) u = this.st.searchUsage = { day, requests: 0, rows: 0, exhaustedAt: null };
     // 分桶上线前的历史用量全部算进巡航桶（保守：不虚报窗口余量）
     if (u.cruiseRows == null && u.windowRows == null) { u.cruiseRows = u.rows || 0; u.windowRows = 0; }
-    u.cruiseRows ||= 0; u.windowRows ||= 0;
+    u.cruiseRows ||= 0; u.windowRows ||= 0; u.keyCruiseRows ||= 0;
     return u;
   }
 
@@ -1051,7 +1051,7 @@ export class Engine {
       if (backoff > 0) return { interval: backoff, rows, bucket: 'anon', why: `匿名被限流，退避 ${Math.ceil(backoff / 60000)} 分钟` };
       // 廉价竞价机的寿命只有几分钟（2026-10-28：六条里三条 25 分钟内被人抢走），
       // 所以匿名巡航压到 2 分钟一轮、按 min_bid 升序取最便宜的 30 条。
-      return { interval: (Number(this.cfg.anonCruiseIntervalMin) || 2) * MIN, rows, bucket: 'anon', order: 'min_bid',
+      return { interval: (Number(this.cfg.anonCruiseIntervalMin) || 3) * MIN, rows, bucket: 'anon', order: 'min_bid',
         why: '匿名巡航：2 分钟一轮 / 30 行 / min_bid 升序（不消耗账号额度）' };
     }
     // 巡航：只用巡航桶，间隔 = 剩余时间 ÷ 剩余次数，最少 10 分钟
@@ -1104,14 +1104,24 @@ export class Engine {
       const trySearch = async (useAnon) => this.vast.searchOffers(scanCfg, meta, sq.names,
         { anon: useAnon, order: this._scanOrder || null });
       const searchWithIdentity = async () => {
-        try { const r = await trySearch(anon); this.anonAvailable = anon; this.st.anonAvailable = anon; return r; }
+        try {
+          const r = await trySearch(anon);
+          this.anonAvailable = anon; this.st.anonAvailable = anon;
+          this._lastSearchAnon = anon; this._anon429 = 0;
+          return r;
+        }
         catch (e1) {
           // 只有"每日行数额度"才值得换身份（那是按 identity 计的）；
           // 普通频率限流换身份等于绕过自己的配额，不做。
           const quotaHit = e1.body?.error === 'search_quota_exceeded' || /quota|Daily search/i.test(e1.message || '');
           if (e1.status === 429 && !quotaHit && anon) {
-            // 匿名频率锁：退避 5 分钟（不要立刻换带 key 身份去烧账号额度）
-            this.anonBackoffUntil = Date.now() + (Number(this.cfg.anonBackoffMin) || 5) * MIN;
+            // 匿名频率锁（30 次/小时）：**只等，不切 key**。切 key 烧的是每日行数额度，
+            // 一次回落就几十到上百行 —— 2026-10-29 的 1,800 行就是这么没的。
+            // 连续 3 次 429 才把间隔临时拉到 5 分钟；成功一次就清零。
+            this._anon429 = (Number(this._anon429) || 0) + 1;
+            const backoffMin = this._anon429 >= 3 ? (Number(this.cfg.anonBackoffMin) || 5) : (Number(this.cfg.anonCruiseIntervalMin) || 3);
+            this.anonBackoffUntil = Date.now() + backoffMin * MIN;
+            this.log('info', `匿名搜索被频率锁（连续 ${this._anon429} 次），等 ${backoffMin} 分钟后重试（不切 key）`);
             throw e1;
           }
           // key 失效（401/403/404 Invalid user key）也要能退回匿名：否则一条 key 出错就完全停摆
@@ -1142,7 +1152,11 @@ export class Engine {
       const u = this.usageToday();
       u.requests++; u.rows += raw.length;
       if (this._scanBucket === 'window') u.windowRows = (u.windowRows || 0) + raw.length;
-      else u.cruiseRows = (u.cruiseRows || 0) + raw.length;   // cruise 与 cruise-borrow 都记巡航桶
+      else {
+        u.cruiseRows = (u.cruiseRows || 0) + raw.length;   // cruise 与 cruise-borrow 都记巡航桶
+        // 巡航里"用 key 烧掉的行数"单列，目标是 0（巡检会盯这个数）
+        if (!this._lastSearchAnon) u.keyCruiseRows = (u.keyCruiseRows || 0) + raw.length;
+      }
       this.readQuotaHeaders(meta.headers);
       this.save();
       this.offerStats.error = null;
@@ -1150,7 +1164,8 @@ export class Engine {
       this.offerStats.mode = sq.mode === 'focused' ? `精准搜索 ${sq.models} 个型号` : '全量搜索';
       // 按需腿：B 型窗口（算力回落）的正确工具是便宜的非 AI 卡，不是竞价。
       // 匿名搜 on-demand、30 行，与竞价共用同一条估价管线（按需机 P=1，不打存活折扣）。
-      if (this.cfg.onDemand?.enabled !== false) {
+      this._odTurn = !this._odTurn;
+      if (this.cfg.onDemand?.enabled !== false && this._odTurn) {
         try {
           const odCfg = { ...scanCfg, useSpot: false, scanRows: Number(this.cfg.onDemand?.scanRows) || 30 };
           const odRaw = await this.vast.searchOffers(odCfg, {}, null, { anon: true });

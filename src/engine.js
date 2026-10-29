@@ -1051,8 +1051,9 @@ export class Engine {
       if (backoff > 0) return { interval: backoff, rows, bucket: 'anon', why: `匿名被限流，退避 ${Math.ceil(backoff / 60000)} 分钟` };
       // 廉价竞价机的寿命只有几分钟（2026-10-28：六条里三条 25 分钟内被人抢走），
       // 所以匿名巡航压到 2 分钟一轮、按 min_bid 升序取最便宜的 30 条。
-      return { interval: (Number(this.cfg.anonCruiseIntervalMin) || 3) * MIN, rows, bucket: 'anon', order: 'min_bid',
-        why: '匿名巡航：2 分钟一轮 / 30 行 / min_bid 升序（不消耗账号额度）' };
+      const everyMin = Number(this.cfg.anonCruiseIntervalMin) || 3;
+      return { interval: everyMin * MIN, rows, bucket: 'anon', order: 'min_bid',
+        why: `匿名巡航：${everyMin} 分钟一轮 / ${rows} 行 / min_bid 升序（不消耗账号额度，限流只等不切 key）` };
     }
     // 巡航：只用巡航桶，间隔 = 剩余时间 ÷ 剩余次数，最少 10 分钟
     const rowsCruise = Math.min(Number(this.cfg.cruiseScanRows) || 30, Math.max(20, Number(this.cfg.scanRows) || 30));
@@ -2531,6 +2532,10 @@ export class Engine {
     num('maxBidRaises', 0, 10);   // 0 = 不追价（默认）；>0 才允许被顶后加价保活
     num('dailyFailBudget', 0, 100); num('minBidStablePct', 0, 100);
     num('cruiseScanRows', 20, 200); num('windowScanRows', 20, 1000); num('chg6hPct', 1, 100); num('stairRatio', 0.5, 5); num('offerCacheMaxMin', 5, 240);
+    // 这些是后加的键：不注册校验就会被 patch 静默忽略（2026-10-29 实测 anonCruiseIntervalMin 改了没生效）
+    num('anonCruiseIntervalMin', 1, 120); num('anonCruiseRows', 20, 200); num('anonBackoffMin', 1, 120);
+    num('windowScanIntervalSec', 30, 600); num('netDrop72hPct', 5, 90);
+    num('survivalMinLifeMin', 5, 240); num('deployCostMin', 0, 30); num('pSurviveDefault', 0, 1); num('l1ModelCap', 0.5, 2);
     if (patch.venueGuard !== undefined) {
       const v = patch.venueGuard;
       if (v === null) next.venueGuard = null;

@@ -428,6 +428,38 @@ console.log('— 额度分桶：巡航 40% / 窗口 60%');
   ok(planWin2.bucket !== 'window' || planWin2.interval > 60_000, '窗口桶用光后不再高频扫描');
 }
 
+console.log('— 过渡期触发：全网算力较 72h 前下降 ≥ 20%');
+{
+  const e = new Engine();
+  e.log = () => {};
+  const now = Date.now();
+  e.cfg.windowMode = { enabled: true, chg1hPct: 8, chg6hPct: 8, stairRatio: 1.1, netDrop72hPct: 20, ratio: 1, densityRise24hPct: 15, minutes: 360, minBidStablePct: 50, failBudgetUsd: 1, maxHourlySpend: 0.6 };
+  e.st.windowState = null; e.market.price = 1.7; e.market.networkHs = 63e18;
+  e.st.history = [{ t: now - 73 * 3600e3, price: 1.9, netEh: 94 }];
+  e.densitySamples = [{ t: now - 3600e3, v: 0.0228 / 24e12 }];
+  e.offers = [];
+  const info = e.windowInfo(now);
+  ok(info.netDrop72hPct !== null && info.netDrop72hPct <= -30, `72h 算力变化 ${info.netDrop72hPct}%（94 → 63 EH/s）`);
+  const st = e.updateWindowMode(now);
+  ok(st.active && /72h/.test(st.reason || ''), `算力回落型窗口触发：${st.reason}`);
+  // 回落不足 20% 时不触发
+  const e2 = new Engine(); e2.log = () => {};
+  e2.cfg.windowMode = e.cfg.windowMode; e2.st.windowState = null;
+  e2.market.price = 1.7; e2.market.networkHs = 85e18;
+  e2.st.history = [{ t: now - 73 * 3600e3, price: 1.9, netEh: 94 }];
+  e2.densitySamples = [{ t: now - 3600e3, v: 0.0228 / 24e12 }];
+  ok(!e2.updateWindowMode(now).active, '只跌 9.6% 不触发（阈值 20%）');
+}
+
+console.log('— 配置回显：改完能核对生效值');
+{
+  const e = new Engine();
+  e.log = () => {};
+  const r = e.updateConfig({ maxHourlySpend: 0.3 });
+  ok(r.cfg && r.cfg.maxHourlySpend === 0.3, `updateConfig 回显生效值（maxHourlySpend=${r.cfg?.maxHourlySpend}）`);
+  ok(r.cfg.vastApiKey === '' || r.cfg.vastApiKey === '***', '密钥字段已脱敏');
+}
+
 console.log('— 第三种窗口触发：6h 阶梯上涨');
 {
   const e = new Engine();

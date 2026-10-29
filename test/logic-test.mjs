@@ -24,6 +24,7 @@ const e = new Engine();
 e.cfg.l1Default = 1;
 // 存活率/部署成本的折算由 lease-test 专门覆盖；这些用例测别的逻辑，先中性化
 e.cfg.pSurviveDefault = 1; e.cfg.deployCostMin = 0;
+e.cfg.onDemand = { ...(e.cfg.onDemand || {}), enabled: false };   // 按需腿由 lease-test 覆盖
 e.log = () => {};
 await e.refreshMarket(); await e.refreshWildrig(); await e.refreshVast(); await e.scan(true);
 ok(e.marketFresh && e.usdHsHr > 0, '行情就绪');

@@ -30,8 +30,10 @@ const e = new Engine();
 e.cfg.l1Default = 1;
 // 存活率/部署成本的折算由 lease-test 专门覆盖；这些用例测别的逻辑，先中性化
 e.cfg.pSurviveDefault = 1; e.cfg.deployCostMin = 0;
+e.cfg.onDemand = { ...(e.cfg.onDemand || {}), enabled: false };   // 按需腿由 lease-test 覆盖
 if (e.cfg.hostBan) e.cfg.hostBan.enabled = false;   // 房东黑名单/存活率门槛由 lease-test 覆盖
 e.cfg.survivalGate = false;
+e.cfg.onDemand = { ...(e.cfg.onDemand||{}), enabled: false };   // 按需腿由 lease-test 覆盖
 const logs = [];
 e.log = (lvl, msg) => logs.push(`${lvl} ${msg}`);
 await e.refreshMarket(); await e.refreshVast(); await e.scan(true);

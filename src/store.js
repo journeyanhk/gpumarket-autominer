@@ -75,7 +75,16 @@ export const DEFAULT_CONFIG = {
   // 房东存活率（用户 2026-10-29 定）：收回率 >60% 且中位存活 <20 分钟 → 7 天不租；
   // 收回 ≥2 次 → 24 小时；样本=1 且短命 → 24 小时观察期。
   hostBan: { ratePct: 60, medianMin: 20, days: 7, probationHours: 24, minSamplesForLong: 2, paroleDays: 7 },
-  windowScanIntervalSec: 90,  // 窗口期二次确认的间隔（原 60 秒太快，45 分钟就把窗口桶烧光）
+  windowScanIntervalSec: 90,
+  // 按需机（B 型窗口的工具）：合同期内不会被房东收回，所以不打存活折扣。
+  onDemand: {
+    enabled: true,
+    maxMachines: 2,                       // 与竞价的 maxInstances 分开计
+    models: ['RTX 4070S', 'RTX 2080 Ti', 'RTX 3080', 'RTX 3060 Ti'],
+    stopLossPct: -10, stopLossMinutes: 60, // 按需的价值是长寿，别被日内抖动杀掉
+    densityDecayPerDay: 3,                 // 算力会回流：持有期密度按每天 -3% 折算
+    scanRows: 30,
+  },  // 窗口期二次确认的间隔（原 60 秒太快，45 分钟就把窗口桶烧光）
   survivalMinLifeMin: 30,   // 「活下来」的门槛：存活 ≥ 30 分钟才算成功样本
   deployCostMin: 2,         // 部署成本（分钟），计入期望 ROI
   unknownHostMaxConcurrent: 1, // 没有历史的房东，同时最多试 1 台
@@ -83,6 +92,7 @@ export const DEFAULT_CONFIG = {
   cruiseScanRows: 20,     // 巡航每次取多少行（vast 按"返回行数"计费，越小能扫越多次）
   windowScanRows: 50,     // 窗口期每次取多少行（只在匿名发现过线时才动用 key 桶）
   chg6hPct: 8,            // 第三种窗口触发：6 小时涨幅 ≥ 8%
+  netDrop72hPct: 20,      // 第四种（过渡期）：全网算力较 72h 前下降 ≥ 20%（7d 密度样本不足时用它）
   stairRatio: 1.1,        //                   且 密度÷地板 ≥ 1.1（阶梯式上涨）
   offerCacheMaxMin: 30,   // 缓存报价可用于下单的最大年龄（额度耗尽时的应急通道）
   anonCruiseIntervalMin: 2, // 匿名巡航间隔（分钟）：廉价竞价机寿命只有几分钟

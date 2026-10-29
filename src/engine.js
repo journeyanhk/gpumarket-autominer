@@ -845,6 +845,17 @@ export class Engine {
   // 于是 autoRent 用实验门槛去租生产机（3060 Ti 以 −48.5% 进场就是这么来的），
   // 而止损又因为 −90% 永远不触发——两头都错。
   limitsFor(x) {
+    // 按需机：合同期内不会被收回，止损按 onDemand 配置（-10% / 60 分钟），别被日内密度抖动杀掉
+    if (x && x.spot === false && this.cfg.onDemand?.enabled !== false) {
+      const od = this.cfg.onDemand || {};
+      return {
+        targetProfitPct: Number(this.cfg.targetProfitPct),
+        stopLossPct: Number(od.stopLossPct ?? -10),
+        stopLossMinutes: Number(od.stopLossMinutes ?? 60),
+        hashLowPct: Number(this.cfg.hashLowPct),
+        pinned: !!x.pinned, fromOverride: false, skipRoi: false,
+      };
+    }
     const base = {
       targetProfitPct: Number(this.cfg.targetProfitPct),
       stopLossPct: Number(this.cfg.stopLossPct),
@@ -1137,6 +1148,18 @@ export class Engine {
       this.offerStats.error = null;
       this.evaluateOffers(raw);
       this.offerStats.mode = sq.mode === 'focused' ? `精准搜索 ${sq.models} 个型号` : '全量搜索';
+      // 按需腿：B 型窗口（算力回落）的正确工具是便宜的非 AI 卡，不是竞价。
+      // 匿名搜 on-demand、30 行，与竞价共用同一条估价管线（按需机 P=1，不打存活折扣）。
+      if (this.cfg.onDemand?.enabled !== false) {
+        try {
+          const odCfg = { ...scanCfg, useSpot: false, scanRows: Number(this.cfg.onDemand?.scanRows) || 30 };
+          const odRaw = await this.vast.searchOffers(odCfg, {}, null, { anon: true });
+          if (odRaw?.length) {
+            this.evaluateOffers(odRaw, { onDemand: true, append: true });
+            this.st.onDemandAt = Date.now();
+          }
+        } catch (e) { this.offerStats.onDemandError = String(e.message).slice(0, 80); }
+      }
       // 扫描完立刻租，不等下一个 20 秒 tick（廉价报价的寿命就是几分钟）。
       // 只在"由 scanTick 触发的扫描"里这么做：手动/测试调用 scan() 后再自己调 autoRent，
       // 否则会并发两条租用循环（2026-10-28 测试里就撞到过）。
@@ -1279,6 +1302,39 @@ export class Engine {
   }
 
   // 用最新行情重算每台机器的收益率（扫描结果可能是几分钟前的，币价/全网算力随时在变）
+  // 统一的门槛判定：房东黑名单/假释、期望 ROI。evaluateOffers 与 repriceOffers 都必须调用，
+  // 否则重算一次价格就把 spotSkip 清掉（2026-10-29 实测：两条 offer 因此被"复活"）。
+  applyGates(offer, now = Date.now()) {
+    // 按需机：合同期内不会被收回，P=1；房东黑名单对它无意义。
+    if ((offer.onDemand || offer.spot === false) && this.cfg.onDemand?.enabled !== false) {
+      const od = this.cfg.onDemand || {};
+      offer.pSurvive = 1; offer.pSrc = 'on-demand';
+      offer.hostBanned = null; offer.hostParole = false; offer.expRoiSkip = false;
+      const decay = Number(od.densityDecayPerDay ?? 3) / 100;
+      offer.expRoi = offer.roi == null ? null : +(offer.roi - decay * 100 / 2).toFixed(1);
+      const wl = od.models || [];
+      const wlOk = !wl.length || wl.some(m => String(offer.gpuName).toUpperCase().includes(String(m).toUpperCase().replace('RTX ', '')));
+      if (!wlOk) { offer.spotSkip = true; offer.whitelistSkip = true; }
+      else if (this.cfg.survivalGate !== false && offer.expRoi != null && offer.expRoi < this.cfg.targetProfitPct) { offer.spotSkip = true; offer.expRoiSkip = true; }
+      return offer;
+    }
+    const ban = this.hostBanned(offer.hostId, now);
+    offer.hostBanned = null; offer.hostParole = false; offer.expRoiSkip = false;
+    if (ban?.state === 'banned') { offer.spotSkip = true; offer.hostBanned = ban.why; return offer; }
+    if (ban?.state === 'parole') {
+      offer.hostParole = true;
+      if (this.paroleHostInUse(offer.hostId) >= 1) { offer.spotSkip = true; offer.hostBanned = '假释期内已有 1 台在跑'; return offer; }
+    }
+    const sv = this.pSurvive(offer.hostId, offer.gpuName);
+    offer.pSurvive = sv.p; offer.pSrc = sv.src;
+    const deployPct = (Number(this.cfg.deployCostMin) || 2) / 60 * 100;
+    offer.expRoi = offer.roi == null ? null : +(offer.roi * sv.p - deployPct).toFixed(1);
+    if (this.cfg.survivalGate !== false && offer.expRoi != null && offer.expRoi < this.cfg.targetProfitPct) {
+      offer.spotSkip = true; offer.expRoiSkip = true;
+    }
+    return offer;
+  }
+
   repriceOffers() {
     const usd = this.usdHsHr6h;   // 决策用 6h 均值，避免每次刷新都换一批"最划算的型号"
     const now = Date.now();
@@ -1287,12 +1343,14 @@ export class Engine {
       o.thPer01 = o.th / (o.dph / 0.1);
       const bl = this.st.blacklist[o.machineId];
       o.blacklisted = bl && bl.until > now ? bl.reason : null;
+      // 重算价格后必须重新过门槛，否则会清掉 spotSkip
+      this.applyGates(o, now);
     }
-    this.offers.sort((a, b) => (b.roi ?? -Infinity) - (a.roi ?? -Infinity));
+    this.offers.sort((a, b) => ((b.expRoi ?? -Infinity) - (a.expRoi ?? -Infinity)) || ((b.pSurvive ?? 0) - (a.pSurvive ?? 0)) || ((b.roi ?? -Infinity) - (a.roi ?? -Infinity)));
     this.offerStats.profitable = this.offers.filter(x => x.roi !== null && x.roi >= this.cfg.targetProfitPct).length;
   }
 
-  evaluateOffers(raw) {
+  evaluateOffers(raw, { onDemand = false, append = false } = {}) {
     const usd = this.usdHsHr6h;   // 同上：挂牌评估用均值
     const now = Date.now();
     const out = [];
@@ -1306,11 +1364,17 @@ export class Engine {
       const bl = this.st.blacklist[o.machine_id];
       // 参考算力来自矿工自报，必须乘实测 L1 才是能卖出去的算力（否则系统性高估 20~30%）
       // 房东优先的 L1：同一房东的型号可能被标错（"假 2080 Ti"），但份额口径不会骗人
-      const { l1, source: l1Src, hostId } = this.l1ForMachine(o.gpu_name, o.machine_id);
+      // L1 分层（用户 2026-10-29）：按需机用型号口径（封顶 1.0，合同稳定）；
+      // 竞价机才用「房东优先、陌生房东 0.8」的口径（房东会收回，样本不可比）。
+      const lm = this.l1ForMachine(o.gpu_name, o.machine_id);
+      const l1 = onDemand ? this.l1For(o.gpu_name) : lm.l1;
+      const l1Src = onDemand ? 'model' : lm.source;
+      const hostId = lm.hostId;
       const offer = this.priceOffer({
         id: o.id, machineId: o.machine_id, gpuName: o.gpu_name, numGpus: o.num_gpus || 1,
         th: ref.effective * (o.num_gpus || 1), l1, l1Src, hostId, dph: listDph, listDph, bid: null, spotSkip: false,
-        spot: this.cfg.useSpot, minBid: Number(o.min_bid ?? o.dph_total) || 0,
+        spot: onDemand ? false : this.cfg.useSpot, minBid: Number(o.min_bid ?? o.dph_total) || 0,
+        onDemand,
         reliability: o.reliability2 ?? o.reliability,
         geolocation: o.geolocation || '', inetDown: o.inet_down, cuda: o.cuda_max_good,
         source: ref.source, autoOk: ref.autoOk,
@@ -1326,24 +1390,8 @@ export class Engine {
       // 房东口径 L1 < 0.8 = 交不出份额，按 24GB 卡同样处理：回避
       if (l1Src === 'host' && l1 < 0.8) { offer.spotSkip = true; offer.avoidHost = true; }
       offer.thPer01 = offer.th / (offer.dph / 0.1);
-      // 存活概率与期望 ROI：名义 ROI 只对"会活的机器"有意义。
-      // 期望 ROI = 名义 ROI × P(存活≥30min) − 部署成本占一小时租金的比例。
-      {
-        const sv = this.pSurvive(hostId, o.gpu_name);
-        offer.pSurvive = sv.p;
-        offer.pSrc = sv.src;
-        const deployPct = (Number(this.cfg.deployCostMin) || 2) / 60 * 100;
-        offer.expRoi = offer.roi == null ? null : +(offer.roi * sv.p - deployPct).toFixed(1);
-        const ban = this.hostBanned(hostId, now);
-        if (ban?.state === 'banned') { offer.spotSkip = true; offer.hostBanned = ban.why; }
-        else if (ban?.state === 'parole') {
-          offer.hostParole = true;
-          if (this.paroleHostInUse(hostId) >= 1) { offer.spotSkip = true; offer.hostBanned = `假释期内已有 1 台在跑（${ban.why}）`; }
-        }
-        else if (this.cfg.survivalGate !== false && offer.expRoi != null && offer.expRoi < this.cfg.targetProfitPct && !offer.spotSkip) {
-          offer.spotSkip = true; offer.expRoiSkip = true;
-        }
-      }
+      // 存活概率与期望 ROI 统一走 applyGates（repriceOffers 调用同一个方法，不会互相打脸）
+      this.applyGates(offer, now);
       const line = this.minThPer01;
       offer.passLine = line == null ? null : offer.thPer01 >= line;
       out.push(offer);
@@ -1361,8 +1409,10 @@ export class Engine {
       }
     }
     // 排序：期望 ROI 优先（名义 ROI × 存活概率 − 部署成本），再按存活概率、名义 ROI
-    out.sort((a, b) => ((b.expRoi ?? -Infinity) - (a.expRoi ?? -Infinity)) || ((b.pSurvive ?? 0) - (a.pSurvive ?? 0)) || ((b.roi ?? -Infinity) - (a.roi ?? -Infinity)));
-    this.offers = out.slice(0, 150);
+    // 按需机与竞价机放在同一列表里，但各自独立配额（见 autoRent/budget）
+    const merged = append ? [...this.offers.filter(o => !o.onDemand), ...out] : out;
+    merged.sort((a, b) => ((b.expRoi ?? -Infinity) - (a.expRoi ?? -Infinity)) || ((b.pSurvive ?? 0) - (a.pSurvive ?? 0)) || ((b.roi ?? -Infinity) - (a.roi ?? -Infinity)));
+    this.offers = merged.slice(0, 200);
     if (!this._offersSavedAt || Date.now() - this._offersSavedAt > 2 * MIN) { this._offersSavedAt = Date.now(); this.saveOffers(); this.save(); }
     this.offerStats = {
       total: raw.length, known, profitable: out.filter(x => x.roi !== null && x.roi >= this.cfg.targetProfitPct).length,
@@ -1404,7 +1454,7 @@ export class Engine {
     this.refreshHostBans().length;   // 每轮按最新台账更新房东级黑名单
     if (this.cfg.autoDestroy) await this.autoDestroy(list);
     await this.pollStats(list);
-    if (this.cfg.autoRent) await this.autoRent(list);
+    if (this.cfg.autoRent) { await this.autoRent(list); await this.autoRentOnDemand(list); }
   }
 
   calibrate(list) {
@@ -1743,7 +1793,18 @@ export class Engine {
     } else if (d6 > 0 && Number(this.st.lastFloorPerTh) > 0) {
       ratio = +((d6 / 24) / Number(this.st.lastFloorPerTh)).toFixed(3);
     }
-    return { chg1h: chg(3600e3), chg6h: chg(6 * 3600e3), density6h: +d6.toFixed(5), densityRise24hPct: rise, ratio };
+    // 双口径：ratio 用"全市场最低地板"（好看但租不到），ratioPass 用"可出价集合的中位比值"（真实机会）
+    let ratioPass = null;
+    const passable = (this.offers || []).filter(o => !o.spotSkip && o.dph > 0);
+    if (passable.length && d6 > 0) {
+      const vals = passable.map(o => (o.revenueHr || 0) / o.dph).sort((a, b) => a - b);
+      ratioPass = +vals[Math.floor(vals.length / 2)].toFixed(3);
+    }
+    // 全网算力回落（72h 对比）：B 型窗口的过渡判据——7d 密度样本还没满时用它顶上
+    const netNow = Number(this.market.networkHs) / 1e18 || null;
+    const net72 = [...H].reverse().find(h => h.t <= now - 72 * 3600e3)?.netEh ?? null;
+    const netDrop72hPct = netNow > 0 && net72 > 0 ? +((netNow / net72 - 1) * 100).toFixed(1) : null;
+    return { chg1h: chg(3600e3), chg6h: chg(6 * 3600e3), density6h: +d6.toFixed(5), densityRise24hPct: rise, ratio, ratioPass, netDrop72hPct };
   }
 
   // 每轮扫描算一次；触发则进入窗口（最长 minutes 分钟），到点自动退出
@@ -1762,6 +1823,9 @@ export class Engine {
     let why = null;
     if (info.chg1h != null && info.chg1h >= Number(cfg.chg1hPct ?? 8)) why = `PRL 1h ${info.chg1h > 0 ? '+' : ''}${info.chg1h}% ≥ ${cfg.chg1hPct}%`;
     // 阶梯式上涨：6h 涨够、但 1h 已停滞（最常见的形态，只认 1h 会漏）
+    else if (info.netDrop72hPct != null && info.netDrop72hPct <= -Number(cfg.netDrop72hPct ?? 20)) {
+      why = `全网算力较 72h 前 ${info.netDrop72hPct}% ≤ -${cfg.netDrop72hPct ?? 20}%（算力回落型窗口，Kryptex 保守口径）`;
+    }
     else if (info.chg6h != null && info.chg6h >= Number(cfg.chg6hPct ?? 8) && info.ratio != null && info.ratio >= Number(cfg.stairRatio ?? 1.1)) {
       why = `PRL 6h +${info.chg6h}% ≥ ${cfg.chg6hPct ?? 8}% 且密度÷地板 ${info.ratio} ≥ ${cfg.stairRatio ?? 1.1}（阶梯窗口）`;
     }
@@ -1891,7 +1955,11 @@ export class Engine {
     if (this.rentTimes.length >= (this.cfg.maxRentsPerHour || 3)) return { ok: false, why: `本小时已租 ${this.rentTimes.length} 台（上限 ${this.cfg.maxRentsPerHour}）` };
     const last = this.rentTimes[this.rentTimes.length - 1] || 0;
     const gap = (this.cfg.rentMinIntervalMin || 10) * MIN;
-    if (last && now - last < gap) return { ok: false, why: `距上次租用不足 ${this.cfg.rentMinIntervalMin} 分钟` };
+    // 「过线即出一台」例外：没有任何机器在跑 + 手上确实有过线报价时，不该被"距上次租用不足 N 分钟"挡住。
+    // （2026-10-29：两条可出价 offer 卡在这道闸门上，等 10 分钟过去它们已被别人租走。）
+    const hot = (this.offers || []).some(o => !o.spotSkip && (o.expRoi ?? o.roi ?? -1) >= this.cfg.targetProfitPct);
+    const idle = this.instances().length === 0;
+    if (last && now - last < gap && !(hot && idle)) return { ok: false, why: `距上次租用不足 ${this.cfg.rentMinIntervalMin} 分钟${hot && !idle ? '（已有机器在跑，不抢）' : ''}` };
     return { ok: true };
   }
 
@@ -1919,6 +1987,37 @@ export class Engine {
     if (!ok) throw Object.assign(new Error(`估价不过线：ROI ${est.roi}%（目标 ${this.cfg.targetProfitPct}%）、thPer01 ${est.thPer01}（线 ${line == null ? '—' : Math.round(line)}）${offer.spotSkip ? '、出价无效' : ''}`), { est });
     const id = await this.rent(offer, 'manual');
     return { id, est };
+  }
+
+  // 按需腿租用：与竞价分开配额（onDemand.maxMachines），不算进 maxInstances。
+  // 理由（用户 2026-10-29）：两种工具两个池子，互不挤占；按需机不会被房东收回，是 B 型窗口的主力。
+  async autoRentOnDemand(list) {
+    const od = this.cfg.onDemand || {};
+    if (od.enabled === false) return;
+    const now = Date.now();
+    if (now < (this.rentCooldownUntil || 0)) return;
+    const why = this.preflight();
+    if (why.length) return;
+    const open = (list || []).filter(x => x.managed && !x.spot);
+    const maxOd = Number(od.maxMachines ?? 2);
+    if (open.length >= maxOd) return;
+    const cands = (this.offers || []).filter(o => o.onDemand && !o.spotSkip && o.roi != null && (o.expRoi ?? o.roi) >= this.cfg.targetProfitPct);
+    if (!cands.length) return;
+    const spend = (this.budget(list) || {}).spend || 0;
+    const cap = Number(this.cfg.maxHourlySpend ?? 0.3);
+    let used = 0;
+    for (const o of cands.sort((a, b) => (b.expRoi ?? 0) - (a.expRoi ?? 0))) {
+      if (open.length + used >= maxOd) break;
+      if (spend + o.dph > cap) continue;
+      if (used >= 2) break;
+      try {
+        const id = await this.rent(o, 'auto');
+        used++;
+        this.log('success', `按需机上车：${o.gpuName} $${o.dph.toFixed(4)}/h（名义 ROI ${o.roi.toFixed(1)}%，按需不打存活折扣）实例 ${id}`);
+      } catch (e) {
+        if (!/租走|gone/i.test(e.message)) this.log('warn', `按需机下单失败：${e.message.slice(0, 80)}`);
+      }
+    }
   }
 
   async autoRent(list) {
@@ -1960,7 +2059,13 @@ export class Engine {
     }
     // 节流闸门：放在"没钱/续航不够"这些真实原因之后，只拦"刚租过/刚被顶过"的频率问题
     const gate = this.rentAllowed();
-    if (!gate.ok) { this._warnOnce('rentgate', `暂停新租：${gate.why}`); return; }
+    if (!gate.ok) {
+      const top = this.offers.find(o => !o.spotSkip);
+      this._warnOnce('rentgate', `暂停新租：${gate.why}${top ? `（可出价：${top.gpuName} $${top.dph} expRoi ${top.expRoi}%）` : ''}`);
+      // 归因：把"可出价但被节流挡住"记下来，避免"有货没出手"变成沉默
+      if (top) this.st.rentBlocked = { at: Date.now(), why: gate.why, offerId: top.id, gpu: top.gpuName, expRoi: top.expRoi };
+      return;
+    }
     // 一轮把达标的都抢下来（最多 5 台），不再每分钟只租一台；被别人抢走就直接试下一台，每轮最多下 8 次单
     let rented = 0, tries = 0, spend = b.spend, roomSpend = b.roomSpend, roomCount = b.roomCount, used = 0;
     for (const pick of affordable) {
@@ -2040,6 +2145,8 @@ export class Engine {
     } catch (e) {
       // no_such_ask / not available = 这台机器在扫描后被别人抢先租走了，不是机器的问题，不拉黑
       if (/no_such_ask|not available|unavailable/i.test(e.message)) {
+        // 报价被抢走：记进寿命统计（gone = 消失时刻），而不是只从列表里删掉
+        if (this.st.offerLife?.[String(offer.id)]) { this.st.offerLife[String(offer.id)].gone = Date.now(); this.save(); }
         this.offers = this.offers.filter(o => o.id !== offer.id);
         this.lastRentAt = 0;
     this.rentTimes = [];              // 最近一小时的自动租用时间点
@@ -2507,7 +2614,10 @@ export class Engine {
     if (changes.some(c => c.includes('API Key'))) { this.refreshVast(); this.scan(true); }
     if (changes.some(c => c.includes('Kryptex 钱包'))) { this.kx.earnedAt = 0; this.refreshKryptex().catch(() => {}); }
     if (changes.some(c => c.includes('钱包'))) this.repriceOffers();
-    return { restartNeeded: proxyChanged };
+    // 回显生效后的完整配置（密钥脱敏），否则"改了但没生效"这类状态无法核对
+    const safe = { ...this.cfg };
+    for (const k of Object.keys(safe)) if (/apikey|secret|private|token/i.test(k)) safe[k] = safe[k] ? '***' : '';
+    return { restartNeeded: proxyChanged, cfg: safe };
   }
 
   // 钉住/取消钉住：pinned 的实例不会被 ROI 或算力规则退租
@@ -2619,6 +2729,7 @@ export class Engine {
       // 租约台账：按型号/按房东的每机时净收益（决策口径，不是 ROI 均值）
       leases: this.leaseReport(),
       window: { ...(this.st.windowState || { active: false }), limits: this.effectiveLimits(), info: this.windowInfo() },
+      rentBlocked: this.st.rentBlocked || null,
       l1: Object.fromEntries(Object.entries(this.st.l1ByModel || {}).map(([k, v]) => [k, { n: v.n, median: v.median }])),
       l1Host: Object.fromEntries(Object.entries(this.st.l1ByHost || {}).map(([k, v]) => [k, { n: v.n, median: v.median, machines: Object.entries(this.st.machineHost || {}).filter(([, h]) => String(h) === String(k)).map(([mid]) => mid) }])),
       venue: { health: this.st.venueHealth, guard: this.st.venueGuard, inventoryPrl: this.inventoryPrl(), capPrl: this.cfg.venueGuard?.inventoryCapPrl ?? 50 },

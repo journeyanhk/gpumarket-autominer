@@ -278,6 +278,78 @@ console.log('— 累计到账必须单调：矿池打款不能把同一笔记两
 }
 
 
+console.log('— 房东级存活率与黑名单（70 租 64 收不是运气，是房东）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  const now = Date.now();
+  e.leases = []; e.st.leases = []; e.st.hostBans = {}; e.st.blacklist = {};
+  const mk = (hostId, mins, reclaim, gpu = 'RTX 4090') => {
+    const l = newLease(String(Math.random()), { gpuName: gpu, spot: true, bid: 0.16, rentedAt: now - mins * MIN, hostId }, {}, now - mins * MIN);
+    l.hostId = hostId; l.endReason = reclaim ? 'host_reclaim' : 'our_stoploss';
+    l.tEnd = now; l.tFirstShare = now - mins * MIN + 60000;
+    e.leases.push(l); return l;
+  };
+  // 坏房东 166545：5 收 / 7 条，中位 10 分钟
+  mk(166545, 8, true); mk(166545, 9, true); mk(166545, 10, true); mk(166545, 11, true); mk(166545, 12, true);
+  mk(166545, 30, false); mk(166545, 60, false);
+  // 好房东 482330：0 收，764 分钟
+  mk(482330, 764, false, 'RTX 3080');
+  // 单样本短命房东 55313：1 条、8 分钟、收回
+  mk(55313, 8, true);
+
+  const led = e.hostLedger();
+  ok(led['166545'].n === 7 && led['166545'].reclaims === 5 && led['166545'].medianLife <= 12,
+     `台账聚合：166545 租 ${led['166545'].n} 收 ${led['166545'].reclaims} 中位 ${led['166545'].medianLife} 分钟`);
+  ok(led['482330'].reclaims === 0 && led['482330'].medianLife > 700, '好房东 482330：0 收回、764 分钟');
+
+  const p1 = e.pSurvive(482330, 'RTX 3080');
+  const p2 = e.pSurvive(166545, 'RTX 4090');
+  ok(Math.abs(p1.p - 0.75) < 1e-9 && p1.src === 'host', `482330 存活率 ${p1.p}（1 次样本 + 拉普拉斯平滑 → 0.75）`);
+  ok(p2.p <= 0.4 && p2.src === 'host', `166545 存活率 ${p2.p}（host 口径）`);
+  ok(e.pSurvive(null, 'RTX 9999').src === 'default', '没样本时用保守默认值');
+
+  const applied = e.refreshHostBans(now);
+  const b166545 = e.hostBanned(166545, now), b55313 = e.hostBanned(55313, now), b482330 = e.hostBanned(482330, now);
+  ok(!!b166545 && b166545.until - now > 6 * 24 * 60 * MIN, `166545 → 7 天黑名单（${b166545?.why}）`);
+  ok(!!b55313 && b55313.until - now <= 2 * 24 * 60 * MIN, `单样本短命 → 24 小时观察（${b55313?.why}）`);
+  ok(!b482330, '好房东不拉黑');
+  ok(applied.length === 2, `本轮应用 ${applied.length} 个房东黑名单`);
+
+  // 期望 ROI：名义 × 存活概率 − 部署成本
+  e.cfg.targetProfitPct = 20; e.cfg.deployCostMin = 2;
+  const sv = e.pSurvive(166545, 'RTX 4090');
+  const nominal = 53.7;
+  const expRoi = nominal * sv.p - (2 / 60 * 100);
+  ok(expRoi < 20, `166545 上 4090 名义 +${nominal}% × P${sv.p} − 部署 ≈ ${expRoi.toFixed(1)}% → 期望不过 20%，不租`);
+  const svGood = e.pSurvive(482330, 'RTX 3080');
+  ok(nominal * svGood.p - (2 / 60 * 100) > 20, '同一名义 ROI 放到好房东上就过线（这才是该租的）');
+}
+
+console.log('— 失败成本：短命机器按净亏计入');
+{
+  const e = new Engine();
+  e.log = () => {};
+  const now = Date.now();
+  e.leases = []; e.st.leases = []; e.st.failSpend = { day: '', usd: 0 };
+  e.cfg.survivalMinLifeMin = 30; e.market.price = 1.8;
+  const mkLease = (mins, credited, dph = 0.16) => {
+    const l = newLease(String(Math.random()), { gpuName: 'RTX 4090', spot: true, bid: dph, rentedAt: now - mins * MIN }, {}, now - mins * MIN);
+    l.pool = 'kryptex'; l.dphTotalActual = dph; l.creditedPrl = credited;
+    l.tFirstShare = now - mins * MIN + 30000;   // 保持 tEnd 为空，由 closeLeaseFor 收尾
+    e.leases.push(l); return l;
+  };
+  mkLease(8, 0.006);       // 8 分钟：付 0.0213，到账 0.0108 → 净亏 0.0105
+  e.closeLeaseFor(e.leases[0].id, { reason: '竞价被抢占（stopped，磁盘仍在计费）' });
+  const f1 = e.failSpendToday(now).usd;
+  ok(f1 > 0.008 && f1 < 0.013, `8 分钟短命机按净亏计入（$${f1.toFixed(4)}）`);
+
+  e.st.failSpend = { day: '', usd: 0 };
+  mkLease(90, 0.30);       // 90 分钟、赚了钱 → 不计失败
+  e.closeLeaseFor(e.leases[1].id, { reason: '手动退租' });
+  ok(e.failSpendToday(now).usd === 0, '活得久的机器即使被退租也不计失败成本');
+}
+
 console.log('— L1 按房东维护（型号可能被标错，份额不会）');
 {
   const e = new Engine();

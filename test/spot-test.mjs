@@ -28,6 +28,10 @@ const e = new Engine();
 // L1 折算（份额反推算力 ÷ 矿工自报）会整体压低报价；这些用例测的是别的逻辑，
 // 所以这里把它设成 1，L1 本身由 lease-test 的「L1 按型号维护」一节覆盖。
 e.cfg.l1Default = 1;
+// 存活率/部署成本的折算由 lease-test 专门覆盖；这些用例测别的逻辑，先中性化
+e.cfg.pSurviveDefault = 1; e.cfg.deployCostMin = 0;
+if (e.cfg.hostBan) e.cfg.hostBan.enabled = false;   // 房东黑名单/存活率门槛由 lease-test 覆盖
+e.cfg.survivalGate = false;
 const logs = [];
 e.log = (lvl, msg) => logs.push(`${lvl} ${msg}`);
 await e.refreshMarket(); await e.refreshVast(); await e.scan(true);
@@ -40,7 +44,8 @@ ok(priced.length > 0 && priced.every(o => o.spot && o.bid > 0), `扫到 ${e.offe
 ok(priced.every(o => Math.abs(o.dph - o.bid) < 1e-9), 'ROI 用的是「出价」，不是挂牌价');
 ok(priced.every(o => o.bid <= o.revenueHr / 1.3 + 1e-6), '出价不超过「目标收益率 30%」允许的上限（rev/1.3）');
 ok(priced.every(o => o.listDph >= o.bid), '挂牌价 ≥ 出价（挂牌价只是展示）');
-ok(e.offers.filter(o => o.spotSkip).every(o => o.bid === null && o.roi === null), '入场价高于上限的机器保留但不参与出价（不再从列表里消失）');
+// 现在 spotSkip 有三种原因：出价无效（bid=null）、期望 ROI 不达标、房东被拉黑
+ok(e.offers.filter(o => o.spotSkip).every(o => o.bid === null || o.expRoiSkip || o.hostBanned), '不可出价的机器：要么出价无效，要么期望 ROI/房东不允许（机器仍保留在列表里）');
 
 console.log('— 出价算法边界（利润带公式）');
 // 目标 20% → 上限 = 收入/1.2；下限 = 收入×0.7；目标出价 = 入场价×1.25

@@ -740,10 +740,19 @@ export class Engine {
       preemptKind: l.preemptKind || preemptKind,
       opponentRatio: l.opponentRatio ?? opponentRatio,
     });
-    // 从来没出过份额 → 这笔租金算"失败成本"（每日封顶的对象）
-    if (!l.tFirstShare) {
+    // 失败成本 = "没换成钱的那部分"：
+    //   ① 从来没出过份额 → 全部租金；② 出过份额但活得短（< survivalMinLifeMin）→ 净亏（实付 − 到账）。
+    // 旧口径只算 ①，于是"8 分钟挖到一美分、付了两美分"的机器被当成成功，$0.0385 严重低估真实成本。
+    {
       const h = Math.max(0, (l.tEnd - l.tRent) / 3_600_000);
-      this.addFailSpend((Number(l.dphTotalActual ?? l.bidFinal ?? 0) || 0) * h);
+      const paid = (Number(l.dphTotalActual ?? l.bidFinal ?? 0) || 0) * h;
+      const lifeMin = h * 60;
+      const shortLife = lifeMin < Number(this.cfg.survivalMinLifeMin ?? 30);
+      if (!l.tFirstShare) this.addFailSpend(paid);
+      else if (shortLife) {
+        const earned = (Number(l.creditedPrl) || 0) * (this.market.price || 0);
+        this.addFailSpend(Math.max(0, paid - earned));
+      }
     }
     this.save();
     return l;
@@ -1306,6 +1315,20 @@ export class Engine {
       // 房东口径 L1 < 0.8 = 交不出份额，按 24GB 卡同样处理：回避
       if (l1Src === 'host' && l1 < 0.8) { offer.spotSkip = true; offer.avoidHost = true; }
       offer.thPer01 = offer.th / (offer.dph / 0.1);
+      // 存活概率与期望 ROI：名义 ROI 只对"会活的机器"有意义。
+      // 期望 ROI = 名义 ROI × P(存活≥30min) − 部署成本占一小时租金的比例。
+      {
+        const sv = this.pSurvive(hostId, o.gpu_name);
+        offer.pSurvive = sv.p;
+        offer.pSrc = sv.src;
+        const deployPct = (Number(this.cfg.deployCostMin) || 2) / 60 * 100;
+        offer.expRoi = offer.roi == null ? null : +(offer.roi * sv.p - deployPct).toFixed(1);
+        const ban = this.hostBanned(hostId, now);
+        if (ban) { offer.spotSkip = true; offer.hostBanned = ban.why; }
+        else if (this.cfg.survivalGate !== false && offer.expRoi != null && offer.expRoi < this.cfg.targetProfitPct && !offer.spotSkip) {
+          offer.spotSkip = true; offer.expRoiSkip = true;
+        }
+      }
       const line = this.minThPer01;
       offer.passLine = line == null ? null : offer.thPer01 >= line;
       out.push(offer);
@@ -1322,7 +1345,8 @@ export class Engine {
         for (const [k] of drop) delete life[k];
       }
     }
-    out.sort((a, b) => (b.roi ?? -Infinity) - (a.roi ?? -Infinity));
+    // 排序：期望 ROI 优先（名义 ROI × 存活概率 − 部署成本），再按存活概率、名义 ROI
+    out.sort((a, b) => ((b.expRoi ?? -Infinity) - (a.expRoi ?? -Infinity)) || ((b.pSurvive ?? 0) - (a.pSurvive ?? 0)) || ((b.roi ?? -Infinity) - (a.roi ?? -Infinity)));
     this.offers = out.slice(0, 150);
     if (!this._offersSavedAt || Date.now() - this._offersSavedAt > 2 * MIN) { this._offersSavedAt = Date.now(); this.saveOffers(); this.save(); }
     this.offerStats = {
@@ -1362,6 +1386,7 @@ export class Engine {
     // 窗口判定必须每轮都跑：它依赖的是行情(1h 涨幅)与密度，跟"扫描有没有成功"无关。
     // 之前放在 scan() 里，一旦 429/额度耗尽就永远不触发（2026-10-28 18:08 的窗口就是这么漏掉的）。
     this.updateWindowMode();
+    this.refreshHostBans().length;   // 每轮按最新台账更新房东级黑名单
     if (this.cfg.autoDestroy) await this.autoDestroy(list);
     await this.pollStats(list);
     if (this.cfg.autoRent) await this.autoRent(list);
@@ -1526,6 +1551,82 @@ export class Engine {
     const f = this.failSpendToday(now);
     f.usd = +(f.usd + usd).toFixed(4);
     this.save();
+  }
+
+  // ---------- 房东级存活率 ----------
+  // 70 次租用 64 次 host_reclaim，不是运气：低价挂牌是房东填充空闲期的方式，正价需求一到就收回。
+  // 关键事实（2026-10-29 台账）：收回集中在 7 个房东，482330 却 764 分钟 0 收回 ——
+  // 所以该按房东筛，不该按型号屏蔽，也不该加大并行度（只会把部署费乘以 N）。
+  hostLedger() {
+    const out = {};
+    for (const l of this.leases) {
+      const h = l.hostId;
+      if (h == null) continue;
+      const b = out[String(h)] ||= { n: 0, reclaims: 0, lives: [], lastReclaimAt: 0, gpus: new Set() };
+      b.n++;
+      if (l.endReason === 'host_reclaim') { b.reclaims++; b.lastReclaimAt = Math.max(b.lastReclaimAt, l.tEnd || 0); }
+      if (l.tEnd) b.lives.push((l.tEnd - l.tRent) / 60000);
+      if (l.gpu) b.gpus.add(l.gpu);
+    }
+    for (const b of Object.values(out)) {
+      b.medianLife = b.lives.length ? b.lives.slice().sort((x, y) => x - y)[Math.floor(b.lives.length / 2)] : null;
+      b.rate = b.n ? b.reclaims / b.n * 100 : 0;
+      b.gpus = [...b.gpus];
+    }
+    return out;
+  }
+
+  // 存活概率：优先房东口径，其次型号口径，样本不足用保守默认值
+  pSurvive(hostId, gpuName) {
+    const minLife = Number(this.cfg.survivalMinLifeMin ?? 30);
+    // 拉普拉斯平滑：样本少时不走极端（1 次活下来 = 0.75，1 次死掉 = 0.25），
+    // 避免"好房东只租过一次"就被判成 1.0 或 0.0。
+    const calc = (ls) => {
+      const done = (ls || []).filter(l => l.tEnd);
+      if (!done.length) return null;
+      const ok = done.filter(l => (l.tEnd - l.tRent) / 60000 >= minLife).length;
+      return +((ok + 0.5) / (done.length + 1)).toFixed(2);
+    };
+    if (hostId != null) {
+      const byHost = calc(this.leases.filter(l => String(l.hostId) === String(hostId)));
+      if (byHost != null) return { p: byHost, src: 'host' };
+    }
+    const byModel = calc(this.leases.filter(l => l.gpu === gpuName));
+    if (byModel != null) return { p: byModel, src: 'model' };
+    return { p: Number(this.cfg.pSurviveDefault ?? 0.5), src: 'default' };
+  }
+
+  // 房东级黑名单：按存活率与收回次数判定，命中就拉黑（并同步机器级，兼容旧过滤）
+  refreshHostBans(now = Date.now()) {
+    const cfg = this.cfg.hostBan || {};
+    if (cfg.enabled === false) return [];
+    const keepDays = Number(cfg.days ?? 7) * 24 * 60 * MIN;
+    const probation = Number(cfg.probationHours ?? 24) * 60 * MIN;
+    const minSamples = Number(cfg.minSamplesForLong ?? 2);
+    this.st.hostBans ||= {};
+    const ledger = this.hostLedger();
+    const applied = [];
+    for (const [h, b] of Object.entries(ledger)) {
+      const cur = this.st.hostBans[h];
+      if (cur && cur.until > now) continue;
+      let banMs = 0, why = null;
+      const shortAndDead = b.rate > Number(cfg.ratePct ?? 60) && b.medianLife != null && b.medianLife < Number(cfg.medianMin ?? 20);
+      if (shortAndDead && b.n >= minSamples) { banMs = keepDays; why = `收回率 ${b.rate.toFixed(0)}% 且中位存活 ${b.medianLife.toFixed(0)} 分钟（${b.n} 条样本）→ 7 天`; }
+      else if (b.reclaims >= 2) { banMs = probation; why = `累计收回 ${b.reclaims} 次 → 24 小时`; }
+      else if (b.reclaims >= 1 && b.medianLife != null && b.medianLife < Number(cfg.medianMin ?? 20)) { banMs = probation; why = `单次收回且只活了 ${b.medianLife.toFixed(0)} 分钟（样本不足）→ 24 小时观察`; }
+      if (!banMs) continue;
+      this.st.hostBans[h] = { until: now + banMs, why, at: now, n: b.n, rate: +b.rate.toFixed(0), medianLife: b.medianLife == null ? null : +b.medianLife.toFixed(0) };
+      for (const l of this.leases) if (String(l.hostId) === h && l.machineId != null) this.st.blacklist[l.machineId] = { until: now + banMs, reason: `房东 ${h}：${why}` };
+      applied.push(`${h}（${why}）`);
+    }
+    if (applied.length) { this.save(); this.log('warn', `房东黑名单更新 ${applied.length} 个：${applied.slice(0, 3).join('；')}${applied.length > 3 ? ' …' : ''}`); }
+    return applied;
+  }
+
+  hostBanned(hostId, now = Date.now()) {
+    if (hostId == null) return null;
+    const b = (this.st.hostBans || {})[String(hostId)];
+    return b && b.until > now ? b : null;
   }
 
   // ---------- 场所单点降级（Gate 现货 / Lighter 永续） ----------

@@ -72,6 +72,12 @@ export const DEFAULT_CONFIG = {
   l1ModelCap: 1.0,          // 型号口径封顶：>1.0 的增益只允许通过房东口径使用（防跨房东虚高）
   // 场所单点降级：Gate 现货（唯一变现出口）或 Lighter 永续（唯一对冲腿）任一不可用 → 保护态
   venueGuard: { enabled: true, inventoryCapPrl: 50 },
+  // 房东存活率（用户 2026-10-29 定）：收回率 >60% 且中位存活 <20 分钟 → 7 天不租；
+  // 收回 ≥2 次 → 24 小时；样本=1 且短命 → 24 小时观察期。
+  hostBan: { ratePct: 60, medianMin: 20, days: 7, probationHours: 24, minSamplesForLong: 2 },
+  survivalMinLifeMin: 30,   // 「活下来」的门槛：存活 ≥ 30 分钟才算成功样本
+  deployCostMin: 2,         // 部署成本（分钟），计入期望 ROI
+  unknownHostMaxConcurrent: 1, // 没有历史的房东，同时最多试 1 台
   // 额度分桶：巡航只花 40%，60% 锁给窗口（窗口通常出现在亚洲/美国盘交叠的几小时）
   cruiseScanRows: 20,     // 巡航每次取多少行（vast 按"返回行数"计费，越小能扫越多次）
   windowScanRows: 40,     // 窗口期每次取多少行（要覆盖面，但每次仍按行数扣）
@@ -149,6 +155,7 @@ export function loadState() {
     hostStats: {},   // 房东维度：1 小时内收回 ≥2 台 → 该房东已知机器拉黑 24h
     l1ByModel: {},   // gpuKey -> { samples: [], median, n }：实测「份额反推算力 ÷ 矿工自报」
     l1ByHost: {},    // hostId -> { samples: [], median, n }：同一房东的机器口径更稳（型号可能被标错）
+    hostBans: {},    // hostId -> { until, why, at }：房东级黑名单（机器级黑名单挡不住换机器挂牌）
     machineHost: {}, // machineId -> hostId：搜索接口不返回 host_id，租过一次就记住
     venueHealth: null, // { at, gate:{ok,why}, lighter:{ok,why} } 场所可用性
     venueGuard: { down: false, why: null, since: 0 }, // 单点降级总开关

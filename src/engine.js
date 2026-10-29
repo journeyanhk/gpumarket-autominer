@@ -986,7 +986,7 @@ export class Engine {
     if (!u || u.day !== day) u = this.st.searchUsage = { day, requests: 0, rows: 0, exhaustedAt: null };
     // 分桶上线前的历史用量全部算进巡航桶（保守：不虚报窗口余量）
     if (u.cruiseRows == null && u.windowRows == null) { u.cruiseRows = u.rows || 0; u.windowRows = 0; }
-    u.cruiseRows ||= 0; u.windowRows ||= 0; u.keyCruiseRows ||= 0;
+    u.cruiseRows ||= 0; u.windowRows ||= 0; u.keyCruiseRows ||= 0; u.anonRows ||= 0;
     return u;
   }
 
@@ -1153,10 +1153,13 @@ export class Engine {
       const u = this.usageToday();
       u.requests++; u.rows += raw.length;
       if (this._scanBucket === 'window') u.windowRows = (u.windowRows || 0) + raw.length;
-      else {
-        u.cruiseRows = (u.cruiseRows || 0) + raw.length;   // cruise 与 cruise-borrow 都记巡航桶
-        // 巡航里"用 key 烧掉的行数"单列，目标是 0（巡检会盯这个数）
-        if (!this._lastSearchAnon) u.keyCruiseRows = (u.keyCruiseRows || 0) + raw.length;
+      else if (this._lastSearchAnon) {
+        // 匿名搜索**不消耗账号额度**，绝不能记进巡航桶——否则巡航桶会被假账刷爆
+        // （2026-10-29 实测：cruiseRows 8560 > 预算 7944，而 keyCruiseRows 是 0）。
+        u.anonRows = (u.anonRows || 0) + raw.length;
+      } else {
+        u.cruiseRows = (u.cruiseRows || 0) + raw.length;   // 只有真的用 key 才扣
+        u.keyCruiseRows = (u.keyCruiseRows || 0) + raw.length;
       }
       this.readQuotaHeaders(meta.headers);
       this.save();

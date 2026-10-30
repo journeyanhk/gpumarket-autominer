@@ -71,6 +71,7 @@ export const DEFAULT_CONFIG = {
   l1Default: 0.8,           // 没有样本的型号，按"份额反推算力 ÷ 矿工自报"= 0.8 保守折算
   l1ModelCap: 1.0,          // 型号口径封顶：>1.0 的增益只允许通过房东口径使用（防跨房东虚高）
   maxSaneRoiPct: 500,       // 名义 ROI 超过它的报价视为错标（正常 0~200%）
+  minBidFloorDefault: 0.02, // 型号没有历史时（<10 样本）的 min_bid 地板，低于它 ×0.5 视为钓鱼
   // 场所单点降级：Gate 现货（唯一变现出口）或 Lighter 永续（唯一对冲腿）任一不可用 → 保护态
   venueGuard: { enabled: true, inventoryCapPrl: 50 },
   // 房东存活率（用户 2026-10-29 定）：收回率 >60% 且中位存活 <20 分钟 → 7 天不租；
@@ -168,6 +169,7 @@ export function loadState() {
     l1ByModel: {},   // gpuKey -> { samples: [], median, n }：实测「份额反推算力 ÷ 矿工自报」
     l1ByHost: {},    // hostId -> { samples: [], median, n }：同一房东的机器口径更稳（型号可能被标错）
     hostBans: {},    // hostId -> { until, why, at }：房东级黑名单（机器级黑名单挡不住换机器挂牌）
+    modelMinBid: {}, // gpuKey -> [{t,v}]：近 7 天 min_bid 样本，用于按型号算地板（P10）
     machineHost: {}, // machineId -> hostId：搜索接口不返回 host_id，租过一次就记住
     venueHealth: null, // { at, gate:{ok,why}, lighter:{ok,why} } 场所可用性
     venueGuard: { down: false, why: null, since: 0 }, // 单点降级总开关

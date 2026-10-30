@@ -1321,6 +1321,29 @@ export class Engine {
   }
 
   // 用最新行情重算每台机器的收益率（扫描结果可能是几分钟前的，币价/全网算力随时在变）
+  // 按型号的动态地板：$0.04 一刀切会误伤 2080 Ti($0.0427~)、3060 Ti、4060 Ti($0.04) 这些正常便宜卡。
+  // 规则（用户 2026-10-30）：地板 = 该型号近 7 天 min_bid 的 P10（样本 ≥10）；无样本用 $0.02。
+  // 判定：min_bid < 地板 × 0.5 → 视为钓鱼/错标挂牌。
+  recordModelMinBid(gpuName, minBid, now = Date.now()) {
+    if (!gpuName || !(Number(minBid) > 0)) return;
+    const k = gpuKey(gpuName);
+    const st = this.st.modelMinBid ||= {};
+    const arr = st[k] ||= [];
+    arr.push({ t: now, v: +Number(minBid).toFixed(4) });
+    const cut = now - 7 * 24 * 3600e3;
+    while (arr.length && arr[0].t < cut) arr.shift();
+    if (arr.length > 300) arr.splice(0, arr.length - 300);
+  }
+
+  floorFor(gpuName) {
+    const k = gpuKey(gpuName);
+    const arr = ((this.st.modelMinBid || {})[k] || []).map(x => x.v).filter(v => v > 0);
+    if (arr.length < 10) return { floor: Number(this.cfg.minBidFloorDefault ?? 0.02), src: 'default', n: arr.length };
+    const sorted = [...arr].sort((a, b) => a - b);
+    const p10 = sorted[Math.max(0, Math.floor(sorted.length * 0.1))];
+    return { floor: +p10.toFixed(4), src: 'p10', n: arr.length };
+  }
+
   // 统一的门槛判定：房东黑名单/假释、期望 ROI。evaluateOffers 与 repriceOffers 都必须调用，
   // 否则重算一次价格就把 spotSkip 清掉（2026-10-29 实测：两条 offer 因此被"复活"）。
   applyGates(offer, now = Date.now()) {
@@ -1409,9 +1432,17 @@ export class Engine {
       // 房东口径 L1 < 0.8 = 交不出份额，按 24GB 卡同样处理：回避
       if (l1Src === 'host' && l1 < 0.8) { offer.spotSkip = true; offer.avoidHost = true; }
       offer.thPer01 = offer.th / (offer.dph / 0.1);
-      // 硬底线：vast 单卡时租不会低于 MIN_GPU_PRICE，低于它基本是虚假/错标挂牌
-      // （2026-10-30 实测：一台"4090"挂 $0.0119/h，我们按 1515% ROI 租了两次，两次都被收回）
-      if (listDph < MIN_GPU_PRICE) { offer.spotSkip = true; offer.floorSkip = true; offer.skipWhy = `挂牌 $${listDph.toFixed(4)}/h 低于单卡底价 $${MIN_GPU_PRICE}`; }
+      // 按型号的动态地板（替代原来 $0.04 的一刀切）：
+      // 2026-10-30 实测一台"4090"挂 $0.0119/h 被租了两次；但 $0.04 硬下限又会误伤
+      // 2080 Ti($0.0427~)/3060 Ti/4060 Ti($0.04) 这些正常便宜卡。
+      const mb = Number(o.min_bid ?? o.dph_total) || 0;
+      this.recordModelMinBid(o.gpu_name, mb, now);
+      const fl = this.floorFor(o.gpu_name);
+      offer.floor = fl.floor; offer.floorSrc = fl.src; offer.floorN = fl.n;
+      if (mb > 0 && mb < fl.floor * 0.5) {
+        offer.spotSkip = true; offer.floorSkip = true;
+        offer.skipWhy = `min_bid $${mb.toFixed(4)} < 型号地板 $${fl.floor}（${fl.src}，${fl.n} 样本）× 0.5`;
+      }
       // 荒谬 ROI 同样是错标的信号（正常 0~200%，>500% 基本不可能长期存在）
       if (offer.roi != null && offer.roi > Number(this.cfg.maxSaneRoiPct ?? 500)) {
         offer.spotSkip = true; offer.insaneSkip = true; offer.skipWhy = `ROI ${offer.roi.toFixed(0)}% 超过合理上限 ${this.cfg.maxSaneRoiPct ?? 500}%`;

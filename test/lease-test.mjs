@@ -278,6 +278,28 @@ console.log('— 累计到账必须单调：矿池打款不能把同一笔记两
 }
 
 
+console.log('— 按型号的动态价格地板（替代 $0.04 一刀切）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  const now = Date.now();
+  e.st.modelMinBid = {}; e.cfg.minBidFloorDefault = 0.02;
+  // 2080 Ti 正常地板 ~0.045：喂 12 个 0.042~0.06 的样本
+  for (const v of [0.042, 0.043, 0.044, 0.045, 0.046, 0.048, 0.050, 0.052, 0.055, 0.058, 0.060, 0.062]) e.recordModelMinBid('RTX 2080 Ti', v, now);
+  const f1 = e.floorFor('RTX 2080 Ti');
+  ok(f1.src === 'p10' && f1.floor >= 0.042 && f1.floor <= 0.048, `2080 Ti 地板 = P10 $${f1.floor}（${f1.n} 样本）`);
+  // 正常的 $0.0427 不应被误杀（旧 $0.04 硬下限也不会，但 $0.045 的会被旧逻辑按"低于 0.04×?"...这里验证新逻辑）
+  ok(0.0427 >= f1.floor * 0.5, '正常价 $0.0427 不会被当成钓鱼（阈值是地板×0.5）');
+  // 假 4090 的 $0.0119 应该被杀
+  const e2 = new Engine(); e2.log = () => {};
+  e2.st.modelMinBid = {};
+  for (let i = 0; i < 12; i++) e2.recordModelMinBid('RTX 4090', 0.13 + i * 0.005, now);
+  const f2 = e2.floorFor('RTX 4090');
+  ok(0.0119 < f2.floor * 0.5, `假 4090 的 $0.0119 会被杀（地板 $${f2.floor} × 0.5 = $${(f2.floor * 0.5).toFixed(4)}）`);
+  // 没有历史的型号用全局 $0.02
+  ok(e.floorFor('RTX 9999').src === 'default' && e.floorFor('RTX 9999').floor === 0.02, '无历史型号用全局 $0.02');
+}
+
 console.log('— 房东级存活率与黑名单（70 租 64 收不是运气，是房东）');
 {
   const e = new Engine();

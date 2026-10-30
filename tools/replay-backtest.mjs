@@ -61,15 +61,63 @@ const rows = sets.map(s => {
   };
 });
 
-const out = { at: new Date().toISOString(), price, leases: leases.length, hardBans: hardBans.size, softBans: softBans.size, caveat: '用事后 realized ROI 筛选，仅用于参数间相对比较，不能预测绝对收益', rows };
+// 房东三层制：用同一批租约的已实现结果推导档位（与引擎同规则）。
+// 注意：白名单本身也是这样推出来的，所以"白名单房东很赚"同样是事后信息，不能当预测。
+const tierLedger = {};
+for (const l of leases) {
+  const h = String(l.hostId ?? '—');
+  const b = tierLedger[h] ||= { n: 0, reclaims: 0, lives: [], hours: 0, paid: 0, prl: 0 };
+  const hrs = hoursOf(l);
+  b.n++; b.lives.push(hrs * 60); b.hours += hrs;
+  b.paid += (Number(l.dphTotalActual ?? l.bidFinal ?? 0) || 0) * hrs;
+  b.prl += Number(l.creditedPrl) || 0;
+  if (l.endReason === 'host_reclaim') b.reclaims++;
+}
+const tiers = Object.entries(tierLedger).map(([hostId, b]) => {
+  const med = median(b.lives);
+  const netPerHr = b.hours > 0.01 ? +((b.prl * price - b.paid) / b.hours).toFixed(4) : null;
+  const rate = b.n ? b.reclaims / b.n * 100 : 0;
+  let tier = '中性';
+  if (rate > 60 && med != null && med < 20 && b.n >= 2) tier = '硬封 7 天';
+  else if (b.reclaims >= 2) tier = '观察 24h';
+  else if (b.reclaims >= 1 && med != null && med < 20) tier = '观察 24h';
+  if (b.n >= 3 && med != null && med > 60 && netPerHr != null && netPerHr > 0 && tier !== '硬封 7 天') tier = '白名单';
+  return { hostId, n: b.n, reclaims: b.reclaims, rate: +rate.toFixed(0), medianLifeMin: med == null ? null : +med.toFixed(0), netPerMachineHour: netPerHr, tier };
+}).sort((a, b) => (b.netPerMachineHour ?? -1e9) - (a.netPerMachineHour ?? -1e9));
+
+const r20 = rows.find(r => r.target === 20 && r.hostBan && r.floor);
+const caveat = '用事后 realized ROI 筛选：只能证明「筛选能剔掉亏的」，不能证明「筛选后的期望收益」';
+const survivorship = {
+  kept: rows.find(r => r.target === 20 && r.hostBan && r.floor)?.taken ?? null,
+  why: [
+    `回放用的 ${leases.length} 条租约都是「旧参数下已经租到」的机器，只回答"当时按这个门槛，哪些会被剔掉"。`,
+    '它看不到两件事：① 被筛掉的 offer 后来活了多久；② 20% 门槛下本来会租到的其它机器（那些时点根本没下单）。',
+    `所以"留下 ${r20?.taken ?? '—'} 条、每机时 ${r20?.netPerMachineHour ?? '—'}"证明的是筛选有效，不是这就是期望收益。`,
+    '期望 = 每机时净收益 × P(过线 offer 能租到) × P(租到后活下来)，后两项在回放里恒等于 1（偏差就来自这里）。',
+    '真正的正面检验是窗口回放：node tools/window-report.mjs --backfill（窗口期能不能租到、租到后活多久）。',
+  ],
+};
+
+const out = { at: new Date().toISOString(), price, leases: leases.length, hardBans: hardBans.size, softBans: softBans.size, caveat, survivorship, rows, tiers };
 
 if (process.argv.includes('--json')) { console.log(JSON.stringify(out, null, 2)); process.exit(0); }
 
 console.log(`参数回放 ${out.at}｜币价 $${price}｜已结束租约 ${leases.length} 条｜7天硬封 ${hardBans.size} 个 / 24h观察 ${softBans.size} 个`);
-console.log(`⚠ ${out.caveat}\n`);
+console.log(`\n⚠ 幸存者偏差（必读）`);
+for (const line of survivorship.why) console.log(`  · ${line}`);
+console.log('');
 console.log('门槛  硬封房东  价格地板   留下  跳过   净额      每机时净收益  出算力率  中位存活');
 for (const r of rows) {
   console.log(`${String(r.target + '%').padEnd(5)} ${(r.hostBan ? '是' : '否').padEnd(10)} ${(r.floor ? '是' : '否').padEnd(9)} ${String(r.taken).padStart(5)} ${String(r.skipped).padStart(5)}  ${String(r.netUsd).padStart(8)}  ${String(r.netPerMachineHour ?? '—').padStart(12)}  ${String(r.hashedRate ?? '—').padStart(7)}  ${String(r.medianLifeMin ?? '—').padStart(7)}`);
 }
 const best = [...rows].filter(r => r.taken >= 5).sort((a, b) => (b.netPerMachineHour ?? -1e9) - (a.netPerMachineHour ?? -1e9))[0];
 if (best) console.log(`\n样本 ≥5 的最优参数：门槛 ${best.target}% / 房东黑名单 ${best.hostBan ? '开' : '关'} / 价格地板 ${best.floor ? '开' : '关'} → 每机时 ${best.netPerMachineHour}、留下 ${best.taken} 条`);
+
+console.log('\n房东三层制（同一批租约的已实现结果；白名单也是事后推出来的，不是预测）');
+console.log('房东       样本 收回 收回率 中位存活  每机时净收益  档位');
+for (const t of tiers) {
+  console.log(`${t.hostId.padEnd(10)} ${String(t.n).padStart(4)} ${String(t.reclaims).padStart(4)} ${String(t.rate + '%').padStart(5)} ${String(t.medianLifeMin ?? '—').padStart(8)}  ${String(t.netPerMachineHour ?? '—').padStart(11)}  ${t.tier}`);
+}
+const wl = tiers.filter(t => t.tier === '白名单');
+const hard = tiers.filter(t => t.tier === '硬封 7 天');
+console.log(`白名单 ${wl.length} 个${wl.length ? `（${wl.map(t => t.hostId).join('、')}）` : ''}；硬封 ${hard.length} 个；其余为观察/中性`);

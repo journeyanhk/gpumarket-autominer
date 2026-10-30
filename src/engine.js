@@ -1362,8 +1362,16 @@ export class Engine {
     }
     const ban = this.hostBanned(offer.hostId, now);
     offer.hostBanned = null; offer.hostParole = false; offer.expRoiSkip = false;
-    if (ban?.state === 'banned') { offer.spotSkip = true; offer.hostBanned = ban.why; return offer; }
-    if (ban?.state === 'parole') {
+    // 白名单：L1 已经走房东口径（l1ForMachine），这里补标记 + 存活概率必须也是房东口径。
+    // 白名单可以压过 24 小时观察期/假释（3 条样本、每机时为正、中位 >60 分钟已经比"样本不足"更可信），
+    // 但压不过 7 天硬封——那是"收回率 >60% 且中位 <20 分钟"，和白名单条件本身冲突。
+    offer.hostWhitelist = this.isWhitelisted(offer.hostId);
+    offer.hostBanLifted = false;
+    if (ban?.state === 'banned') {
+      if (offer.hostWhitelist && ban.kind !== 'hard') offer.hostBanLifted = true;
+      else { offer.spotSkip = true; offer.hostBanned = ban.why; return offer; }
+    }
+    if (ban?.state === 'parole' && !offer.hostWhitelist) {
       offer.hostParole = true;
       if (this.paroleHostInUse(offer.hostId) >= 1) { offer.spotSkip = true; offer.hostBanned = '假释期内已有 1 台在跑'; return offer; }
     }
@@ -1395,6 +1403,7 @@ export class Engine {
   evaluateOffers(raw, { onDemand = false, append = false } = {}) {
     const usd = this.usdHsHr6h;   // 同上：挂牌评估用均值
     const now = Date.now();
+    this.refreshHostWhitelist(now);   // 白名单随台账滚动更新（幂等、只算内存）
     const out = [];
     let known = 0;
     for (const o of raw) {
@@ -1424,11 +1433,15 @@ export class Engine {
       }, usd);
       // min_bid 30 分钟稳定性：竞价机的 min_bid 是房东/市场的挂牌地板，
       // 半小时内跳 >10% 说明这台机器正在被抢（或房东在试探），此时出价大概率刚租就被收。
-      offer.minBidTrend = this.recordMinBid(o.machine_id, offer.minBid, now);
+      // 白名单房东：min_bid 的波动更像"正常竞价"而不是"正在被抢"（3 条以上样本、每机时为正、
+      // 中位存活 >60 分钟才进白名单），给它更宽的稳定性阈值；其余房东仍用生产值。
+      const wlHost = this.isWhitelisted(hostId);
+      const stablePct = wlHost ? Number(this.cfg.hostWhitelist?.stablePct ?? 50) : null;
+      offer.minBidTrend = this.recordMinBid(o.machine_id, offer.minBid, now, stablePct);
       // 房东口径 L1 > 1.1 = 这台机器比别人更值钱（"假 2080 Ti"那种），
       // 对它的 min_bid 波动放宽，否则会因为它被抢得凶反而先被过滤掉。
       const trustedHost = l1Src === 'host' && l1 > 1.1;
-      if (offer.spot && offer.minBidTrend?.unstable && !trustedHost) offer.spotSkip = true;
+      if (offer.spot && offer.minBidTrend?.unstable && !trustedHost && !wlHost) offer.spotSkip = true;
       // 房东口径 L1 < 0.8 = 交不出份额，按 24GB 卡同样处理：回避
       if (l1Src === 'host' && l1 < 0.8) { offer.spotSkip = true; offer.avoidHost = true; }
       offer.thPer01 = offer.th / (offer.dph / 0.1);
@@ -1478,7 +1491,8 @@ export class Engine {
   }
 
   // min_bid 走势：返回 { unstable, changePct, spanMin }；样本不足返回 null（不误杀新机）
-  recordMinBid(machineId, minBid, now = Date.now()) {
+  // limitPct：白名单房东用更宽的口径（默认读 effectiveLimits）
+  recordMinBid(machineId, minBid, now = Date.now(), limitPct = null) {
     if (!machineId || !(Number(minBid) > 0)) return null;
     const st = this.st.minBidHist ||= {};
     const key = String(machineId);
@@ -1491,7 +1505,9 @@ export class Engine {
     const old = arr.find(x => now - x.t >= 20 * MIN);   // 至少 20 分钟前的样本
     if (!old) return { unstable: false, changePct: null, spanMin: null };
     const pct = (Number(minBid) / old.mb - 1) * 100;
-    const limit = this.effectiveLimits(now).minBidStablePct;
+    const limit = limitPct == null || !Number.isFinite(Number(limitPct))
+      ? this.effectiveLimits(now).minBidStablePct
+      : Number(limitPct);
     return { unstable: Math.abs(pct) > limit, changePct: +pct.toFixed(1), spanMin: Math.round((now - old.t) / MIN) };
   }
 
@@ -1509,6 +1525,7 @@ export class Engine {
     // 之前放在 scan() 里，一旦 429/额度耗尽就永远不触发（2026-10-28 18:08 的窗口就是这么漏掉的）。
     this.updateWindowMode();
     this.refreshHostBans().length;   // 每轮按最新台账更新房东级黑名单
+    this.refreshHostWhitelist();      // 三层制的第三层：白名单（黑名单让你少亏，白名单让你多赚）
     if (this.cfg.autoDestroy) await this.autoDestroy(list);
     await this.pollStats(list);
     if (this.cfg.autoRent) { await this.autoRent(list); await this.autoRentOnDemand(list); }
@@ -1681,19 +1698,32 @@ export class Engine {
   // 所以该按房东筛，不该按型号屏蔽，也不该加大并行度（只会把部署费乘以 N）。
   hostLedger() {
     const out = {};
+    const price = Number(this.market.price) || 0;
     for (const l of this.leases) {
       const h = l.hostId;
       if (h == null) continue;
-      const b = out[String(h)] ||= { n: 0, reclaims: 0, lives: [], lastReclaimAt: 0, gpus: new Set() };
+      const b = out[String(h)] ||= { n: 0, done: 0, reclaims: 0, lives: [], lastReclaimAt: 0, gpus: new Set(), hours: 0, paid: 0, prl: 0 };
       b.n++;
+      const hrs = l.tEnd ? (l.tEnd - l.tRent) / 3_600_000 : 0;
       if (l.endReason === 'host_reclaim') { b.reclaims++; b.lastReclaimAt = Math.max(b.lastReclaimAt, l.tEnd || 0); }
-      if (l.tEnd) b.lives.push((l.tEnd - l.tRent) / 60000);
+      if (l.tEnd) {
+        b.done++;
+        b.lives.push(hrs * 60);
+        b.hours += hrs;
+        b.paid += (Number(l.dphTotalActual ?? l.bidFinal ?? 0) || 0) * hrs;
+        b.prl += Number(l.creditedPrl) || 0;
+      }
       if (l.gpu) b.gpus.add(l.gpu);
     }
     for (const b of Object.values(out)) {
       b.medianLife = b.lives.length ? b.lives.slice().sort((x, y) => x - y)[Math.floor(b.lives.length / 2)] : null;
       b.rate = b.n ? b.reclaims / b.n * 100 : 0;
       b.gpus = [...b.gpus];
+      // 每机时净收益：白名单唯一的收益口径，必须和 lease-report 一致（(入账×币价 − 实付) ÷ 机时）
+      b.netPerHour = price > 0 && b.hours > 0.01 ? +((b.prl * price - b.paid) / b.hours).toFixed(4) : null;
+      b.paid = +b.paid.toFixed(4);
+      b.prl = +b.prl.toFixed(8);
+      b.hours = +b.hours.toFixed(2);
     }
     return out;
   }
@@ -1737,12 +1767,78 @@ export class Engine {
       else if (b.reclaims >= 2) { banMs = probation; why = `累计收回 ${b.reclaims} 次 → 24 小时`; }
       else if (b.reclaims >= 1 && b.medianLife != null && b.medianLife < Number(cfg.medianMin ?? 20)) { banMs = probation; why = `单次收回且只活了 ${b.medianLife.toFixed(0)} 分钟（样本不足）→ 24 小时观察`; }
       if (!banMs) continue;
-      this.st.hostBans[h] = { until: now + banMs, why, at: now, n: b.n, rate: +b.rate.toFixed(0), medianLife: b.medianLife == null ? null : +b.medianLife.toFixed(0) };
+      this.st.hostBans[h] = {
+        until: now + banMs, why, at: now, n: b.n, rate: +b.rate.toFixed(0),
+        medianLife: b.medianLife == null ? null : +b.medianLife.toFixed(0),
+        kind: banMs >= keepDays ? 'hard' : 'soft',
+      };
       for (const l of this.leases) if (String(l.hostId) === h && l.machineId != null) this.st.blacklist[l.machineId] = { until: now + banMs, reason: `房东 ${h}：${why}` };
       applied.push(`${h}（${why}）`);
     }
     if (applied.length) { this.save(); this.log('warn', `房东黑名单更新 ${applied.length} 个：${applied.slice(0, 3).join('；')}${applied.length > 3 ? ' …' : ''}`); }
     return applied;
+  }
+
+  // ---------- 房东三层制：硬封 / 24h 观察 / 白名单 ----------
+  // 黑名单让你少亏，白名单才让你多赚（用户 2026-10-30 定）。
+  // 入场条件三条必须同时满足：已结束租约 ≥3 条、每机时净收益 >0、中位存活 >60 分钟。
+  // 只看"没被收回"会把一台运气好但没挖到钱的机器也放进来（482330：764 分钟 0 收回，但只有 1 条样本）；
+  // 只看净收益会把"活得久但刚好赶上币价低"的房东误杀——所以存活与收益分开卡。
+  // 白名单买到的是「房东口径的 L1 与 P + 放宽 min_bid 稳定性 + 同房东允许 2 台」，
+  // 不放松 maxInstances / 时租上限 / 期望 ROI 门槛：那是收益闸门，不是房东属性。
+  refreshHostWhitelist(now = Date.now()) {
+    const cfg = this.cfg.hostWhitelist || {};
+    if (cfg.enabled === false) { this.st.hostWhite = {}; return []; }
+    const price = Number(this.market.price) || 0;
+    // 没有币价时无法算净收益：保留上一轮结论（不清空），避免行情抖动把白名单闪断
+    if (!(price > 0)) return Object.keys(this.st.hostWhite || {});
+    const led = this.hostLedger();
+    const white = {};
+    for (const [h, b] of Object.entries(led)) {
+      if (b.done < Number(cfg.minLeases ?? 3)) continue;                       // 样本太少不表态
+      if (b.medianLife == null || b.medianLife < Number(cfg.minMedianLifeMin ?? 60)) continue;
+      if (b.netPerHour == null || b.netPerHour <= Number(cfg.minNetPerHour ?? 0)) continue;
+      // 硬封（7 天档）压过白名单；24 小时观察期不压——白名单的三条样本已经把这个房东的
+      // 收回率定价过了（netPerHour 为正、中位 >60 分钟），观察期只是"样本不足"的保守默认值。
+      const ban = (this.st.hostBans || {})[h];
+      if (ban && ban.until > now && this.banKind(ban) === 'hard') continue;
+      white[h] = { n: b.done, netPerHour: b.netPerHour, medianLife: +b.medianLife.toFixed(0), rate: +b.rate.toFixed(0), at: now };
+    }
+    const prev = this.st.hostWhite || {};
+    const added = Object.keys(white).filter(h => !prev[h]);
+    this.st.hostWhite = white;
+    if (added.length) {
+      this.log('info', `房东白名单新增 ${added.length} 个：${added.map(h => `${h}（每机时 $${white[h].netPerHour}、中位 ${white[h].medianLife} 分钟、${white[h].n} 条）`).join('；')}`);
+    }
+    return Object.keys(white);
+  }
+
+  isWhitelisted(hostId) {
+    if (hostId == null) return false;
+    return !!(this.st.hostWhite || {})[String(hostId)];
+  }
+
+  whitelistRows() {
+    return Object.entries(this.st.hostWhite || {})
+      .map(([h, v]) => ({ hostId: h, ...v }))
+      .sort((a, b) => (b.netPerHour ?? -1e9) - (a.netPerHour ?? -1e9));
+  }
+
+  // 同房东并发上限：白名单 2 台、陌生房东 1 台（unknownHostMaxConcurrent 之前是个死键，现在真正生效）。
+  // 为什么陌生房东只给 1 台：部署失败/被收回的代价是"每台一份"，而陌生房东的存活率恰恰是未知的；
+  // 一次押 3 台等于把同一个未知概率乘 3，失败成本按台数翻倍。
+  hostConcurrentCap(hostId) {
+    if (this.isWhitelisted(hostId)) return Number(this.cfg.hostWhitelist?.perHostMachines ?? 2);
+    return Math.max(1, Number(this.cfg.unknownHostMaxConcurrent ?? 1));
+  }
+
+  // 黑名单分两档：7 天档 = 硬封（收回率 >60% 且中位 <20 分钟，或单样本就短命到无可救），
+  // 24h 档 = 观察期（累计收回 2 次 / 样本不足）。白名单只压观察期，压不过硬封。
+  // 老记录没有 kind 字段，用期限长度反推（>3 天即硬封）。
+  banKind(b) {
+    if (!b) return null;
+    if (b.kind) return b.kind;
+    return (Number(b.until) - Number(b.at ?? 0)) > 3 * 24 * 60 * MIN ? 'hard' : 'soft';
   }
 
   // 房东状态：banned（在期限内）/ parole（假释：只许试 1 台，活过 30 分钟才解除）/ null
@@ -1751,26 +1847,27 @@ export class Engine {
     if (hostId == null) return null;
     const b = (this.st.hostBans || {})[String(hostId)];
     if (!b) return null;
-    if (b.until > now) return { ...b, state: 'banned' };
+    if (b.until > now) return { ...b, kind: this.banKind(b), state: 'banned' };
     // 假释期：到期后 7 天内只允许 1 台试探；此期间若有租约活过 30 分钟则彻底解除
     const paroleDays = Number(this.cfg.hostBan?.paroleDays ?? 7);
     const paroleUntil = b.until + paroleDays * 24 * 60 * MIN;
     if (now < paroleUntil) {
       const proved = this.leases.some(l => String(l.hostId) === String(hostId) && l.tEnd && (l.tEnd - l.tRent) / 60000 >= Number(this.cfg.survivalMinLifeMin ?? 30));
       if (proved) { delete this.st.hostBans[String(hostId)]; this.save(); return null; }
-      return { ...b, state: 'parole', paroleUntil };
+      return { ...b, kind: this.banKind(b), state: 'parole', paroleUntil };
     }
     delete this.st.hostBans[String(hostId)];
     this.save();
     return null;
   }
 
-  // 当前有多少台正在跑/待跑来自假释房东（假释期内每房东只许 1 台）
-  paroleHostInUse(hostId) {
+  // 当前有多少台正在跑/待跑来自这个房东（假释期上限 1 台、白名单 2 台都读它）
+  hostInUse(hostId) {
     if (hostId == null) return 0;
-    const open = this.leases.filter(l => !l.tEnd && String(l.hostId) === String(hostId));
-    return open.length;
+    return this.leases.filter(l => !l.tEnd && String(l.hostId) === String(hostId)).length;
   }
+
+  paroleHostInUse(hostId) { return this.hostInUse(hostId); }
 
   // ---------- 场所单点降级（Gate 现货 / Lighter 永续） ----------
   // Pearl 的变现只有 Gate 现货、对冲只有 Lighter 永续，任一条断掉就必须进入保护态：
@@ -1870,12 +1967,39 @@ export class Engine {
     const st = this.st.windowState ||= { active: false, until: 0, reason: null, startedAt: 0 };
     if (st.active && now >= st.until) {
       st.active = false; st.reason = null;
+      // M2.1：窗口必须可验证——每次退出都把 episode 定稿（结束时刻、真实时长）。
+      // 没有这条，"这个窗口我们抓到了几次、租到什么、赚没赚"就只能靠聊天记录回忆。
+      const ep = (this.st.windowEpisodes || []).find(e => !e.endedAt);
+      if (ep) { ep.endedAt = st.until || now; ep.endWhy = 'timeout'; }
       this.save();
-      this.log('info', '窗口模式结束：阈值已恢复（minBidStablePct / dailyFailBudget / maxHourlySpend）');
+      this.log('info', `窗口模式结束：阈值已恢复（minBidStablePct / dailyFailBudget / maxHourlySpend）`);
       this.assertProductionLimits();
       return st;
     }
-    if (st.active || cfg.enabled === false) return st;
+    if (st.active) {
+      // 引擎重启/热更新时，正在进行的窗口可能早于 episode 记录存在（本次就是：14:20 由
+      // 72h 算力回落触发，记录代码是之后才上的）。补一条 adopted episode，行情快照用补记时刻的值，
+      // 这样这个窗口的捕获率仍然可算，而不是变成"没记录 = 没发生"。
+      const eps = this.st.windowEpisodes ||= [];
+      if (!eps.some(e => !e.endedAt)) {
+        const info = this.windowInfo(now);
+        eps.push({
+          i: (eps.at(-1)?.i ?? 0) + 1, adopted: true,
+          start: st.startedAt || now, plannedEnd: st.until, reason: st.reason,
+          info: {
+            chg1h: info.chg1h, chg6h: info.chg6h, ratio: info.ratio, ratioPass: info.ratioPass,
+            density6h: info.density6h, densityRise24hPct: info.densityRise24hPct,
+            netDrop72hPct: info.netDrop72hPct, price: Number(this.market.price) || null, adoptedAt: now,
+          },
+          limits: this.effectiveLimits(now), rents: [], endedAt: null,
+        });
+        if (eps.length > 50) eps.splice(0, eps.length - 50);
+        this.save();
+        this.log('info', `窗口 ${st.reason} 补记 episode（startedAt ${new Date(st.startedAt).toISOString()}，行情快照用补记时刻）`);
+      }
+      return st;
+    }
+    if (cfg.enabled === false) return st;
     const info = this.windowInfo(now);
     let why = null;
     if (info.chg1h != null && info.chg1h >= Number(cfg.chg1hPct ?? 8)) why = `PRL 1h ${info.chg1h > 0 ? '+' : ''}${info.chg1h}% ≥ ${cfg.chg1hPct}%`;
@@ -1891,6 +2015,18 @@ export class Engine {
     }
     if (!why) return st;
     st.active = true; st.startedAt = now; st.until = now + Number(cfg.minutes ?? 360) * MIN; st.reason = why;
+    // 进入即开 episode：触发真因 + 当时的行情快照 + 放宽了哪三项，全部落盘。
+    // 事后回放要能用当时的数字复算，而不是用「现在的行情」倒推「当时该不该租」。
+    const eps = this.st.windowEpisodes ||= [];
+    eps.push({
+      i: (eps.at(-1)?.i ?? 0) + 1,
+      start: now, plannedEnd: st.until, reason: why,
+      info: { chg1h: info.chg1h, chg6h: info.chg6h, ratio: info.ratio, ratioPass: info.ratioPass, density6h: info.density6h, densityRise24hPct: info.densityRise24hPct, netDrop72hPct: info.netDrop72hPct, price: Number(this.market.price) || null },
+      limits: this.effectiveLimits(now),
+      rents: [],
+      endedAt: null,
+    });
+    if (eps.length > 50) eps.splice(0, eps.length - 50);
     this.save();
     this.log('warn', `进入窗口模式（${why}）：放宽 minBidStablePct→${cfg.minBidStablePct}%、失败封顶→$${cfg.failBudgetUsd}/窗口、时租上限→$${cfg.maxHourlySpend}/h，${cfg.minutes} 分钟后自动退出；追价保持关闭`);
     return st;
@@ -2128,6 +2264,17 @@ export class Engine {
     for (const pick of affordable) {
       if (tries >= 8 || rented >= 5 || roomCount <= 0) break;
       if (spend + pick.dph > spendCap || pick.dph > roomSpend || b.roomBalance - used < pick.dph) continue;
+      // 同房东并发上限：白名单 2 台、陌生房东 1 台。
+      // 一次押 3 台等于把同一个未知的存活概率连乘 3 次，而失败成本（部署分钟 + 被收回的机时）
+      // 是按台数付的。白名单房东已经有 ≥3 条样本、每机时为正、中位存活 >60 分钟，才配 2 台。
+      if (pick.hostId != null) {
+        const cap = this.hostConcurrentCap(pick.hostId);
+        const inUse = this.hostInUse(pick.hostId);
+        if (inUse >= cap) {
+          this._warnOnce('hostcap', `房东 ${pick.hostId} 已有 ${inUse} 台在跑（上限 ${cap}${this.isWhitelisted(pick.hostId) ? '，白名单' : '，陌生房东'}），跳过 ${pick.gpuName} $${pick.dph}`);
+          continue;
+        }
+      }
       tries++;
       const r = await this.rent(pick, 'auto').then(() => 'ok', e => e.gone ? 'gone' : 'fail');
       if (r === 'fail') break;
@@ -2188,6 +2335,9 @@ export class Engine {
         const l = this.leaseOf(id, this.st.managed[id], { geolocation: offer.geolocation, host_id: offer.hostId ?? null });
         l.geo ||= offer.geolocation || '';
         l.pool = def;
+        // 窗口 episode 记账：这次租用是窗口期抓到的（M2.1 的捕获率分母在这里）
+        const ep = (this.st.windowEpisodes || []).find(e => !e.endedAt);
+        if (ep && !ep.rents.includes(id)) ep.rents.push(id);
       }
       this.save();
       if (by === 'auto') { this.rentTimes.push(Date.now()); this.save(); }
@@ -2593,6 +2743,24 @@ export class Engine {
         next.venueGuard = out;
       }
     }
+    // 房东三层制的参数：白名单门槛与并发上限（不注册校验的键会被 patch 静默忽略）
+    num('unknownHostMaxConcurrent', 1, 10);
+    if (patch.hostWhitelist !== undefined) {
+      const v = patch.hostWhitelist;
+      if (v === null) next.hostWhitelist = null;
+      else if (typeof v !== 'object') throw new Error('「hostWhitelist」必须是对象或 null');
+      else {
+        const out = { ...(next.hostWhitelist || {}) };
+        if (v.enabled !== undefined) out.enabled = !!v.enabled;
+        for (const [k, lo, hi] of [['minLeases', 1, 50], ['minNetPerHour', -10, 10], ['minMedianLifeMin', 5, 1440], ['perHostMachines', 1, 5], ['stablePct', 0, 200]]) {
+          if (v[k] === undefined) continue;
+          const n = Number(v[k]);
+          if (!Number.isFinite(n) || n < lo || n > hi) throw new Error(`「hostWhitelist.${k}」应在 ${lo}~${hi} 之间`);
+          out[k] = n;
+        }
+        next.hostWhitelist = out;
+      }
+    }
     // 实验参数覆盖：只允许挂在 pinned 机器上（作用域收窄），键名与范围都校验
     if (patch.expOverride !== undefined) {
       const o = patch.expOverride;
@@ -2791,6 +2959,10 @@ export class Engine {
       // 租约台账：按型号/按房东的每机时净收益（决策口径，不是 ROI 均值）
       leases: this.leaseReport(),
       window: { ...(this.st.windowState || { active: false }), limits: this.effectiveLimits(), info: this.windowInfo() },
+      // M2.1：窗口 episode（触发真因 + 当时的行情 + 抓到的租约），倒序给最近 8 条
+      windowEpisodes: (this.st.windowEpisodes || []).slice(-8).reverse(),
+      // 房东三层制：白名单（正收益）/ 黑名单（st.hostBans，含假释）/ 陌生房东并发上限
+      hosts: { whitelist: this.whitelistRows(), bans: this.st.hostBans || {}, unknownCap: Math.max(1, Number(this.cfg.unknownHostMaxConcurrent ?? 1)) },
       rentBlocked: this.st.rentBlocked || null,
       l1: Object.fromEntries(Object.entries(this.st.l1ByModel || {}).map(([k, v]) => [k, { n: v.n, median: v.median }])),
       l1Host: Object.fromEntries(Object.entries(this.st.l1ByHost || {}).map(([k, v]) => [k, { n: v.n, median: v.median, machines: Object.entries(this.st.machineHost || {}).filter(([, h]) => String(h) === String(k)).map(([mid]) => mid) }])),

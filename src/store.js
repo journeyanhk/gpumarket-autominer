@@ -77,6 +77,12 @@ export const DEFAULT_CONFIG = {
   // 房东存活率（用户 2026-10-29 定）：收回率 >60% 且中位存活 <20 分钟 → 7 天不租；
   // 收回 ≥2 次 → 24 小时；样本=1 且短命 → 24 小时观察期。
   hostBan: { ratePct: 60, medianMin: 20, days: 7, probationHours: 24, minSamplesForLong: 2, paroleDays: 7 },
+  // 房东三层制（用户 2026-10-30 定）：硬封 / 24h 观察 / 白名单。
+  // 黑名单让你少亏，白名单才让你多赚：≥3 条已结束租约、每机时净收益 >0、中位存活 >60 分钟，
+  // 就给「房东口径的 L1 与 P + 放宽 min_bid 稳定性 + 同房东 2 台」。
+  // 注意：白名单是从已发生租约里学出来的，本身带幸存者偏差——它的收益只能在后续租用里兑现，
+  // 不能把历史回放里那 +$0.03/机时 当成白名单的功劳。
+  hostWhitelist: { enabled: true, minLeases: 3, minNetPerHour: 0, minMedianLifeMin: 60, perHostMachines: 2, stablePct: 50 },
   windowScanIntervalSec: 90,
   // 按需机（B 型窗口的工具）：合同期内不会被房东收回，所以不打存活折扣。
   onDemand: {

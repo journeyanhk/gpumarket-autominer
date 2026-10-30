@@ -10,6 +10,10 @@
 
 - `docs/contracts.md` —— 先于代码的契约（单位、接口、失败语义、竞价状态归一）
 - `tools/breakeven.mjs` —— 只读盈亏线计算器：`node tools/breakeven.mjs`
+- `tools/replay-backtest.mjs` —— 参数回放（门槛 × 房东硬封 × 价格地板），输出里先印幸存者偏差声明
+- `tools/window-report.mjs` —— 窗口捕获报告：episode + 租约联网，`--backfill` 可回放历史窗口
+- `tools/clore-census.mjs` —— Clore Spot / 按需只读普查（每小时一行，汇率与时间戳一起落盘）
+- `tools/venue-audit.mjs` —— 同名不同币审计：用价格数量级把 `PRL≠PEARL` 这类场所挡在门外
 - `miners/manifest.json` —— 矿工二进制白名单（版本 + sha256），未 pin 的不执行
 - CI：`.github/workflows/ci.yml`，Node 22/24 跑全量测试（外部接口全部 mock，不会花钱）
 - 竞价实例（可抢占）默认关闭：`data/config.json` 里 `useSpot: true` 才启用，属于实验特性（见 `docs/contracts.md` §8）

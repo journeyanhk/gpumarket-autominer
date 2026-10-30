@@ -348,6 +348,63 @@ console.log('— 房东级存活率与黑名单（70 租 64 收不是运气，�
   ok(nominal * svGood.p - (2 / 60 * 100) > 20, '同一名义 ROI 放到好房东上就过线（这才是该租的）');
 }
 
+console.log('— 房东三层制：白名单（黑名单让你少亏，白名单让你多赚）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  const now = Date.now();
+  e.leases = []; e.st.leases = []; e.st.hostBans = {}; e.st.blacklist = {}; e.st.hostWhite = {};
+  e.cfg.hostWhitelist = { enabled: true, minLeases: 3, minNetPerHour: 0, minMedianLifeMin: 60, perHostMachines: 2, stablePct: 50 };
+  e.cfg.unknownHostMaxConcurrent = 1;
+  e.market.price = 1.55;
+  const mk = (hostId, mins, { prl = 0.05, dph = 0.10, reclaim = false } = {}) => {
+    const l = newLease(String(Math.random()), { gpuName: 'RTX 3080', spot: true, bid: dph, rentedAt: now - mins * MIN, hostId }, {}, now - mins * MIN);
+    l.hostId = hostId; l.dphTotalActual = dph; l.creditedPrl = prl;
+    l.endReason = reclaim ? 'host_reclaim' : 'our_stoploss';
+    l.tEnd = now; l.tFirstShare = now - mins * MIN + 60000;
+    e.leases.push(l); return l;
+  };
+  // 97161 型：3 条、每机时为正、中位 100+ 分钟（即使被收回 2 次也仍进白名单——收益口径说了算）
+  mk(97161, 100, { prl: 0.15 }); mk(97161, 103, { prl: 0.15, reclaim: true }); mk(97161, 110, { prl: 0.15, reclaim: true });
+  // 482330 型：764 分钟 0 收回，但只有 1 条样本 → 不表态
+  mk(482330, 764, { prl: 0.30 });
+  // 3 条、活得也够久，但每机时亏钱 → 不进
+  mk(55555, 90, { prl: 0.001 }); mk(55555, 95, { prl: 0.001 }); mk(55555, 100, { prl: 0.001 });
+
+  const led = e.hostLedger();
+  ok(led['97161'].done === 3 && led['97161'].netPerHour > 0, `97161 每机时 $${led['97161'].netPerHour}（3 条已结束）`);
+
+  const white = e.refreshHostWhitelist(now);
+  ok(white.includes('97161'), '97161 进白名单（≥3 条、每机时为正、中位存活 >60 分钟）');
+  ok(!white.includes('482330'), '只有 1 条样本的房东不进白名单（哪怕 764 分钟 0 收回）');
+  ok(!white.includes('55555'), '中位存活够但每机时为负 → 不进白名单');
+  ok(e.isWhitelisted('97161') && !e.isWhitelisted('482330'), 'isWhitelisted 只认白名单里的房东');
+  ok(e.hostConcurrentCap('97161') === 2 && e.hostConcurrentCap('482330') === 1,
+     '并发上限：白名单 2 台 / 陌生房东 1 台（unknownHostMaxConcurrent 从死键变成真闸门）');
+
+  // 白名单买到的第一项：min_bid 稳定性阈值放宽（同一组数据 10% 判不稳、50% 判稳）
+  e.st.minBidHist = {};
+  e.recordMinBid('m1', 0.10, now - 25 * MIN, 10);
+  const r1 = e.recordMinBid('m1', 0.12, now, 10);
+  const r2 = e.recordMinBid('m1', 0.12, now, 50);
+  ok(r1.unstable && !r2.unstable, `稳定性放宽生效（+${r1.changePct}%：10% 阈值判不稳、50% 阈值判稳）`);
+
+  // 第二项：P 用房东口径（applyGates 走 host），并打上白名单标记
+  const off = e.applyGates({ hostId: '97161', gpuName: 'RTX 3080', spot: true, roi: 60 }, now);
+  ok(off.hostWhitelist === true && off.pSrc === 'host', '白名单报价：存活概率走房东口径并打标记');
+  // 三层制的优先级：白名单压过 24h 观察期（软封），压不过 7 天硬封
+  e.st.hostBans = { 97161: { until: now + 24 * 60 * MIN, why: '累计收回 2 次', at: now, kind: 'soft' } };
+  const white2 = e.refreshHostWhitelist(now);
+  ok(white2.includes('97161'), '24 小时观察期不取消白名单（软封可以压过）');
+  const offSoft = e.applyGates({ hostId: '97161', gpuName: 'RTX 3080', spot: true, roi: 60 }, now);
+  ok(offSoft.hostBanLifted === true && !offSoft.spotSkip, '软封房东在白名单里照常出价（标记 hostBanLifted）');
+  e.st.hostBans = { 97161: { until: now + 7 * 24 * 60 * MIN, why: '收回率 80% 且中位 10 分钟', at: now, kind: 'hard' } };
+  const white3 = e.refreshHostWhitelist(now);
+  ok(!white3.includes('97161'), '7 天硬封直接取消白名单（硬封优先）');
+  const offHard = e.applyGates({ hostId: '97161', gpuName: 'RTX 3080', spot: true, roi: 60 }, now);
+  ok(offHard.spotSkip === true && !!offHard.hostBanned, '硬封房东即使有正收益样本也不出价');
+}
+
 console.log('— 失败成本：短命机器按净亏计入');
 {
   const e = new Engine();
@@ -546,6 +603,37 @@ console.log('— 窗口模式：两种触发 / 只放宽三项 / 自动退出');
   e.account.vastBalance = 100; e.market.updatedAt = now; e.rentCooldownUntil = 0; e.preemptCooldownUntil = 0; e.rentTimes = [];
   e.rentAllowed(now);
   ok(!e.st.windowState.active, '窗口内失败成本到 $1 → 提前退出窗口（不是无限放宽）');
+}
+
+console.log('— 窗口 episode：捕获必须可验证（M2.1）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  const now = Date.now();
+  e.cfg.minBidStablePct = 10; e.cfg.dailyFailBudget = 0.3; e.cfg.maxHourlySpend = 0.2;
+  e.cfg.windowMode = { enabled: true, chg1hPct: 8, ratio: 1.0, densityRise24hPct: 15, minutes: 360, minBidStablePct: 50, failBudgetUsd: 1.0, maxHourlySpend: 0.6 };
+  e.st.windowState = null; e.st.windowEpisodes = []; e.st.history = [{ t: now - 3600e3, price: 1.70 }];
+  e.densitySamples = []; e.offers = []; e.market.price = 1.85;
+
+  e.updateWindowMode(now);
+  const eps = e.st.windowEpisodes;
+  ok(eps.length === 1, '进入窗口即落一条 episode');
+  ok(/1h/.test(eps[0].reason || '') && eps[0].info.chg1h > 8, `episode 记下触发真因（${eps[0].reason}）`);
+  ok(eps[0].info.price === 1.85 && eps[0].limits.window === true, 'episode 带当时的行情快照与放宽后的阈值');
+  ok(Array.isArray(eps[0].rents) && eps[0].rents.length === 0 && !eps[0].endedAt, '窗口刚开：还没有租约、未定稿');
+
+  eps[0].rents.push('501');   // rent() 在窗口内落账时追加（这里直接模拟那一步）
+  e.st.windowState.until = now - 1;
+  e.updateWindowMode(now);
+  ok(!!eps[0].endedAt && eps[0].endWhy === 'timeout', '退出时把 episode 定稿（endedAt）');
+  ok(eps[0].rents.length === 1, 'episode 保留窗口内租约 id（捕获率的分子）');
+
+  // 在途窗口（引擎重启/热更新）：没有 episode 时补一条 adopted
+  e.st.windowEpisodes = [];
+  e.st.windowState = { active: true, startedAt: now - 10 * 60e3, until: now + 6 * 3600e3, reason: '全网算力回落（测试）' };
+  e.updateWindowMode(now);
+  ok(e.st.windowEpisodes.length === 1 && e.st.windowEpisodes[0].adopted === true, '重启时补记在途窗口（adopted）');
+  ok(e.st.windowEpisodes[0].start === now - 10 * 60e3, 'adopted episode 用原始 startedAt，不用补记时刻');
 }
 
 console.log('— L1（份额反推算力 ÷ 矿工自报）按型号维护');

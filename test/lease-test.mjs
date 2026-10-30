@@ -405,6 +405,39 @@ console.log('— 房东三层制：白名单（黑名单让你少亏，白名单
   ok(offHard.spotSkip === true && !!offHard.hostBanned, '硬封房东即使有正收益样本也不出价');
 }
 
+console.log('— 房东口径 L1 回填（历史样本没带 hostId）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  const now = Date.now();
+  e.leases = []; e.st.leases = []; e.st.l1ByHost = {}; e.st.l1ByModel = {}; e.st.hostWhite = {};
+  e.st.machineHost = {}; delete e.st.l1HostBackfilledAt;
+  e.cfg.l1Default = 0.8;
+  const P2 = 2097152;   // 2^21，Pearlhash/Kryptex 实际用的 vardiff 档位之一
+  const mk = (hostId, mins, shares, th = 100) => {
+    const l = newLease(String(Math.random()), { gpuName: 'RTX 2080 Ti', spot: true, bid: 0.1, rentedAt: now - mins * MIN, hostId }, {}, now - mins * MIN);
+    l.hostId = hostId; l.tFirstShare = l.tRent + 60000; l.tEnd = now;
+    l.sharesAccepted = shares; l.difficulty = P2; l.localThAvg = th; l.dphTotalActual = 0.1;
+    e.leases.push(l); return l;
+  };
+  // 反算公式与在线采样一致：份额×难度×2^32÷秒数 ÷ 矿工自报 → 这两条得到 ~0.955 / ~1.047
+  mk(97161, 100, 63); mk(97161, 110, 76);
+  // 分摊污染的样本（764 分钟只得 0.795 PRL，反算 0.23）必须被剔除，不能污染房东中位数
+  mk(482330, 764, 5, 115);
+  const r = e.backfillHostL1();
+  ok(r.done && r.kept === 2 && r.dropped === 1, `回填：采用 ${r.kept} 条、剔除 ${r.dropped} 条越界（分摊污染）`);
+  ok(e.st.l1ByHost['97161']?.samples.length === 2, '97161 得到 2 条 L1 样本（此前 l1ByHost 是空的）');
+  ok(e.l1ForHost(97161) === null, '非白名单房东仍要求 3 条样本 → 现在不放行');
+  e.st.hostWhite = { 97161: { n: 3, netPerHour: 0.03, medianLife: 103, at: now } };
+  const byHost = e.l1ForHost(97161);
+  ok(byHost != null && Math.abs(byHost - 1.0) < 0.06, `白名单房东 2 条样本即生效：L1=${byHost?.toFixed(3)}`);
+  e.st.machineHost['46110'] = 97161;
+  const lm = e.l1ForMachine('RTX 2080 Ti', '46110');
+  ok(lm.source === 'host' && lm.l1 === byHost, '白名单房东的机器走房东口径 L1（型号口径封顶 1.0 不再拖累）');
+  const again = e.backfillHostL1();
+  ok(again.done === false && again.already === true, '回填是幂等的（跑过一次就写 l1HostBackfilledAt）');
+}
+
 console.log('— 失败成本：短命机器按净亏计入');
 {
   const e = new Engine();

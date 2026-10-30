@@ -41,6 +41,9 @@ await e.refreshMarket(); await e.refreshVast(); await e.scan(true);
 console.log('— 搜索与定价');
 ok(globalThis.__lastType === 'bid', '开着 useSpot 时搜索用 type=bid（原来写死 on-demand，根本租不到竞价机）');
 ok(globalThis.__lastQuery?.min_bid && !globalThis.__lastQuery?.dph_total, 'spot 搜索按 min_bid 过滤，不再用挂牌价 dph_total（review #4）');
+// 搜索响应自带 host_id（真实 API 实测）：扫描时就要建立 machine_id → host_id 映射，
+// 否则白名单/房东口径 L1 要等这台机器被租过一次才认识房东。
+ok(e.st.machineHost?.['5000'] === 7000, `扫描即建立 machine_id → host_id 映射（5000 → ${e.st.machineHost?.['5000']}）`);
 const priced = e.offers.filter(o => !o.spotSkip);
 ok(priced.length > 0 && priced.every(o => o.spot && o.bid > 0), `扫到 ${e.offers.length} 台，其中 ${priced.length} 台可出价`);
 ok(priced.every(o => Math.abs(o.dph - o.bid) < 1e-9), 'ROI 用的是「出价」，不是挂牌价');

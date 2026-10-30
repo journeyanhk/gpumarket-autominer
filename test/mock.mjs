@@ -10,7 +10,7 @@ for (let i = 0; i < 60; i++) {
   const [name, th, base] = gpus[i % gpus.length];
   const n = i % 7 === 0 ? 2 : 1;
   const price = +(base * n * (0.62 + ((i * 37) % 60) / 100)).toFixed(3);
-  offers.push({ id: 10000 + i, machine_id: 5000 + i, gpu_name: name, num_gpus: n, dph_total: price, min_bid: +(price * 0.7).toFixed(3), reliability2: 0.95 + (i % 5) / 100, geolocation: ['Tokyo, JP', 'Hong Kong, HK', 'Texas, US', 'Bavaria, DE', 'Guangdong, CN'][i % 5], inet_down: 300 + i * 10, cuda_max_good: 12.8 });
+  offers.push({ id: 10000 + i, machine_id: 5000 + i, host_id: 7000 + i, gpu_name: name, num_gpus: n, dph_total: price, min_bid: +(price * 0.7).toFixed(3), reliability2: 0.95 + (i % 5) / 100, geolocation: ['Tokyo, JP', 'Hong Kong, HK', 'Texas, US', 'Bavaria, DE', 'Guangdong, CN'][i % 5], inet_down: 300 + i * 10, cuda_max_good: 12.8 });
 }
 const instances = [{ id: 10000001, label: '', gpu_name: 'RTX 5080', num_gpus: 1, dph_total: 0.266, dph_base: 0.2596, actual_status: 'running', intended_status: 'running', start_date: Date.now() / 1000 - 3600, geolocation: 'Guangdong, CN', machine_id: 100001, gpu_temp: 61 }];
 const born = {};

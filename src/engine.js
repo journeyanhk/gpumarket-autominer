@@ -205,6 +205,8 @@ export class Engine {
   // ---------- 启动 ----------
   start() {
     this.log('info', `程序启动（脚本版本 v${SCRIPT_VERSION}；若与 src/onstart.js 不一致说明进程未重载）`);
+    // 一次性：把历史租约反算成「房东口径 L1」（幂等，跑过一次就写 l1HostBackfilledAt）
+    this.backfillHostL1();
     this.loop(() => this.refreshMarket(), 15_000);
     this.loop(() => this.refreshKryptex(), 30_000, 3000);
     this.loop(() => this.refreshVast(), 30_000);
@@ -1405,7 +1407,7 @@ export class Engine {
     const now = Date.now();
     this.refreshHostWhitelist(now);   // 白名单随台账滚动更新（幂等、只算内存）
     const out = [];
-    let known = 0;
+    let known = 0, newHostMap = false;
     for (const o of raw) {
       const ref = this.thFor(o.gpu_name);
       if (!ref) continue;
@@ -1417,6 +1419,13 @@ export class Engine {
       // 房东优先的 L1：同一房东的型号可能被标错（"假 2080 Ti"），但份额口径不会骗人
       // L1 分层（用户 2026-10-29）：按需机用型号口径（封顶 1.0，合同稳定）；
       // 竞价机才用「房东优先、陌生房东 0.8」的口径（房东会收回，样本不可比）。
+      // vast 的搜索响应本来就带 host_id（2026-10-30 实测确认，匿名搜索同样返回）：
+      // 扫描时就把 machine_id → host_id 记住，白名单与房东口径 L1 对新机器立刻生效，
+      // 不用先租一台、被收回一次，才发现房东是谁。租过之后的 refreshVast 会再校一次。
+      if (o.host_id != null && o.machine_id != null) {
+        const mh = this.st.machineHost ||= {};
+        if (mh[String(o.machine_id)] !== o.host_id) { mh[String(o.machine_id)] = o.host_id; newHostMap = true; }
+      }
       const lm = this.l1ForMachine(o.gpu_name, o.machine_id);
       const l1 = onDemand ? this.l1For(o.gpu_name) : lm.l1;
       const l1Src = onDemand ? 'model' : lm.source;
@@ -1483,7 +1492,7 @@ export class Engine {
     const merged = append ? [...this.offers.filter(o => !o.onDemand), ...out] : out;
     merged.sort((a, b) => ((b.expRoi ?? -Infinity) - (a.expRoi ?? -Infinity)) || ((b.pSurvive ?? 0) - (a.pSurvive ?? 0)) || ((b.roi ?? -Infinity) - (a.roi ?? -Infinity)));
     this.offers = merged.slice(0, 200);
-    if (!this._offersSavedAt || Date.now() - this._offersSavedAt > 2 * MIN) { this._offersSavedAt = Date.now(); this.saveOffers(); this.save(); }
+    if (newHostMap || !this._offersSavedAt || Date.now() - this._offersSavedAt > 2 * MIN) { this._offersSavedAt = Date.now(); this.saveOffers(); this.save(); }
     this.offerStats = {
       total: raw.length, known, profitable: out.filter(x => x.roi !== null && x.roi >= this.cfg.targetProfitPct).length,
       scannedAt: now, error: null,
@@ -2102,7 +2111,10 @@ export class Engine {
     if (hostId == null) return null;
     const rec = (this.st.l1ByHost || {})[String(hostId)];
     const s = (rec?.samples || []).filter(x => Number.isFinite(x) && x > 0.3 && x < 2.0);
-    if (s.length < 3) return null;
+    // 白名单房东 2 条就够：它已经过了「≥3 条租约、每机时为正、中位 >60 分钟」三道门，
+    // 再要求 3 条 L1 样本等于让新晋白名单房东白等一台机器（2026-10-30：97161 只有 2 条可用样本）。
+    const need = this.isWhitelisted(hostId) ? 2 : 3;
+    if (s.length < need) return null;
     const sorted = [...s].sort((a, b) => a - b);
     const mid = Math.floor(sorted.length / 2);
     return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
@@ -2114,6 +2126,39 @@ export class Engine {
     const byHost = this.l1ForHost(hostId);
     if (byHost != null) return { l1: byHost, source: 'host', hostId };
     return { l1: this.l1For(gpuName), source: 'model', hostId: hostId ?? null };
+  }
+
+  // 一次性回填「房东口径 L1」（2026-10-30）。
+  // 背景：recordL1 是后来才带 hostId 的，历史样本全落在型号口径里，白名单房东的 L1 只能退化成型号值
+  // （2080 Ti 被 482330 的 1.17 污染后封顶 1.0）。其实台账里三个字段足够反算：
+  //   累计份额 × 难度 × 2^32 ÷ 秒数 = 反推算力（H/s），再除以矿工自报（lastHs 或 localThAvg×1e12）。
+  // 验收带比在线采样更严（0.5~1.5，在线是 0.3~2.0）：回填每条租约只有一个终点值，而 pool_alloc 的
+  // 分摊会把别人的币记到这台机器上（482330 那条 764 分钟只得 0.228，明显是分摊污染），宽口径会污染中位数。
+  backfillHostL1() {
+    if (this.st.l1HostBackfilledAt) return { done: false, already: true };
+    const hosts = this.st.l1ByHost ||= {};
+    const kept = [], dropped = [];
+    for (const l of this.leases) {
+      if (!l.tEnd || !l.tFirstShare || l.hostId == null) continue;
+      const secs = (l.tEnd - l.tFirstShare) / 1000;
+      const shares = Number(l.sharesAccepted), diff = Number(l.difficulty);
+      const hs = Number(l.lastHs) || Number(l.localThAvg) * 1e12;
+      if (!(secs > 600 && shares > 0 && diff > 0 && hs > 0)) continue;
+      const ratio = +(((shares * diff * 4294967296) / secs) / hs).toFixed(3);
+      if (!(ratio > 0.5 && ratio < 1.5)) { dropped.push(`${l.hostId}:${ratio}`); continue; }
+      const rec = hosts[String(l.hostId)] ||= { samples: [] };
+      if (!rec.samples.includes(ratio)) rec.samples.push(ratio);
+      if (rec.samples.length > 20) rec.samples.splice(0, rec.samples.length - 20);
+      rec.n = rec.samples.length;
+      kept.push(`${l.hostId}:${ratio}`);
+    }
+    for (const [h, rec] of Object.entries(hosts)) rec.median = this.l1ForHost(h);
+    this.st.l1HostBackfilledAt = Date.now();
+    this.save();
+    if (kept.length || dropped.length) {
+      this.log('info', `房东口径 L1 回填：采用 ${kept.length} 条（${kept.join('、') || '—'}）${dropped.length ? `；剔除 ${dropped.length} 条越界（${dropped.join('、')}）` : ''}`);
+    }
+    return { done: true, kept: kept.length, dropped: dropped.length };
   }
 
   rentAllowed(now = Date.now()) {

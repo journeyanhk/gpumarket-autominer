@@ -8,6 +8,28 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 process.chdir(ROOT);
 
+// 崩溃归因：把未捕获异常/未处理拒绝/退出码写进独立日志。
+// 目的（用户 2026-10-30）：控制台宕机期间等于错过窗口；不能只靠巡检发现，
+// 也要能在第二次宕机时回答"为什么"（内存 / 未捕获异常 / 网络 / 外部 kill）。
+const CRASH_LOG = '/data/prl-automine/engine-crash.log';
+function crashNote(kind, detail) {
+  try {
+    const line = `[${new Date().toISOString()}] ${kind} uptime=${Math.round(process.uptime())}s rss=${Math.round(process.memoryUsage().rss / 1e6)}MB pid=${process.pid} :: ${detail}\n`;
+    fs.appendFileSync(CRASH_LOG, line);
+  } catch { /* 日志写不进去也不能再抛 */ }
+}
+process.on('uncaughtException', (e) => {
+  crashNote('uncaughtException', (e && (e.stack || e.message)) || String(e));
+  console.error('[fatal] uncaughtException:', e?.stack || e);
+  process.exit(1);   // 交给守护脚本立刻拉起（比留在半死状态好）
+});
+process.on('unhandledRejection', (r) => {
+  crashNote('unhandledRejection', (r && (r.stack || r.message)) || String(r));
+  console.error('[fatal] unhandledRejection:', r?.stack || r);
+});
+process.on('exit', (code) => crashNote('exit', `code=${code}${process.exitCode != null ? '' : ''}`));
+for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { crashNote(sig, '收到终止信号'); process.exit(0); });
+
 // Node 版本检查（原来写在 bat 里，被杀毒软件当成可疑脚本，挪到这里）
 const NODE_MAJOR = Number(process.versions.node.split('.')[0]);
 if (NODE_MAJOR < 22) {

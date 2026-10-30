@@ -669,6 +669,26 @@ console.log('— 窗口 episode：捕获必须可验证（M2.1）');
   ok(e.st.windowEpisodes[0].start === now - 10 * 60e3, 'adopted episode 用原始 startedAt，不用补记时刻');
 }
 
+console.log('— ratio 次要指标不被钓鱼报价污染（2026-10-30 实测 19.5 的离群值）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  const now = Date.now();
+  const toV = thDay => thDay / 24e12;
+  e.densitySamples = [{ t: now - 3600e3, v: toV(0.030) }];
+  e.market.price = 1.7;
+  e.offers = [
+    { dph: 0.10, th: 100, spotSkip: true },                    // 正常报价：100 TH/s、$0.10/h（但期望 ROI 不过线）
+    { dph: 0.0119, th: 300, floorSkip: true, spotSkip: true },  // 假 4090：已被型号地板挡掉
+    { dph: 0.05, th: 90, insaneSkip: true, spotSkip: true },    // 荒谬 ROI：同样不该供数
+  ];
+  const wi = e.windowInfo(now);
+  ok(wi.ratioN === 1, `地板只用通过过滤的报价（n=${wi.ratioN}）`);
+  ok(wi.ratio != null && wi.ratio < 3, `ratio=${wi.ratio}（旧逻辑会被假 4090 放大到 30+）`);
+  // 可出价集合为空时 ratioPass 必须是 null，不能拿 ratio 顶上
+  ok(wi.ratioPass === null, 'ratioPass 仍为 null（无一条可出价）');
+}
+
 console.log('— L1（份额反推算力 ÷ 矿工自报）按型号维护');
 {
   const e = new Engine();

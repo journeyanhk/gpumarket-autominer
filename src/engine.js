@@ -1945,18 +1945,24 @@ export class Engine {
     const old24 = [...dens].reverse().find(x => x.t <= now - 24 * 3600e3);
     const d24 = old24 ? toThDay(old24.v) : null;
     const rise = d24 > 0 && d6 > 0 ? +((d6 / d24 - 1) * 100).toFixed(1) : null;
-    // 地板：当前报价里「每 TH 每小时的挂牌价」最低值
-    const offers = (this.offers || []).filter(o => o.dph > 0 && o.th > 0);
-    let ratio = null;
-    if (offers.length && d6 > 0) {
-      const best = offers.reduce((a, o) => Math.max(a, (o.th * d6 / 24) / o.dph), 0);
+    // 地板：只从「通过钓鱼/荒谬过滤」的报价里取最低价。
+    // 2026-10-30 实测：一条 $0.0119 的"4090"把全市场地板比值放大到 19.5——它已经被 floorSkip
+    // 挡住、租不到，却还在给次要指标供数。指标失真比指标难看更危险，所以这里和可出价集合一样
+    // 先过滤：floorSkip（低于型号地板×0.5）/ insaneSkip（ROI>500%）/ 黑名单 / 已知交不出份额的房东。
+    const sane = (this.offers || []).filter(o =>
+      o.dph > 0 && o.th > 0 && !o.floorSkip && !o.insaneSkip && !o.blacklisted && !o.avoidHost);
+    let ratio = null, ratioN = sane.length;
+    if (sane.length && d6 > 0) {
+      const best = sane.reduce((a, o) => Math.max(a, (o.th * d6 / 24) / o.dph), 0);
       ratio = +best.toFixed(3);
       // 记住上次能用到的地板（每 TH 每小时的挂牌价），额度耗尽/缓存为空时还能算比值
-      this.st.lastFloorPerTh = +offers.reduce((a, o) => Math.min(a, o.dph / o.th), Infinity).toFixed(8);
+      this.st.lastFloorPerTh = +sane.reduce((a, o) => Math.min(a, o.dph / o.th), Infinity).toFixed(8);
     } else if (d6 > 0 && Number(this.st.lastFloorPerTh) > 0) {
       ratio = +((d6 / 24) / Number(this.st.lastFloorPerTh)).toFixed(3);
+      ratioN = 0;
     }
-    // 双口径：ratio 用"全市场最低地板"（好看但租不到），ratioPass 用"可出价集合的中位比值"（真实机会）
+    // 双口径：ratio = 通过钓鱼过滤后的最优单条报价（最好情况，仍然"看着有肉、多半租不到"），
+    // ratioPass = 可出价集合的中位比值（真实机会，主口径）。
     let ratioPass = null;
     const passable = (this.offers || []).filter(o => !o.spotSkip && o.dph > 0);
     if (passable.length && d6 > 0) {
@@ -1967,7 +1973,7 @@ export class Engine {
     const netNow = Number(this.market.networkHs) / 1e18 || null;
     const net72 = [...H].reverse().find(h => h.t <= now - 72 * 3600e3)?.netEh ?? null;
     const netDrop72hPct = netNow > 0 && net72 > 0 ? +((netNow / net72 - 1) * 100).toFixed(1) : null;
-    return { chg1h: chg(3600e3), chg6h: chg(6 * 3600e3), density6h: +d6.toFixed(5), densityRise24hPct: rise, ratio, ratioPass, netDrop72hPct };
+    return { chg1h: chg(3600e3), chg6h: chg(6 * 3600e3), density6h: +d6.toFixed(5), densityRise24hPct: rise, ratio, ratioPass, ratioN, netDrop72hPct };
   }
 
   // 每轮扫描算一次；触发则进入窗口（最长 minutes 分钟），到点自动退出

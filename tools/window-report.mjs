@@ -72,11 +72,16 @@ for (const h of H) {
 const backfill = [];
 for (const hit of hits) {
   const last = backfill.at(-1);
-  if (last && hit.t - last.lastHit < 60 * MIN) { last.lastHit = hit.t; last.n++; last.why = hit.why; last.peakPrice = Math.max(last.peakPrice, hit.price); continue; }
+  // 合并条件：距上次命中 <60 分钟 **且** 这一段还没到 6 小时。
+  // 不封顶会把"价格一路上涨 14 小时"合成一个巨型窗口，把窗口之后好几小时租的机器也算进捕获里
+  // （2026-10-30 实测：10-28 的窗口被拉长到次日凌晨，混进了 8 条与窗口无关的租约）。
+  if (last && hit.t - last.lastHit < 60 * MIN && hit.t - last.start < 6 * 3600e3) { last.lastHit = hit.t; last.n++; last.why = hit.why; last.peakPrice = Math.max(last.peakPrice, hit.price); continue; }
   backfill.push({ start: hit.t, lastHit: hit.t, n: 1, why: hit.why, price: hit.price, peakPrice: hit.price });
 }
 for (const w of backfill) {
-  w.end = w.lastHit + 6 * 3600e3;   // 窗口模式单次最长 6 小时
+  // 窗口模式是「进入后 6 小时」，所以窗口区间 = start..start+6h。
+  // 用 lastHit+6h 会把连续上涨的尾巴也算成窗口（10-28 那次就被拉长到 12 小时，混进了次日凌晨的租约）。
+  w.end = w.start + 6 * 3600e3;
   const ls = leases.filter(l => l.tRent <= w.end && (Number(l.tEnd) || Date.now()) >= w.start);
   const nets = ls.map(netOf);
   w.rents = ls.length;

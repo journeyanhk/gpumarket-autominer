@@ -70,6 +70,7 @@ export const DEFAULT_CONFIG = {
   },
   l1Default: 0.8,           // 没有样本的型号，按"份额反推算力 ÷ 矿工自报"= 0.8 保守折算
   l1ModelCap: 1.0,          // 型号口径封顶：>1.0 的增益只允许通过房东口径使用（防跨房东虚高）
+  maxSaneRoiPct: 500,       // 名义 ROI 超过它的报价视为错标（正常 0~200%）
   // 场所单点降级：Gate 现货（唯一变现出口）或 Lighter 永续（唯一对冲腿）任一不可用 → 保护态
   venueGuard: { enabled: true, inventoryCapPrl: 50 },
   // 房东存活率（用户 2026-10-29 定）：收回率 >60% 且中位存活 <20 分钟 → 7 天不租；

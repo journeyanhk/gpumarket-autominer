@@ -1409,6 +1409,13 @@ export class Engine {
       // 房东口径 L1 < 0.8 = 交不出份额，按 24GB 卡同样处理：回避
       if (l1Src === 'host' && l1 < 0.8) { offer.spotSkip = true; offer.avoidHost = true; }
       offer.thPer01 = offer.th / (offer.dph / 0.1);
+      // 硬底线：vast 单卡时租不会低于 MIN_GPU_PRICE，低于它基本是虚假/错标挂牌
+      // （2026-10-30 实测：一台"4090"挂 $0.0119/h，我们按 1515% ROI 租了两次，两次都被收回）
+      if (listDph < MIN_GPU_PRICE) { offer.spotSkip = true; offer.floorSkip = true; offer.skipWhy = `挂牌 $${listDph.toFixed(4)}/h 低于单卡底价 $${MIN_GPU_PRICE}`; }
+      // 荒谬 ROI 同样是错标的信号（正常 0~200%，>500% 基本不可能长期存在）
+      if (offer.roi != null && offer.roi > Number(this.cfg.maxSaneRoiPct ?? 500)) {
+        offer.spotSkip = true; offer.insaneSkip = true; offer.skipWhy = `ROI ${offer.roi.toFixed(0)}% 超过合理上限 ${this.cfg.maxSaneRoiPct ?? 500}%`;
+      }
       // 存活概率与期望 ROI 统一走 applyGates（repriceOffers 调用同一个方法，不会互相打脸）
       this.applyGates(offer, now);
       const line = this.minThPer01;
@@ -2533,6 +2540,7 @@ export class Engine {
     num('spotBidBuffer', 0, 1); num('spotBidMultiplier', 1, 3); num('spotBidFloorRatio', 0, 1);
     num('rentMinIntervalMin', 1, 180); num('maxRentsPerHour', 1, 20); num('preemptCooldownMin', 0, 120);
     num('maxBidRaises', 0, 10);   // 0 = 不追价（默认）；>0 才允许被顶后加价保活
+    num('maxSaneRoiPct', 100, 10000);
     num('dailyFailBudget', 0, 100); num('minBidStablePct', 0, 100);
     num('cruiseScanRows', 20, 200); num('windowScanRows', 20, 1000); num('chg6hPct', 1, 100); num('stairRatio', 0.5, 5); num('offerCacheMaxMin', 5, 240);
     // 这些是后加的键：不注册校验就会被 patch 静默忽略（2026-10-29 实测 anonCruiseIntervalMin 改了没生效）

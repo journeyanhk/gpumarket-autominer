@@ -47,7 +47,7 @@ ok(priced.every(o => Math.abs(o.dph - o.bid) < 1e-9), 'ROI 用的是「出价」
 ok(priced.every(o => o.bid <= o.revenueHr / 1.3 + 1e-6), '出价不超过「目标收益率 30%」允许的上限（rev/1.3）');
 ok(priced.every(o => o.listDph >= o.bid), '挂牌价 ≥ 出价（挂牌价只是展示）');
 // 现在 spotSkip 有三种原因：出价无效（bid=null）、期望 ROI 不达标、房东被拉黑
-ok(e.offers.filter(o => o.spotSkip).every(o => o.bid === null || o.expRoiSkip || o.hostBanned), '不可出价的机器：要么出价无效，要么期望 ROI/房东不允许（机器仍保留在列表里）');
+ok(e.offers.filter(o => o.spotSkip).every(o => o.bid === null || o.expRoiSkip || o.hostBanned || o.floorSkip || o.insaneSkip), '不可出价的机器：出价无效 / 期望 ROI / 房东 / 价格下限 / 荒谬 ROI（机器仍保留在列表里）');
 
 console.log('— 出价算法边界（利润带公式）');
 // 目标 20% → 上限 = 收入/1.2；下限 = 收入×0.7；目标出价 = 入场价×1.25

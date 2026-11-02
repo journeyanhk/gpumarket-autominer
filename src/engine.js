@@ -2229,6 +2229,14 @@ export class Engine {
     const est = { gpu: gpuName, dph: offer.dph, bid: offer.bid, revenueHr: +offer.revenueHr.toFixed(4), roi: +(offer.roi ?? 0).toFixed(1), th: +offer.th.toFixed(1), thPer01: Math.round(offer.thPer01), passLine: offer.passLine, l1, l1Src, spotSkip: offer.spotSkip };
     const ok = force || (!offer.spotSkip && offer.roi != null && offer.roi >= this.cfg.targetProfitPct && offer.passLine !== false);
     if (!ok) throw Object.assign(new Error(`估价不过线：ROI ${est.roi}%（目标 ${this.cfg.targetProfitPct}%）、thPer01 ${est.thPer01}（线 ${line == null ? '—' : Math.round(line)}）${offer.spotSkip ? '、出价无效' : ''}`), { est });
+    // force 通道（测量锚点 / 手抄单）：竞价单必须带 price，而价格带在"不值得"时会把 bid 判成 null，
+    // 结果 force 能跳过闸门、却在 vast 那边因为 price=null 失败。这里用 max(min_bid×1.05, min_bid)
+    // 且不超过挂牌 dph 作为强制出价——只影响显式 force 的手动单，autoRent 永远走不到这条路径。
+    if (offer.spot && !(Number(offer.bid) > 0)) {
+      const mb = Number(minBid ?? dph);
+      offer.bid = Math.min(Number(dph), Math.max(mb * 1.05, mb));
+      offer.dph = offer.bid;
+    }
     const id = await this.rent(offer, 'manual');
     return { id, est };
   }

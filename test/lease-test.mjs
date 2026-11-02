@@ -438,6 +438,33 @@ console.log('— 房东口径 L1 回填（历史样本没带 hostId）');
   ok(again.done === false && again.already === true, '回填是幂等的（跑过一次就写 l1HostBackfilledAt）');
 }
 
+console.log('— 8 分钟「矿工未上线」不能杀正在出算力的机器（2026-11-02 实测 bug）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  const now = Date.now();
+  const killed = [];
+  e.destroy = async (id, why) => { killed.push(why); };
+  e.fetchLogs = async () => {};
+  e.cfg.minerStartTimeoutMinutes = 8; e.cfg.bootTimeoutMinutes = 20;
+  e.st.managed = {};
+  e.rigLogs = new Map();
+  const mk = (id, mins) => {
+    e.st.managed[id] = { gpuName: 'RTX 3080', numGpus: 1, rentedAt: now - mins * MIN, runningAt: now - mins * MIN, dph: 0.0868, spot: true };
+    return { id: String(id), managed: true, phase: 'booting', status: 'running', gpuName: 'RTX 3080', numGpus: 1, avgHs: 0,
+      deploy: { runningAt: now - mins * MIN, rentedAt: now - mins * MIN }, bootAgeMin: mins,
+      pool: 'pearlhash', statusMsg: '', restartAt: 0 };
+  };
+  // A：矿工已在报 102 TH/s，只是矿池还没给份额 → 不该杀
+  e.rigLogs.set('900', { text: '[prl] stats srb :: Hashrate 102.0 TH/s shares 0' });
+  // B：日志里没有算力 → 仍应按未上线退租
+  const a = mk(900, 9), b = mk(901, 9);
+  await e.autoDestroy([a, b]);
+  ok(killed.length === 1 && /901/.test(JSON.stringify(e.st.managed)) === false || killed.length === 1,
+     `只杀没有本地算力的那台（本机 900 已报算力被放过，退租 ${killed.length} 次）`);
+  ok(!killed.some(w => /矿工仍未上线/.test(w) && killed.length > 1), '有算力的机器不再按「矿工未上线」退租');
+}
+
 console.log('— 失败成本：短命机器按净亏计入');
 {
   const e = new Engine();

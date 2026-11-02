@@ -1597,9 +1597,16 @@ export class Engine {
         const stuckMin = (now - Math.max(x.deploy.runningAt, x.restartAt || 0, m.poolSetAt || 0)) / MIN;
         if (stuckMin > 4) await this.fetchLogs(x.id, false).catch(() => {});
         if (stuckMin > this.cfg.minerStartTimeoutMinutes) {
-          const hint = this.logHint(x.id);
-          await this.destroy(x.id, `开机后 ${this.cfg.minerStartTimeoutMinutes} 分钟矿工仍未上线${hint ? '：' + hint : '（机器日志里没有矿工输出）'}`, 24 * 60);
-          continue;
+          // 2026-11-02 实测：miner 已经在报 Hashrate、矿池还没给第一份份额时，面板 phase 仍是 booting，
+          // 旧规则会按「矿工未上线」把一台正在出算力的机器杀掉（3080 已报 102 TH/s，第 8.8 分钟被杀，
+          // L1 采样直接归零）。有本地算力就不算未上线，交给 20 分钟部署超时兜底。
+          const lh = this.localHsOf(x.id);
+          if (!lh) {
+            const hint = this.logHint(x.id);
+            await this.destroy(x.id, `开机后 ${this.cfg.minerStartTimeoutMinutes} 分钟矿工仍未上线${hint ? '：' + hint : '（机器日志里没有矿工输出）'}`, 24 * 60);
+            continue;
+          }
+          this._warnOnce(`minerup-${x.id}`, `实例 ${x.id} 矿工已报 ${(lh / 1e12).toFixed(1)} TH/s，但矿池还没有份额（phase=booting）；不按「未上线」退租，交给 ${this.cfg.bootTimeoutMinutes} 分钟部署超时`);
         }
       }
       // 1b) 出过算力的机器被 vast 报告离线：vast 偶尔会短暂报错状态，连续离线 10 分钟才退租（以前会立刻按「部署超时」误杀）
@@ -2236,6 +2243,8 @@ export class Engine {
       const mb = Number(minBid ?? dph);
       offer.bid = Math.min(Number(dph), Math.max(mb * 1.05, mb));
       offer.dph = offer.bid;
+      // 出价被价格带判 null 时 roi 也是 null；force 单要能进日志/台账，这里按强制出价补一个名义 ROI
+      offer.roi = offer.dph > 0 ? +(((offer.revenueHr || 0) - offer.dph) / offer.dph * 100).toFixed(1) : null;
     }
     const id = await this.rent(offer, 'manual');
     return { id, est };
@@ -2405,7 +2414,7 @@ export class Engine {
       const line = this.minThPer01;
       const tp = this.thPer01Of(offer);
       const lineTxt = line && tp ? `｜${Math.round(tp).toLocaleString('en-US')} TH/$0.1h，今日线 ${Math.round(line)}，${tp >= line ? '过线' : '不过线'}` : '';
-      this.log('success', `${tag}租用 ${offer.numGpus}×${offer.gpuName}（实例 ${id}）${offer.spot ? '竞价出价' : ''}$${offer.dph.toFixed(4)}/h${ratio}，挖 ${poolName(def)}，预计收益率 ${offer.roi.toFixed(1)}%${lineTxt}`);
+      this.log('success', `${tag}租用 ${offer.numGpus}×${offer.gpuName}（实例 ${id}）${offer.spot ? '竞价出价' : ''}$${offer.dph.toFixed(4)}/h${ratio}，挖 ${poolName(def)}，预计收益率 ${offer.roi == null ? '—（force 手抄单）' : offer.roi.toFixed(1) + '%'}${lineTxt}`);
       setTimeout(() => this.refreshVast(), 3000);
       return id;
     } catch (e) {

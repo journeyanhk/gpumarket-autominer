@@ -405,6 +405,68 @@ console.log('— 房东三层制：白名单（黑名单让你少亏，白名单
   ok(offHard.spotSkip === true && !!offHard.hostBanned, '硬封房东即使有正收益样本也不出价');
 }
 
+console.log('— L1 价位分带：l1Model 与 l1RealizedCheap 分开（2026-11-02）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.st.l1ByModel = {}; e.st.l1ByHost = {};
+  // 便宜带（$0.07/0.08）实测 0.45/0.5；贵带（$0.11/0.12）实测 0.95/1.0
+  const add = (r, dph, lid) => e.recordL1('RTX 3080', r, 1, lid, { dph });
+  add(0.44, 0.07, 'a'); add(0.48, 0.08, 'b'); add(0.50, 0.075, 'c');
+  add(0.94, 0.11, 'd'); add(0.99, 0.115, 'e'); add(1.02, 0.12, 'f');
+  const sp = e.l1Split('RTX 3080');
+  ok(sp.n === 6 && sp.cheapN === 2 && sp.premiumN === 2, `分带样本数：总 ${sp.n}，便宜带 ${sp.cheapN}，贵带 ${sp.premiumN}`);
+  ok(sp.cheap != null && sp.cheap < 0.6, `便宜带中位 ${sp.cheap}（决定"这个价位能不能租"）`);
+  ok(sp.premium != null && sp.premium > 0.9, `贵带中位 ${sp.premium}（估收入用）`);
+  ok(sp.all > sp.cheap, `全体中位 ${sp.all} 明显高于便宜带——混用会得出相反结论`);
+}
+
+console.log('— L1 稳态窗口均值（不取最早、不取最新，取窗口均值 + min/max）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.st.l1ByModel = {}; e.st.l1ByHost = {}; e.l1buf = new Map();
+  const t0 = Date.now() - 30 * MIN;
+  const push = (mins, r, hs) => e.noteL1('L1', { t: t0 + mins * MIN, gpu: 'RTX 3080', hostId: 1, r, hs });
+  for (const m of [1, 3, 6, 9]) push(m, 0.5, 120);      // 爬坡段（10 分钟内）→ 不计入窗口
+  for (const m of [11, 13, 15, 17, 19]) push(m, 0.9, 120); // 稳态段
+  for (const m of [21, 23, 25]) push(m, 0.45, 60);       // 衰减段（算力掉到 50%）
+  const s = e.steadyL1('L1');
+  ok(s && s.mean === 0.9, `窗口均值 ${s?.mean}（不是最早的 0.5、也不是最新的 0.45）`);
+  ok(s.n === 5 && s.min === 0.9 && s.max === 0.9, `窗口内 ${s?.n} 个样本，min/max ${s?.min}/${s?.max}`);
+  ok(s.decayed === true, '检测到算力衰减 → 窗口止于衰减点');
+  const c = e.commitL1('L1');
+  const rec = e.st.l1ByModel.RTX3080;
+  ok(c && rec.samples.length === 1 && rec.samples[0] === 0.9, `提交后型号样本 = [${rec.samples}]`);
+  ok(rec.evidence && rec.evidence['L1'] && rec.evidence['L1'].min === 0.9, '证据里留了 min/max/n 与 decayed');
+  ok(e.steadyL1('L1') === null, '提交后缓冲清空（同租约不会再刷样本）');
+}
+
+console.log('— 追价 dry-run：chase/reentry 分开 + 拒因标注（用户 2026-11-02 要求）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.st.raiseLog = [];
+  e.cfg.maxBidRaises = 0; e.cfg.targetProfitPct = 20;
+  const m = { bid: 0.10, bidRaises: [], hostId: 111 };
+  const x = { id: 'x1', spot: true, gpuName: 'RTX 3080', revenueHr: 0.13, expRevenueHr: 0.13, dph: 0.115, minBid: 0.11 };
+  await e.tryRaiseBid(x, m, Date.now());
+  const r1 = e.st.raiseLog.at(-1);
+  ok(r1.kind === 'chase' && r1.requiredRaise === 1.1 && r1.reject === 'max_raises' && r1.decided === 'skip',
+     `追价类：对手 ${r1.requiredRaise}× → ${r1.kind}，拒因 ${r1.reject}`);
+  x.minBid = 0.20;
+  await e.tryRaiseBid(x, m, Date.now());
+  const r2 = e.st.raiseLog.at(-1);
+  ok(r2.kind === 'reentry' && r2.requiredRaise === 2, `重新入场类：对手 ${r2.requiredRaise}× → ${r2.kind}（不混进追价成功率）`);
+  // 有额度但不可行（upper 扣完存储低于 target）→ 拒因应是 not_viable
+  e.cfg.maxBidRaises = 3; m.bid = 0.105; m.bidRaises = [];
+  Object.assign(x, { revenueHr: 0.10, expRevenueHr: 0.10, minBid: 0.10, dph: 0.115 });
+  await e.tryRaiseBid(x, m, Date.now());
+  const r3 = e.st.raiseLog.at(-1);
+  ok(r3.viable === false && r3.reject === 'not_viable', `可行但越线 → 拒因 ${r3.reject}（上限 $${r3.upper} < 目标 $${r3.target}）`);
+  ok(e.st.raiseLog.length === 3, '每条被顶都留一条可回放记录（与机器是否销毁无关）');
+}
+
 console.log('— L1 样本按租约去重 + 分数卡不按整卡估价（2026-11-02 实测驱动）');
 {
   const e = new Engine();

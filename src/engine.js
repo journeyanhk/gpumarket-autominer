@@ -503,12 +503,19 @@ export class Engine {
               // 矿工已经报出算力 = 矿工起来了（和「矿池开始计酬」是两件事，分开记）
               l.tMinerUp ||= Date.now();
             }
-            // L1 样本：累计份额反推算力 ÷ 矿工自报（至少跑 10 分钟才采，避免爬坡污染）
+            // L1 样本：累计份额反推算力 ÷ 矿工自报。跑够 10 分钟才采（避开爬坡），
+            // 但不是"每轮一个样本"——先记进租约缓冲，等进入稳态窗口后提交一个**窗口均值**，
+            // 同时留 min/max 作为衰减证据（用户 2026-11-02 要求的"稳态均值"口径）。
             {
               const secs = l.tFirstShare ? (Date.now() - l.tFirstShare) / 1000 : 0;
               if (secs > 600 && l.sharesAccepted > 0 && Number(l.difficulty) > 0 && Number(l.lastHs) > 0) {
                 const derived = l.sharesAccepted * Number(l.difficulty) * 4294967296 / secs;
-                this.recordL1(m.gpuName, derived / Number(l.lastHs), l.hostId ?? i.host_id ?? null, l.id);
+                this.noteL1(l.id, {
+                  t: Date.now(), gpu: m.gpuName, hostId: l.hostId ?? i.host_id ?? null,
+                  r: derived / Number(l.lastHs), hs: Number(l.lastHs),
+                  dph: Number(x.dph) ? +(Number(x.dph) / Math.max(1, Number(x.numGpus) || 1)).toFixed(4) : null,
+                });
+                if (!l.l1Committed && secs > 1500 && this.commitL1(l.id)) l.l1Committed = true;
               }
             }
             const sh = this.sharesOf(i.id);
@@ -735,6 +742,8 @@ export class Engine {
   closeLeaseFor(id, { reason = '', now = Date.now(), preemptKind = null, opponentRatio = null, code = null } = {}) {
     const l = this.leaseFor(id);
     if (!l) return null;
+    // 租约结束前把稳态 L1 落账（没跑满窗口的不提交：样本不足宁可没有）
+    if (!l.l1Committed && this.commitL1(id)) l.l1Committed = true;
     closeLease(l, {
       // 自己发起的销毁记 our_kill:<码>；不带码的走文案映射（平台收回 / 部署失败 / 止损…）
       endReason: code ? `our_kill:${code}` : endReasonOf(reason),
@@ -2128,7 +2137,77 @@ export class Engine {
     return Math.min(med, cap);
   }
 
-  recordL1(gpuName, ratio, hostId = null, leaseId = null) {
+  // ---------- L1 稳态采样（2026-11-02） ----------
+  // 为什么要窗口均值：同一条租约里份额法算出来的 L1 会随时间单调下滑（起初份额少→偏高，
+  // 衰减后偏低）。取"最新值"会被衰减段绑架，取"最早值"会被爬坡段绑架，两边都不对。
+  // 口径：窗口 = 首份份额后 10 分钟起，到「算力明显衰减」为止（或首份份额后 25 分钟），
+  //       取窗口内的**均值**，并记录 min/max 作为衰减证据。
+  noteL1(leaseId, s) {
+    if (leaseId == null || !(s.r > 0.3 && s.r < 2.0)) return;
+    const key = String(leaseId);
+    const buf = (this.l1buf ||= new Map());
+    const arr = buf.get(key) || [];
+    arr.push(s);
+    if (arr.length > 240) arr.splice(0, arr.length - 240);
+    buf.set(key, arr);
+  }
+
+  // 稳态窗口：首份份额 +10min 之后；若检测到算力衰减（< 稳态中位的 70% 连续 3 个样本），窗口止于衰减点
+  steadyL1(leaseId) {
+    const arr = (this.l1buf || new Map()).get(String(leaseId)) || [];
+    if (!arr.length) return null;
+    const t0 = arr[0].t;
+    const win = arr.filter(s => s.t - t0 >= 10 * MIN);
+    if (win.length < 3) return null;
+    const hsSorted = win.map(s => s.hs).filter(x => x > 0).sort((a, b) => a - b);
+    const hsMed = hsSorted[Math.floor(hsSorted.length / 2)] || 0;
+    let decayAt = null;
+    if (hsMed > 0) {
+      for (let i = 2; i < win.length; i++) {
+        if (win[i].hs < hsMed * 0.7 && win[i - 1].hs < hsMed * 0.7 && win[i - 2].hs < hsMed * 0.7) { decayAt = win[i - 2].t; break; }
+      }
+    }
+    const use = (decayAt ? win.filter(s => s.t < decayAt) : win.slice(0, 60));
+    if (use.length < 3) return null;
+    const rs = use.map(s => s.r).sort((a, b) => a - b);
+    const mean = rs.reduce((a, b) => a + b, 0) / rs.length;
+    return {
+      mean: +mean.toFixed(3), min: +rs[0].toFixed(3), max: +rs[rs.length - 1].toFixed(3),
+      n: rs.length, decayed: !!decayAt, gpu: use[0].gpu, hostId: use[0].hostId, dph: use[0].dph ?? null,
+    };
+  }
+
+  // 提交（租约结束或稳态窗口已成型时调用）；同租约重复提交只覆盖，不追加
+  commitL1(leaseId) {
+    const s = this.steadyL1(leaseId);
+    if (!s) return null;
+    this.recordL1(s.gpu, s.mean, s.hostId, leaseId, { min: s.min, max: s.max, n: s.n, decayed: s.decayed, dph: s.dph });
+    (this.l1buf || new Map()).delete(String(leaseId));
+    return s;
+  }
+
+    // 价位分带（用户 2026-11-02：L1 要两个标签两个用途）：
+  //   l1Model        —— 该型号全部样本的中位（用来估收入）
+  //   l1RealizedCheap—— 最低价三分之一样本的中位（用来决定"这个价位到底能不能租"）
+  // 两个数混用会得出相反结论：便宜机实测 L1 低是"便宜有原因"，拿它去估高价机收入会低估，
+  // 拿高价机的 L1 去判断便宜机能不能租会高估。
+  l1Split(gpuName) {
+    const rec = (this.st.l1ByModel || {})[gpuKey(gpuName)];
+    const pairs = (rec?.samples || []).map((v, i) => ({ v, p: (rec.prices || [])[i] })).filter(x => Number.isFinite(x.v));
+    if (!pairs.length) return { n: 0, all: null, cheap: null, premium: null, cheapN: 0, premiumN: 0 };
+    const med = arr => { const a = arr.map(x => x.v).sort((x, y) => x - y); const m = Math.floor(a.length / 2); return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
+    const priced = pairs.filter(x => x.p > 0).sort((a, b) => a.p - b.p);
+    let cheap = null, premium = null, cheapN = 0, premiumN = 0;
+    if (priced.length >= 6) {
+      const cut = Math.max(2, Math.floor(priced.length / 3));
+      const lo = priced.slice(0, cut), hi = priced.slice(-cut);
+      cheap = +med(lo).toFixed(3); premium = +med(hi).toFixed(3);
+      cheapN = lo.length; premiumN = hi.length;
+    }
+    return { n: pairs.length, all: +med(pairs).toFixed(3), cheap, premium, cheapN, premiumN };
+  }
+
+  recordL1(gpuName, ratio, hostId = null, leaseId = null, evidence = null) {
     if (!(ratio > 0.3 && ratio < 2.0)) return;
     const k = gpuKey(gpuName);
     const st = this.st.l1ByModel ||= {};
@@ -2138,13 +2217,21 @@ export class Engine {
     // 2026-11-02 实测一台故障 3080 在 20 分钟里刷了 7 个样本，直接把型号中位数压到 0.343，
     // 然后所有 3080 的估价都按它打折。现在同租约内改写最后一个值，换租约才追加。
     const lid = leaseId == null ? null : String(leaseId);
-    if (lid && rec.lastLease === lid && rec.samples.length) rec.samples[rec.samples.length - 1] = v;
-    else rec.samples.push(v);
+    const price = evidence && Number.isFinite(Number(evidence.dph)) ? +Number(evidence.dph).toFixed(4) : null;
+    if (lid && rec.lastLease === lid && rec.samples.length) {
+      rec.samples[rec.samples.length - 1] = v;
+      if (rec.prices) rec.prices[rec.prices.length - 1] = price;
+    } else {
+      rec.samples.push(v);
+      (rec.prices ||= []).push(price);
+    }
     rec.lastLease = lid;
     if (rec.samples.length > 20) rec.samples.splice(0, rec.samples.length - 20);
     rec.n = rec.samples.length;
     rec.median = this.l1For(gpuName);
-    // 房东维度：同一房东的机器口径更稳——型号可能被房东标错（"假 2080 Ti"就是这么来的），
+    // 证据：这条样本是窗口均值，附 min/max 与样本数（衰减机看得到尾巴）
+    if (evidence) (rec.evidence ||= {})[String(leaseId ?? 'x')] = { at: Date.now(), ...evidence };
+  // 房东维度：同一房东的机器口径更稳——型号可能被房东标错（"假 2080 Ti"就是这么来的），
     // 而份额不会骗人。样本 ≥3 才用。
     if (hostId != null) {
       const h = this.st.l1ByHost ||= {};
@@ -2584,16 +2671,37 @@ export class Engine {
     const storageHr = Math.max(0, (Number(x.dph) || 0) - curBidPrice);
     const upper = Math.max(0, upperTotal - storageHr);
     const cur = curBidPrice;
-    const target = Math.max(cur * 1.1, Number(x.minBid || 0) * 1.1);
+    const minBidNow = Number(x.minBid || 0);
+    const target = Math.max(cur * 1.1, minBidNow * 1.1);
     const viable = upper > 0 && target > cur && target <= upper;
-    // 即使不追价也把「如果追会出什么价」算出来记下：以后有对手价位数据可以回放，
-    // 不用为了验证再拿真钱去试。
-    m.wouldRaise = { at: now, cur: +cur.toFixed(4), target: +target.toFixed(4), upper: +upper.toFixed(4), viable, maxRaises };
+    // 追价 dry-run 三元组（用户 2026-11-02 要求）：①被顶时对手把价抬到我们出价的多少倍
+    // （requiredRaise）②这次到底是「追击」还是「重新入场」③没追的话卡在哪一条闸门上。
+    // 三者分开记，才能回答"追价救不活是机制（房东收回）还是门槛（我们出价太低）"。
+    const requiredRaise = cur > 0 && minBidNow > 0 ? +(minBidNow / cur).toFixed(3) : null;
+    // ≤1.5 倍算追价（加一点能跟）；>1.5 倍是对方直接换了一档价位，本质是重新入场，不该混进追价成功率
+    const kind = requiredRaise == null ? 'unknown' : requiredRaise <= 1.5 ? 'chase' : 'reentry';
+    const reject = m.bidRaises.length >= maxRaises ? 'max_raises' : (!viable ? 'not_viable' : null);
+    m.wouldRaise = {
+      at: now, cur: +cur.toFixed(4), minBid: +minBidNow.toFixed(4), target: +target.toFixed(4),
+      upper: +upper.toFixed(4), viable, maxRaises, requiredRaise, kind, reject,
+    };
+    // 落一份可回放的分布（与 managed 无关，机器销毁后仍然留着）
+    {
+      const log = this.st.raiseLog ||= [];
+      log.push({
+        at: now, id: String(x.id), gpu: x.gpuName || null, host: m.hostId ?? null,
+        cur: +cur.toFixed(4), minBid: +minBidNow.toFixed(4), requiredRaise, kind,
+        target: +target.toFixed(4), upper: +upper.toFixed(4), viable, maxRaises,
+        reject, decided: reject ? 'skip' : 'raise',
+      });
+      if (log.length > 200) log.splice(0, log.length - 200);
+      this.save();
+    }
     if (m.bidRaises.length >= maxRaises || !viable) {
       if (maxRaises === 0 && !m.raiseOffLogged) {
         m.raiseOffLogged = true;
         this.save();
-        this.log('info', `实例 ${x.id} 被顶：按当前开关不追价（若追会出 $${target.toFixed(4)}，上限 $${upper.toFixed(4)}），直接走销毁换下一台`);
+        this.log('info', `实例 ${x.id} 被顶：按当前开关不追价（若追会出 $${target.toFixed(4)}，上限 $${upper.toFixed(4)}，对手 ${requiredRaise ?? '—'}×，${kind}），直接走销毁换下一台`);
       }
       return false;
     }
@@ -3122,6 +3230,8 @@ export class Engine {
       hosts: { whitelist: this.whitelistRows(), bans: this.st.hostBans || {}, unknownCap: Math.max(1, Number(this.cfg.unknownHostMaxConcurrent ?? 1)) },
       rentBlocked: this.st.rentBlocked || null,
       l1: Object.fromEntries(Object.entries(this.st.l1ByModel || {}).map(([k, v]) => [k, { n: v.n, median: v.median }])),
+      // 价位分带：l1Model（全体中位，估收入）vs l1RealizedCheap（便宜带中位，决定能不能租）
+      l1Split: Object.fromEntries(Object.keys(this.st.l1ByModel || {}).map(k => [k, this.l1Split(k)])),
       l1Host: Object.fromEntries(Object.entries(this.st.l1ByHost || {}).map(([k, v]) => [k, { n: v.n, median: v.median, machines: Object.entries(this.st.machineHost || {}).filter(([, h]) => String(h) === String(k)).map(([mid]) => mid) }])),
       venue: { health: this.st.venueHealth, guard: this.st.venueGuard, inventoryPrl: this.inventoryPrl(), capPrl: this.cfg.venueGuard?.inventoryCapPrl ?? 50 },
       failBreakdown: { ...(this.st.failBreakdown || {}), capUsd: Number(this.cfg.dailyFailBudget ?? 0.3), usedUsd: this.failSpendToday().usd },

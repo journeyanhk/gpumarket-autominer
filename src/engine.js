@@ -508,7 +508,7 @@ export class Engine {
               const secs = l.tFirstShare ? (Date.now() - l.tFirstShare) / 1000 : 0;
               if (secs > 600 && l.sharesAccepted > 0 && Number(l.difficulty) > 0 && Number(l.lastHs) > 0) {
                 const derived = l.sharesAccepted * Number(l.difficulty) * 4294967296 / secs;
-                this.recordL1(m.gpuName, derived / Number(l.lastHs), l.hostId ?? i.host_id ?? null);
+                this.recordL1(m.gpuName, derived / Number(l.lastHs), l.hostId ?? i.host_id ?? null, l.id);
               }
             }
             const sh = this.sharesOf(i.id);
@@ -1363,6 +1363,13 @@ export class Engine {
       else if (this.cfg.survivalGate !== false && offer.expRoi != null && offer.expRoi < this.cfg.targetProfitPct) { offer.spotSkip = true; offer.expRoiSkip = true; }
       return offer;
     }
+    // 分数卡（gpu_frac < 1）：vast 卖的是"半张/四分之一张"卡，但算力参考值是整卡的，
+    // 按整卡估价会系统性高估（实测一台 3080 的份额反算只有 0.343）。直接跳过，不做概率游戏。
+    if (offer.gpuFrac != null && Number(offer.gpuFrac) > 0 && Number(offer.gpuFrac) < 0.99) {
+      offer.spotSkip = true; offer.fracSkip = true;
+      offer.skipWhy = `gpu_frac=${offer.gpuFrac}（分数卡，不是整卡）`;
+      return offer;
+    }
     const ban = this.hostBanned(offer.hostId, now);
     offer.hostBanned = null; offer.hostParole = false; offer.expRoiSkip = false;
     // 白名单：L1 已经走房东口径（l1ForMachine），这里补标记 + 存活概率必须也是房东口径。
@@ -1437,6 +1444,7 @@ export class Engine {
         spot: onDemand ? false : this.cfg.useSpot, minBid: Number(o.min_bid ?? o.dph_total) || 0,
         onDemand,
         reliability: o.reliability2 ?? o.reliability,
+        gpuFrac: Number(o.gpu_frac ?? 1),
         geolocation: o.geolocation || '', inetDown: o.inet_down, cuda: o.cuda_max_good,
         source: ref.source, autoOk: ref.autoOk,
         blacklisted: bl && bl.until > now ? bl.reason : null,
@@ -2120,12 +2128,19 @@ export class Engine {
     return Math.min(med, cap);
   }
 
-  recordL1(gpuName, ratio, hostId = null) {
+  recordL1(gpuName, ratio, hostId = null, leaseId = null) {
     if (!(ratio > 0.3 && ratio < 2.0)) return;
     const k = gpuKey(gpuName);
     const st = this.st.l1ByModel ||= {};
     const rec = st[k] ||= { samples: [] };
-    rec.samples.push(+ratio.toFixed(3));
+    const v = +ratio.toFixed(3);
+    // 一条租约只贡献一个样本（同一条租约内的多次采样高度相关）：
+    // 2026-11-02 实测一台故障 3080 在 20 分钟里刷了 7 个样本，直接把型号中位数压到 0.343，
+    // 然后所有 3080 的估价都按它打折。现在同租约内改写最后一个值，换租约才追加。
+    const lid = leaseId == null ? null : String(leaseId);
+    if (lid && rec.lastLease === lid && rec.samples.length) rec.samples[rec.samples.length - 1] = v;
+    else rec.samples.push(v);
+    rec.lastLease = lid;
     if (rec.samples.length > 20) rec.samples.splice(0, rec.samples.length - 20);
     rec.n = rec.samples.length;
     rec.median = this.l1For(gpuName);
@@ -2134,7 +2149,9 @@ export class Engine {
     if (hostId != null) {
       const h = this.st.l1ByHost ||= {};
       const hr = h[String(hostId)] ||= { samples: [] };
-      hr.samples.push(+ratio.toFixed(3));
+      if (lid && hr.lastLease === lid && hr.samples.length) hr.samples[hr.samples.length - 1] = v;
+      else hr.samples.push(v);
+      hr.lastLease = lid;
       if (hr.samples.length > 20) hr.samples.splice(0, hr.samples.length - 20);
       hr.n = hr.samples.length;
       hr.median = this.l1ForHost(hostId);

@@ -405,6 +405,27 @@ console.log('— 房东三层制：白名单（黑名单让你少亏，白名单
   ok(offHard.spotSkip === true && !!offHard.hostBanned, '硬封房东即使有正收益样本也不出价');
 }
 
+console.log('— L1 样本按租约去重 + 分数卡不按整卡估价（2026-11-02 实测驱动）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.st.l1ByModel = {}; e.st.l1ByHost = {};
+  // 同一条租约反复采样 → 只保留一个样本（否则一台故障机就能刷满型号中位数）
+  for (const v of [0.31, 0.33, 0.35, 0.34, 0.36]) e.recordL1('RTX 3080', v, 540351, 'lease-A');
+  const m1 = e.st.l1ByModel.RTX3080;
+  ok(m1.samples.length === 1 && m1.samples[0] === 0.36, `同一租约 5 次采样只留 1 个（且取最新值 ${m1.samples[0]}）`);
+  ok(e.l1For('RTX 3080') === 0.8, '1 个样本不够 → 仍然回落 l1Default 0.8（一台机器不能代表一个型号）');
+  for (const [v, lid] of [[0.95, 'lease-B'], [1.02, 'lease-C']]) e.recordL1('RTX 3080', v, 540351, lid);
+  ok(e.st.l1ByModel.RTX3080.samples.length === 3, '三条不同租约 → 三个样本');
+  ok(Math.abs(e.l1For('RTX 3080') - 0.95) < 1e-9, `三样本中位数 ${e.l1For('RTX 3080')}（0.36/0.95/1.02 → 0.95）`);
+
+  // 分数卡：gpu_frac < 1 直接跳过（vast 卖半张卡，但算力参考值是整卡的）
+  const f1 = e.applyGates({ hostId: null, gpuName: 'RTX 3080', spot: true, roi: 80, gpuFrac: 0.5 }, Date.now());
+  ok(f1.spotSkip === true && f1.fracSkip === true, '英伟达分数卡 gpu_frac=0.5 → 跳过（不按整卡估价）');
+  const f2 = e.applyGates({ hostId: null, gpuName: 'RTX 3080', spot: true, roi: 80, gpuFrac: 1 }, Date.now());
+  ok(!f2.fracSkip, 'gpu_frac=1 不受影响');
+}
+
 console.log('— 房东口径 L1 回填（历史样本没带 hostId）');
 {
   const e = new Engine();

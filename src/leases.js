@@ -17,14 +17,21 @@ export const END_REASONS = [
   'our_gate',           // 我们自己按闸门退租（算力偏低 / 核价 / 余额）
   'our_manual',         // 人工退租
   'deploy_fail',        // 部署失败（镜像 / 容器 / 矿工起不来）
+  'no_accepted_share',  // 矿工在跑但一份 accepted share 都没有（钱包/矿池/算法不匹配）
   'market_end',         // 平台侧已不存在，本地清理
   'unknown',
 ];
+
+// 我们自己发起的销毁统一记成 our_kill:<原因码>（2026-11-02 定）：
+// 房东判定只认 host_reclaim，自己杀掉的机器不能算成"房东短命"，否则三层制会被自己的手污染。
+export const OUR_KILL_PREFIX = 'our_kill:';
+export const isOurKill = (l) => String(l?.endReason || '').startsWith(OUR_KILL_PREFIX);
 
 // 从引擎的中文reason映射成枚举：台账要能跨语言聚合，不能让文案变化破坏统计
 export function endReasonOf(reason) {
   const s = String(reason || '');
   if (/竞价被收回|竞价被抢占/.test(s)) return 'preempted_outbid';
+  if (/零 accepted share|accepted share 一份都没有/i.test(s)) return 'no_accepted_share';
   if (/部署|矿工|镜像|容器/.test(s)) return 'deploy_fail';
   if (/止损/.test(s)) return 'our_stoploss';
   if (/算力|核价|余额|闸门|不划算|退租/.test(s)) return 'our_gate';
@@ -95,7 +102,10 @@ export function netUsdOf(l, { now = Date.now(), priceUsd = 0 } = {}) {
 
 export function closeLease(l, { endReason = 'unknown', now = Date.now(), priceUsd = null, preemptKind = null, opponentRatio = null } = {}) {
   l.tEnd ||= now;
-  l.endReason = END_REASONS.includes(endReason) ? endReason : 'unknown';
+  // our_kill:<码> 允许带后缀，其余必须是枚举值
+  l.endReason = String(endReason || '').startsWith(OUR_KILL_PREFIX)
+    ? endReason
+    : (END_REASONS.includes(endReason) ? endReason : 'unknown');
   // 竞价被收回是笼统说法：min_bid 没涨（对手价位 <1×）说明不是被顶掉的，是房东收回。
   // 两者对决策的意义完全不同——被顶说明「我们的出价不够」，房东收回说明「加价也没用」。
   const kind = preemptKind || l.preemptKind;

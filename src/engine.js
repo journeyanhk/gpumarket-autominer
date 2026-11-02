@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { loadManifest } from './miners.js';
 import { pickDensity } from './sources.js';
 import { request } from './http.js';
-import { newLease, closeLease, endReasonOf, preemptKindOf, summarize, netUsdOf } from './leases.js';
+import { newLease, closeLease, endReasonOf, preemptKindOf, summarize, netUsdOf, isOurKill } from './leases.js';
 
 const MIN = 60_000;
 const LABEL = 'prl-auto';
@@ -732,11 +732,12 @@ export class Engine {
     return null;
   }
 
-  closeLeaseFor(id, { reason = '', now = Date.now(), preemptKind = null, opponentRatio = null } = {}) {
+  closeLeaseFor(id, { reason = '', now = Date.now(), preemptKind = null, opponentRatio = null, code = null } = {}) {
     const l = this.leaseFor(id);
     if (!l) return null;
     closeLease(l, {
-      endReason: endReasonOf(reason),
+      // 自己发起的销毁记 our_kill:<码>；不带码的走文案映射（平台收回 / 部署失败 / 止损…）
+      endReason: code ? `our_kill:${code}` : endReasonOf(reason),
       now,
       priceUsd: this.market.price || 0,
       preemptKind: l.preemptKind || preemptKind,
@@ -1603,10 +1604,25 @@ export class Engine {
           const lh = this.localHsOf(x.id);
           if (!lh) {
             const hint = this.logHint(x.id);
-            await this.destroy(x.id, `开机后 ${this.cfg.minerStartTimeoutMinutes} 分钟矿工仍未上线${hint ? '：' + hint : '（机器日志里没有矿工输出）'}`, 24 * 60);
+            await this.destroy(x.id, `开机后 ${this.cfg.minerStartTimeoutMinutes} 分钟矿工仍未上线${hint ? '：' + hint : '（机器日志里没有矿工输出）'}`, 24 * 60, 'miner_not_up');
             continue;
           }
           this._warnOnce(`minerup-${x.id}`, `实例 ${x.id} 矿工已报 ${(lh / 1e12).toFixed(1)} TH/s，但矿池还没有份额（phase=booting）；不按「未上线」退租，交给 ${this.cfg.bootTimeoutMinutes} 分钟部署超时`);
+        }
+      }
+      // 1a2) 矿工在跑、但一份 accepted share 都没有（钱包地址错 / 矿池拒 / 算法不匹配）：
+      //      判据必须是 accepted share，不是 localHs —— 本地有算力完全可能永远拿不到份额。
+      //      实测正常 1~3 分钟就有第一份；给到 noShareKillMin（默认 25 分钟）仍为零就退租。
+      //      与 1a) 的「未上线」分开记，台账里是 no_accepted_share，不是 deploy_fail。
+      if (x.phase !== 'preempted') {
+        const l = this.leaseFor(x.id);
+        const sinceUp = l?.tMinerUp || x.deploy?.runningAt || 0;
+        const upMin = sinceUp ? (now - sinceUp) / MIN : 0;
+        const lh = this.localHsOf(x.id);
+        const accepted = Number(this.sharesOf(x.id)?.accepted ?? l?.sharesAccepted ?? 0);
+        if (lh > 0 && accepted === 0 && upMin >= Number(this.cfg.noShareKillMin ?? 25)) {
+          await this.destroy(x.id, `矿工在跑（${(lh / 1e12).toFixed(1)} TH/s）但 ${Math.round(upMin)} 分钟零 accepted share（钱包/矿池/算法）`, 0);
+          continue;
         }
       }
       // 1b) 出过算力的机器被 vast 报告离线：vast 偶尔会短暂报错状态，连续离线 10 分钟才退租（以前会立刻按「部署超时」误杀）
@@ -1614,12 +1630,12 @@ export class Engine {
       else if (m.offlineSince) { delete m.offlineSince; this.save(); }
       if (x.phase === 'offline' && (m.hashAt || this.everHashed.has(x.id))) {
         // spot 的「离线」多半是被收回/出价被顶，不是机器坏了：销毁但不拉黑，下轮可以重新出价
-        if (now - m.offlineSince >= 10 * MIN) await this.destroy(x.id, `机器离线超过 10 分钟（vast 状态 ${x.status}${x.statusMsg ? '：' + x.statusMsg : ''}）`, m.spot ? 0 : 6 * 60);
+        if (now - m.offlineSince >= 10 * MIN) await this.destroy(x.id, `机器离线超过 10 分钟（vast 状态 ${x.status}${x.statusMsg ? '：' + x.statusMsg : ''}）`, m.spot ? 0 : 6 * 60, 'offline');
         continue;
       }
       // 1) 部署失败：超时仍无算力（从租下或最近一次重启算起），只针对从没出过算力的机器
       if ((x.phase === 'booting' || x.phase === 'offline') && x.bootAgeMin > this.cfg.bootTimeoutMinutes) {
-        await this.destroy(x.id, `部署超时 ${this.cfg.bootTimeoutMinutes} 分钟仍无算力（${x.statusMsg || x.status}）`, 24 * 60);
+        await this.destroy(x.id, `部署超时 ${this.cfg.bootTimeoutMinutes} 分钟仍无算力（${x.statusMsg || x.status}）`, 24 * 60, 'boot_timeout');
         continue;
       }
       // 2) 掉线：之前有算力，最近 10 分钟一直为 0（重启后的样本才算）
@@ -1630,7 +1646,7 @@ export class Engine {
         const zeros = arr.filter(s => s.t >= (zeroSince ?? now));
         // 连续为 0 的时间真的超过 10 分钟，且这段时间里至少采到 10 个样本（避免程序刚启动/断网恢复时误判）
         if (zeroSince && now - zeroSince >= 10 * MIN && zeros.length >= 10 && zeros.every(s => s.hs === 0)) {
-          await this.destroy(x.id, x.restartAt ? `重启后 ${this.cfg.bootTimeoutMinutes} 分钟仍无算力` : '矿工掉线超过 10 分钟', m.spot ? 0 : 6 * 60);
+          await this.destroy(x.id, x.restartAt ? `重启后 ${this.cfg.bootTimeoutMinutes} 分钟仍无算力` : '矿工掉线超过 10 分钟', m.spot ? 0 : 6 * 60, 'no_hash');
           continue;
         }
       }
@@ -1641,7 +1657,7 @@ export class Engine {
       // 2b) 竞价机的算力长期只有预期的 hashLowPct 以下：按实际产出我们是在亏钱（实测 3080 只有 56%）。
       //     按需机不套用这条（按需是包干价，且换机成本高）；竞价机直接退，不拉黑机器。
       if (x.spot && x.health === 'low' && x.firstHashAt && now - x.firstHashAt > 20 * MIN) {
-        await this.destroy(x.id, `算力只有预期的 ${Math.round((x.hashRatio || 0) * 100)}%（${x.gpuName}），竞价不值这个价`, 0);
+        await this.destroy(x.id, `算力只有预期的 ${Math.round((x.hashRatio || 0) * 100)}%（${x.gpuName}），竞价不值这个价`, 0, 'low_hash');
         continue;
       }
       // 3) 止损：实时收益率持续低于止损线（行情数据不新鲜、或出算力不满 10 分钟时不判断）
@@ -1650,7 +1666,7 @@ export class Engine {
       if (x.roi !== null && x.roi < lim.stopLossPct) {
         if (!m.belowSince) { m.belowSince = now; this.save(); this.log('warn', `实例 ${x.id} 收益率 ${x.roi.toFixed(1)}% 跌破止损线 ${lim.stopLossPct}%${lim.fromOverride ? '（实验覆盖）' : ''}，开始计时`); }
         else if (now - m.belowSince > lim.stopLossMinutes * MIN) {
-          await this.destroy(x.id, `收益率 ${x.roi.toFixed(1)}% 持续 ${lim.stopLossMinutes} 分钟低于止损线 ${lim.stopLossPct}%`, 60);
+          await this.destroy(x.id, `收益率 ${x.roi.toFixed(1)}% 持续 ${lim.stopLossMinutes} 分钟低于止损线 ${lim.stopLossPct}%`, 60, 'stop_loss');
         }
       } else if (m.belowSince && x.roi !== null) {
         m.belowSince = null; this.save();
@@ -1724,7 +1740,10 @@ export class Engine {
       if (l.endReason === 'host_reclaim') { b.reclaims++; b.lastReclaimAt = Math.max(b.lastReclaimAt, l.tEnd || 0); }
       if (l.tEnd) {
         b.done++;
-        b.lives.push(hrs * 60);
+        // 我们自己杀的机器是「删失样本」：它既不是房东收回，也不说明房东短命。
+        // 计入 lives 会让 host 的中位存活被我们的手拉低（2026-11-02：8.8 分钟自杀被记成 deploy_fail）。
+        if (isOurKill(l)) b.censored = (b.censored || 0) + 1;
+        else b.lives.push(hrs * 60);
         b.hours += hrs;
         b.paid += (Number(l.dphTotalActual ?? l.bidFinal ?? 0) || 0) * hrs;
         b.prl += Number(l.creditedPrl) || 0;
@@ -1733,6 +1752,7 @@ export class Engine {
     }
     for (const b of Object.values(out)) {
       b.medianLife = b.lives.length ? b.lives.slice().sort((x, y) => x - y)[Math.floor(b.lives.length / 2)] : null;
+      b.censored = b.censored || 0;
       b.rate = b.n ? b.reclaims / b.n * 100 : 0;
       b.gpus = [...b.gpus];
       // 每机时净收益：白名单唯一的收益口径，必须和 lease-report 一致（(入账×币价 − 实付) ÷ 机时）
@@ -1750,7 +1770,8 @@ export class Engine {
     // 拉普拉斯平滑：样本少时不走极端（1 次活下来 = 0.75，1 次死掉 = 0.25），
     // 避免"好房东只租过一次"就被判成 1.0 或 0.0。
     const calc = (ls) => {
-      const done = (ls || []).filter(l => l.tEnd);
+      // 只统计「房东/平台导致结束」的租约；our_kill（我们自己退的）是删失样本，不能算失败
+      const done = (ls || []).filter(l => l.tEnd && !isOurKill(l));
       if (!done.length) return null;
       const ok = done.filter(l => (l.tEnd - l.tRent) / 60000 >= minLife).length;
       return +((ok + 0.5) / (done.length + 1)).toFixed(2);
@@ -2357,6 +2378,46 @@ export class Engine {
     this.log('warn', msg);
   }
 
+  // 租用登记（成功路径与"假阴性但已落地"共用）：managed + 台账 + episode + 日志
+  _adoptRent(id, offer, def, poolIds, by) {
+    id = String(id);
+    delete (this.st.rentLock || {})[String(offer.machineId ?? offer.id)];
+    this.st.managed[id] = {
+      offerId: offer.id, machineId: offer.machineId, gpuName: offer.gpuName, numGpus: offer.numGpus,
+      bid: offer.spot ? offer.dph : null, dphBase: offer.dph,
+      expectedTh: offer.th, rentedAt: Date.now(), dph: offer.dph, belowSince: null, inetDown: offer.inetDown ?? null,
+      spot: !!offer.spot, listDph: offer.listDph ?? null,
+      sv: SCRIPT_VERSION, pools: poolIds, pool: def, mode: this.cfg.launchMode === 'args' ? 'args' : 'ssh',
+    };
+    {
+      const l = this.leaseOf(id, this.st.managed[id], { geolocation: offer.geolocation, host_id: offer.hostId ?? null });
+      l.geo ||= offer.geolocation || '';
+      l.pool = def;
+      const ep = (this.st.windowEpisodes || []).find(e => !e.endedAt);
+      if (ep && !ep.rents.includes(id)) ep.rents.push(id);
+    }
+    this.save();
+    if (by === 'auto') { this.rentTimes.push(Date.now()); this.save(); }
+    const ratio = offer.spot && offer.revenueHr > 0 ? `（出价/收入 ${(offer.dph / offer.revenueHr * 100).toFixed(0)}%）` : '';
+    const line = this.minThPer01;
+    const tp = this.thPer01Of(offer);
+    const lineTxt = line && tp ? `｜${Math.round(tp).toLocaleString('en-US')} TH/$0.1h，今日线 ${Math.round(line)}，${tp >= line ? '过线' : '不过线'}` : '';
+    const tag = by === 'auto' ? '自动' : '手动';
+    this.log('success', `${tag}租用 ${offer.numGpus}×${offer.gpuName}（实例 ${id}）${offer.spot ? '竞价出价' : ''}$${offer.dph.toFixed(4)}/h${ratio}，挖 ${poolName(def)}，预计收益率 ${offer.roi == null ? '—（force 手抄单）' : offer.roi.toFixed(1) + '%'}${lineTxt}`);
+    setTimeout(() => this.refreshVast(), 3000);
+    return id;
+  }
+
+  // 「这一单到底有没有落地」：按 machine_id 核对实例列表（只读，不吃搜索额度）
+  async verifyRentLanded(offer, since) {
+    if (offer.machineId == null) return null;
+    try {
+      const list = await this.vast.instances();
+      return list.find(i => String(i.machine_id) === String(offer.machineId)
+        && (!i.start_date || i.start_date * 1000 >= since - 5 * MIN)) || null;
+    } catch { return null; }
+  }
+
   async rent(offer, by = 'manual') {
     const why = this.preflight().filter(w => by === 'auto' || !w.includes('行情'));
     if (why.length) throw new Error(why.join('、'));
@@ -2383,6 +2444,24 @@ export class Engine {
     offer.used = true;
     this.lastRentAt = Date.now();
     const tag = by === 'auto' ? '自动' : '手动';
+    // 下单假阴性防护 A：同一台机器 10 分钟内只允许下一次单。
+    // vast 在超时/5xx/no_such_ask 时可能"其实已经下单成功"，按失败重试就会双租双计费
+    // （2026-11-02 实测：报"被别人租走"的 58753840 其实已在跑）。要先核对实例列表才允许再来一次。
+    const key = String(offer.machineId ?? offer.id);
+    const lock = (this.st.rentLock ||= {})[key];
+    // 锁只拦「自动重试」：手动/手抄单是人刚核对过才下的，不该被自动节流挡住
+    if (by === 'auto' && lock && Date.now() - lock < 10 * MIN) {
+      // 10 分钟内第二次自动下单同一台 = 它反复"租不到"（可能一挂出来就被抢）：直接屏蔽 2 小时，
+      // 既避免盲目重试，也保留旧的「反复租不到」语义。
+      if (offer.machineId) {
+        this.st.blacklist[offer.machineId] = { until: Date.now() + 2 * 60 * MIN, reason: '反复租不到' };
+        delete (this.st.rentLock || {})[key];
+        this.save();
+        this.log('info', `${offer.numGpus}×${offer.gpuName}（机器 ${offer.machineId}）反复出现在列表里却租不到，屏蔽 2 小时`);
+      }
+      throw new Error(`机器 ${key} 10 分钟前下过单且核实未落地（${new Date(lock).toISOString()}），先核对实例列表再重试`);
+    }
+    const t0 = Date.now();
     try {
       const r = await this.vast.rent(offer.id, {
         image: this.cfg.image, disk: this.cfg.disk, label: this.rigLabel(offer.gpuName, def), onstart,
@@ -2390,34 +2469,22 @@ export class Engine {
         price: offer.spot ? offer.bid : null,
       });
       if (!r?.success || !r.new_contract) throw new Error(r?.msg || r?.error || JSON.stringify(r).slice(0, 160));
-      const id = String(r.new_contract);
-      this.st.managed[id] = {
-        offerId: offer.id, machineId: offer.machineId, gpuName: offer.gpuName, numGpus: offer.numGpus,
-        bid: offer.spot ? offer.dph : null, dphBase: offer.dph,
-        expectedTh: offer.th, rentedAt: Date.now(), dph: offer.dph, belowSince: null, inetDown: offer.inetDown ?? null,
-        spot: !!offer.spot, listDph: offer.listDph ?? null,
-        sv: SCRIPT_VERSION, pools: poolIds, pool: def, mode: this.cfg.launchMode === 'args' ? 'args' : 'ssh',
-      };
-      // 台账从下单这一刻开始记：t_rent 必须是我们真正付钱的起点，不是部署成功那刻
-      {
-        const l = this.leaseOf(id, this.st.managed[id], { geolocation: offer.geolocation, host_id: offer.hostId ?? null });
-        l.geo ||= offer.geolocation || '';
-        l.pool = def;
-        // 窗口 episode 记账：这次租用是窗口期抓到的（M2.1 的捕获率分母在这里）
-        const ep = (this.st.windowEpisodes || []).find(e => !e.endedAt);
-        if (ep && !ep.rents.includes(id)) ep.rents.push(id);
-      }
-      this.save();
-      if (by === 'auto') { this.rentTimes.push(Date.now()); this.save(); }
-      // 出价/收入比要进日志：spot 的"清算比例"就是靠这批样本的中位数算出来的
-      const ratio = offer.spot && offer.revenueHr > 0 ? `（出价/收入 ${(offer.dph / offer.revenueHr * 100).toFixed(0)}%）` : '';
-      const line = this.minThPer01;
-      const tp = this.thPer01Of(offer);
-      const lineTxt = line && tp ? `｜${Math.round(tp).toLocaleString('en-US')} TH/$0.1h，今日线 ${Math.round(line)}，${tp >= line ? '过线' : '不过线'}` : '';
-      this.log('success', `${tag}租用 ${offer.numGpus}×${offer.gpuName}（实例 ${id}）${offer.spot ? '竞价出价' : ''}$${offer.dph.toFixed(4)}/h${ratio}，挖 ${poolName(def)}，预计收益率 ${offer.roi == null ? '—（force 手抄单）' : offer.roi.toFixed(1) + '%'}${lineTxt}`);
-      setTimeout(() => this.refreshVast(), 3000);
-      return id;
+      return this._adoptRent(String(r.new_contract), offer, def, poolIds, by);
     } catch (e) {
+      // 下单假阴性防护 B：任何"失败"都先按 machine_id 核对实例列表。
+      // 平台侧已经建了实例 = 实际下单成功，必须按成功登记，绝不重试。
+      const landed = await this.verifyRentLanded(offer, t0);
+      if (landed) {
+        this.log('warn', `下单返回失败（${String(e.message).slice(0, 70)}），但实例 ${landed.id} 已在平台侧存在（机器 ${offer.machineId}）→ 按成功处理，不重试`);
+        delete (this.st.rentLock || {})[key];
+        return this._adoptRent(String(landed.id), offer, def, poolIds, by);
+      }
+      // 核实确实没落地：给这台机器上 10 分钟锁，避免"失败→立刻重试→再失败"的拉锯。
+      // 429 例外：那是请求频率问题、已经有全局 5 分钟退避，不占用机器锁（否则测试/重试都会被挡）。
+      if (e.status !== 429) {
+        (this.st.rentLock ||= {})[key] = Date.now();
+        this.save();
+      }
       // no_such_ask / not available = 这台机器在扫描后被别人抢先租走了，不是机器的问题，不拉黑
       if (/no_such_ask|not available|unavailable/i.test(e.message)) {
         // 报价被抢走：记进寿命统计（gone = 消失时刻），而不是只从列表里删掉
@@ -2493,8 +2560,13 @@ export class Engine {
     const maxRaises = Number.isFinite(Number(this.cfg.maxBidRaises)) ? Number(this.cfg.maxBidRaises) : 0;
     // 刚租下还没出算力时 revenueHr=0，用"预期收入"算上限，否则永远无法改价
     const rev = Math.max(Number(x.revenueHr) || 0, Number(x.expRevenueHr) || 0);
-    const upper = rev / (1 + this.cfg.targetProfitPct / 100);
-    const cur = Number(x.dph) || 0;
+    // 存储费要单独扣：x.dph 是「出价 + 存储」的实付总价，而收入上限只按算力算。
+    // 拿总价当出价基准会把存储也算成"可涨价的空间"，任何 10% 加价都会越过 20% 上限 → 追价永远不成立。
+    const upperTotal = rev / (1 + this.cfg.targetProfitPct / 100);
+    const curBidPrice = Number(m.bid) || Number(x.dph) || 0;
+    const storageHr = Math.max(0, (Number(x.dph) || 0) - curBidPrice);
+    const upper = Math.max(0, upperTotal - storageHr);
+    const cur = curBidPrice;
     const target = Math.max(cur * 1.1, Number(x.minBid || 0) * 1.1);
     const viable = upper > 0 && target > cur && target <= upper;
     // 即使不追价也把「如果追会出什么价」算出来记下：以后有对手价位数据可以回放，
@@ -2736,7 +2808,7 @@ export class Engine {
     return (err || prl || '').slice(0, 160);
   }
 
-  async destroy(id, reason, blacklistMin = 0) {
+  async destroy(id, reason, blacklistMin = 0, code = null) {
     id = String(id);
     if (this.busy.has(id)) return;
     this.busy.add(id);
@@ -2745,7 +2817,7 @@ export class Engine {
       await this.vast.destroy(id);
       if (blacklistMin && inst?.machine_id) this.st.blacklist[inst.machine_id] = { until: Date.now() + blacklistMin * MIN, reason };
       // 台账定终局（要在删 managed 之前：租约里有出价/份额等细节）
-      const closed = this.closeLeaseFor(id, { reason });
+      const closed = this.closeLeaseFor(id, { reason, code });
       // 房东收回（不是价格问题）→ 计入房东统计，必要时拉黑整个房东的已知机器
       if (closed && closed.endReason === 'host_reclaim') this.recordHostReclaim(closed, inst);
       delete this.st.managed[id];
@@ -2795,7 +2867,7 @@ export class Engine {
     // 这些是后加的键：不注册校验就会被 patch 静默忽略（2026-10-29 实测 anonCruiseIntervalMin 改了没生效）
     num('anonCruiseIntervalMin', 1, 120); num('anonCruiseRows', 20, 200); num('anonBackoffMin', 1, 120);
     num('windowScanIntervalSec', 30, 600); num('netDrop72hPct', 5, 90);
-    num('survivalMinLifeMin', 5, 240); num('deployCostMin', 0, 30); num('pSurviveDefault', 0, 1); num('l1ModelCap', 0.5, 2);
+    num('survivalMinLifeMin', 5, 240); num('noShareKillMin', 10, 120); num('deployCostMin', 0, 30); num('pSurviveDefault', 0, 1); num('l1ModelCap', 0.5, 2);
     if (patch.venueGuard !== undefined) {
       const v = patch.venueGuard;
       if (v === null) next.venueGuard = null;

@@ -277,7 +277,8 @@ ok(snap.market.nockPerThDay > 0 && snap.account.nockPending === 0.0295, `面板�
   ok(rents.length === nOff, '重新打开续航保护 → 停止新租');
 
   // 部署计时：租下 → 容器 running → 出算力
-  const id = String(9500 + 1);
+  // 别写死实例 id：mock 的 contract id 是自增的，取"最近租下的那台"更稳
+  const id = Object.keys(e5.st.managed).sort((a, b) => Number(b) - Number(a))[0];
   for (const k of Object.keys(e5.st.managed)) if (k !== id) delete e5.st.managed[k];
   const m = e5.st.managed[id];
   m.rentedAt = Date.now() - 7 * MIN;

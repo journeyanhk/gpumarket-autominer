@@ -114,6 +114,7 @@ export const DEFAULT_CONFIG = {
   stopLossMinutes: 30,      // 跌破止损持续多久才退租
   bootTimeoutMinutes: 20,   // 租下（或重启）后多久还没算力就判定部署失败并退租
   minerStartTimeoutMinutes: 8, // 机器开机后多久矿工还没上线就判定失败（正常不到 1 分钟）
+  noShareKillMin: 25,       // 矿工在跑但零 accepted share 多久就退租（钱包错/矿池拒/算法不匹配）
   hashLowPct: 80,           // 实测算力低于预期的这个百分比就标为异常
   minReliability: 0.95,
   minInetDown: 200,         // 下行带宽太低的机器拉镜像要十几分钟以上

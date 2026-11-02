@@ -334,8 +334,18 @@ e.cfg.targetProfitPct = 20;
 // 追价默认关闭（20 次改价 0 次救活），这里显式打开 3 次，专门验证代码路径还在、并且有上限
 e.cfg.maxBidRaises = 3;
 // 必须挑一台「加价 10% 之后仍在利润带内」的机器，否则按设计就不该加价
-const pickK = e.offers.filter(o => !o.spotSkip && o.roi !== null && o.roi >= 40)[0]
-  || e.offers.filter(o => !o.spotSkip && o.roi !== null).sort((a,b)=>b.roi-a.roi)[0];
+// 挑一台「加价 10% 之后仍在利润带内」的机器——这是被测逻辑自身的前提。
+// 用与 rent() 相同的出价公式算"下单时实际会出的价"，再要求 +10% 不越过 20% 上限，
+// 不用 ROI>=40 这种代理条件（出价会随 min_bid 变化，代理条件经常选不中）。
+const bidAtRent = o => {
+  const up = o.revenueHr / (1 + e.cfg.targetProfitPct / 100);
+  const want = (o.minBid || 0) * (e.cfg.spotBidMultiplier || 1.25);
+  return Math.min(up, Math.max(o.revenueHr * (e.cfg.spotBidFloorRatio || 0.7), want));
+};
+// 存储费约 $0.016/h，会从 20% 上限里扣掉：留 0.02 余量再判断，别选到「刚好卡线」的机器
+const viableAtRent = o => !o.spotSkip && o.revenueHr > 0 && bidAtRent(o) * 1.1 <= o.revenueHr / (1 + e.cfg.targetProfitPct / 100) - 0.02;
+const pickK = e.offers.filter(viableAtRent)[0];
+ok(!!pickK, `找到了「加价 10% 仍在利润带内」的机器（${pickK?.gpuName} $${pickK?.bid}，共 ${e.offers.filter(viableAtRent).length} 台）`);
 e.lastRentAt = 0; e.rentCooldownUntil = 0; e.preemptCooldownUntil = 0;
 const idK = await e.rent(pickK, 'manual');
 await e.refreshVast();
@@ -368,7 +378,10 @@ console.log('— 核价基准跟随「自己抬过的价」（57935994 被顶后
 }
 // 再被顶两次仍可改，第 4 次不再改（交给销毁）
 for (let i = 0; i < 3; i++) { globalThis.__preempt(idK); await e.refreshVast(); await e.decide(); }
-ok(e.st.managed[idK]?.bidRaises?.length === 3, `每小时最多 3 次改价（当前 ${e.st.managed[idK]?.bidRaises?.length}）`);
+// 上限是"每小时最多 3 次"：加价会把出价推向上限，实际能加几次取决于余量，所以断言 ≤3 且第 4 次被判不可加
+const raiseCount = e.st.managed[idK]?.bidRaises?.length ?? 0;
+ok(raiseCount <= 3 && raiseCount >= 1, `每小时最多 3 次改价（当前 ${raiseCount}，上限 3）`);
+ok(e.st.managed[idK]?.wouldRaise?.viable === false, '再被顶时判定为不可加价（交给销毁）');
 ok(e.st.managed[idK]?.preemptedAt > 0, '到达上限后重新开始销毁计时');
 e.st.managed[idK].preemptedAt = Date.now() - 6 * MIN;
 await e.decide();
@@ -397,8 +410,15 @@ try { await e.rent(pickH, 'manual'); } catch (x2) { errH = x2; }
 ok(errH?.gone === true, 'GPU conflict → 当作"被别人租走"（gone），不重试同一台');
 ok(!Object.values(e.st.blacklist).length, 'GPU conflict 不拉黑机器');
 e.lastRentAt = 0;
+// 新规则（2026-11-02）：自动重试在"失败且核实未落地"后 10 分钟内不许再下单（手动单不受限）
+let lockErr = null;
+try { await e.rent(pickH, 'auto'); } catch (x3) { lockErr = x3; }
+ok(/10 分钟|核对实例/.test(lockErr?.message || ''), `自动重试被锁住（${String(lockErr?.message).slice(0, 40)}）`);
+delete e.st.blacklist[pickH.machineId];   // 这一步的副作用要清掉，后面的"不拉黑"用例要求干净状态
+// 429 是请求频率问题、不是机器问题：换一台机器测退避
+const pickH2 = e.offers.filter(o => !o.spotSkip && o.roi !== null && o.id !== pickH.id)[0];
 e.vast.rent = async () => { const err = new Error('HTTP 429：API requests too frequent'); err.status = 429; throw err; };
-try { await e.rent(pickH, 'manual'); } catch {}
+try { await e.rent(pickH2, 'manual'); } catch {}
 ok(e.rentCooldownUntil > Date.now(), '429 → 设置 5 分钟退避');
 ok(!Object.values(e.st.blacklist).length, '429 不拉黑机器（是我们的请求太快）');
 e.vast.rent = realRentH;

@@ -3564,27 +3564,38 @@ export class Engine {
         const rows = [];
         const byModel = {};
         for (const o of this.offers || []) (byModel[gpuKey(o.gpuName)] ||= []).push(o);
+        const med = a => { const v = [...a].sort((x, y) => x - y); if (!v.length) return null; const m = Math.floor(v.length / 2); return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2; };
+        const dens6 = this.usdHsHr6h * 1e12 * 24;
+        const p = Number(this.cfg.pSurviveDefault ?? 0.5);
+        const deployPct = (Number(this.cfg.deployCostMin) || 2) / 60 * 100;
+        const roiReq = p > 0 ? (Number(this.cfg.targetProfitPct ?? 20) + deployPct) / p : Number(this.cfg.targetProfitPct ?? 20);
         for (const g of this.table || []) {
-          const list = byModel[g.key] || [];
+          // 价格列必须用**过滤后的 min_bid**（不是 dph：dph 是我们的出价/挂牌，min_bid 才是入场价），
+          // 并给出中位价；min < 0.5×中位 直接标 suspect（假挂牌特征：4090 $0.007、三型号同价 $0.053）。
+          const list = (byModel[g.key] || []).filter(o => !o.floorSkip && !o.insaneSkip && Number(o.minBid) > 0);
           if (!list.length) continue;
-          const cheapest = list.reduce((a, o) => (o.dph < a.dph ? o : a), list[0]);
-          const per = cheapest.dph / Math.max(1, Number(cheapest.numGpus) || 1);
+          const bids = list.map(o => Number(o.minBid) / Math.max(1, Number(o.numGpus) || 1));
+          const minBid = +Math.min(...bids).toFixed(4);
+          const medBid = +med(bids).toFixed(4);
+          const suspect = medBid > 0 && minBid < medBid * 0.5;
+          const per = suspect ? medBid : minBid;          // 幽灵价不参与估价
           const band = this.expectedDeliveredTh(g.name, per);
-          const dens = this.usdHsHr6h * 1e12 * 24;
-          // 达标密度必须用**期望 ROI 门槛**（含 P 与部署成本），不能只用名义 20%：
-          //   roiReq = (target + deployPct) / P；陌生人 P=0.5、deploy=3.33% → ×1.467
-          const p = Number(this.cfg.pSurviveDefault ?? 0.5);
-          const deployPct = (Number(this.cfg.deployCostMin) || 2) / 60 * 100;
-          const roiReq = p > 0 ? (Number(this.cfg.targetProfitPct ?? 20) + deployPct) / p : Number(this.cfg.targetProfitPct ?? 20);
           const need = band.th > 0 ? +(per * (1 + roiReq / 100) * 24 / band.th).toFixed(4) : null;
           rows.push({
-            model: g.name, pricePerGpu: +per.toFixed(4), th: band.th, confidence: band.confidence || '—', n: band.n ?? 0,
-            band: band.src, needDensity: need, nowDensity: +dens.toFixed(4),
-            gapPct: need && dens > 0 ? +((need / dens - 1) * 100).toFixed(0) : null,
+            model: g.name, minBid, medianBid: medBid, suspect, pricePerGpu: per,
+            th: band.th, confidence: band.confidence || '—', n: band.n ?? 0, band: band.src,
+            needDensity: need, nowDensity: +dens6.toFixed(4),
+            gapPct: need && dens6 > 0 ? +((need / dens6 - 1) * 100).toFixed(0) : null,
           });
         }
-        return rows.sort((a, b) => (a.needDensity ?? 9e9) - (b.needDensity ?? 9e9));
+        // 排序：非 suspect 优先，再按差距
+        return rows.sort((a, b) => (a.suspect ? 1 : 0) - (b.suspect ? 1 : 0) || (a.needDensity ?? 9e9) - (b.needDensity ?? 9e9));
       })(),
+      pricingAsof: {
+        densityAt: this.market.updatedAt || null, densitySrc: this.cfg.revenueSource || 'min',
+        quotesAt: this.offerStats.scannedAt || null, targetProfitPct: Number(this.cfg.targetProfitPct ?? 20),
+        roiReqPct: +(((Number(this.cfg.targetProfitPct ?? 20) + (Number(this.cfg.deployCostMin) || 2) / 60 * 100) / Number(this.cfg.pSurviveDefault ?? 0.5))).toFixed(1),
+      },
       // 价位分带：l1Model（全体中位，估收入）vs l1RealizedCheap（便宜带中位，决定能不能租）
       l1Split: Object.fromEntries(Object.keys(this.st.l1ByModel || {}).map(k => [k, this.l1Split(k)])),
       l1Host: Object.fromEntries(Object.entries(this.st.l1ByHost || {}).map(([k, v]) => [k, { n: v.n, median: v.median, machines: Object.entries(this.st.machineHost || {}).filter(([, h]) => String(h) === String(k)).map(([mid]) => mid) }])),

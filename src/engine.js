@@ -245,7 +245,7 @@ export class Engine {
         return { th, src: cheapSide ? 'cheap-band' : 'premium-band', n: band.length, spec, sane: spec > 0 ? Math.abs(th / spec - 1) <= 0.4 : null };
       }
     }
-    if (pairs.length >= 3) {
+    if (pairs.length >= 2) {   // 两条独立租约就比规格表可信（规格只做校验）
       const th = +med(pairs).toFixed(1);
       return { th, src: 'all-samples', n: pairs.length, spec, sane: spec > 0 ? Math.abs(th / spec - 1) <= 0.4 : null };
     }

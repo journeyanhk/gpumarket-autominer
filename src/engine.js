@@ -2367,33 +2367,53 @@ export class Engine {
   // 补一轮回填（2026-11-03 v2）：上一次只写了型号 realized，缺经验基线与房东口径。
   // 这里只补 deliveredTh（型号交付算力样本）与 l1ByHost.realized，不动型号 realized。
   backfillDeliveredTh() {
-    if (this.st.deliveredThBackfilledAt) return { done: false };
-    let kept = 0, dropped = 0;
+    if (this.st.deliveredThBackfillV === 2) return { done: false };   // v2：按经验基线重算 realized
+    const rows = [];
     for (const l of this.leases) {
       if (!l.tEnd || !l.tFirstShare) continue;
       const secs = (l.tEnd - l.tFirstShare) / 1000;
       const sh = Number(l.sharesAccepted), diff = Number(l.difficulty);
-      if (!(secs > 300 && sh > 0 && diff > 0)) { dropped++; continue; }
+      if (!(secs > 300 && sh > 0 && diff > 0)) continue;
       const nGpu = Math.max(1, Number(l.numGpus) || 1);
-      const derivedTh = sh * diff * 4294967296 / secs / 1e12;
-      this.recordDeliveredTh(l.gpu, derivedTh / nGpu);
-      const baseTh = this.baseThOf(l.gpu).th * nGpu;
-      const realized = baseTh > 0 ? derivedTh / baseTh : null;
-      if (realized != null && realized > 0.15 && realized < 2 && l.hostId != null) {
-        const hr = ((this.st.l1ByHost ||= {})[String(l.hostId)] ||= { samples: [] });
-        const v = +realized.toFixed(3);
-        if (!hr.samples.includes(v) || hr.lastLease !== String(l.id)) {
-          hr.samples.push(v); hr.lastLease = String(l.id);
-          if (hr.samples.length > 20) hr.samples.splice(0, hr.samples.length - 20);
-          hr.n = hr.samples.length;
-        }
-      }
-      kept++;
+      const deliveredTh = sh * diff * 4294967296 / secs / 1e12 / nGpu;
+      if (!(deliveredTh > 5 && deliveredTh < 800)) continue;
+      this.recordDeliveredTh(l.gpu, deliveredTh);
+      rows.push({ l, deliveredTh });
     }
-    this.st.deliveredThBackfilledAt = Date.now();
+    // 第二遍：realized 重算为「相对经验基线」的偏差（不能用规格表当分母——否则两把折扣叠乘，
+    // 2026-11-03 实测过：3080 交付 45 TH 被算成 20 TH）。
+    const byModel = {};
+    for (const r of rows) (byModel[gpuKey(r.l.gpu)] ||= []).push(r);
+    let kept = 0;
+    for (const [k, list] of Object.entries(byModel)) {
+      const base = this.baseThOf(list[0].l.gpu).th;
+      if (!(base > 0)) continue;
+      const rec = ((this.st.l1ByModel ||= {})[k] ||= { samples: [] });
+      rec.samples = [];
+      rec.prices = [];
+      for (const { l, deliveredTh } of list.slice(-20)) {
+        const v = +(deliveredTh / base).toFixed(3);
+        if (!(v > 0.15 && v < 2)) continue;
+        rec.samples.push(v);
+        rec.prices.push(Number(l.dphTotalActual ?? l.bidFinal ?? 0) || null);
+        rec.lastLease = String(l.id);
+        if (l.hostId != null && v > 0.15 && v < 2) {
+          const hr = ((this.st.l1ByHost ||= {})[String(l.hostId)] ||= { samples: [] });
+          if (!hr.samples.includes(v) || hr.lastLease !== String(l.id)) {
+            hr.samples.push(v); hr.lastLease = String(l.id);
+            if (hr.samples.length > 20) hr.samples.splice(0, hr.samples.length - 20);
+            hr.n = hr.samples.length;
+          }
+        }
+        kept++;
+      }
+      rec.n = rec.samples.length;
+      rec.median = null;
+    }
+    this.st.deliveredThBackfillV = 2;
     this.save();
-    if (kept) this.log('info', `经验基线/房东 realized 补回填：${kept} 条租约（丢弃 ${dropped}）`);
-    return { done: true, kept, dropped };
+    if (kept) this.log('info', `经验基线回填：${kept} 条租约（realized 已按经验基线重算）`);
+    return { done: true, kept };
   }
 
   // 从台账回填 l1Realized（2026-11-03 用户要求）：旧样本只有 fidelity，但每条租约都留着

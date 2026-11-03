@@ -2514,7 +2514,7 @@ export class Engine {
   // 补一轮回填（2026-11-03 v2）：上一次只写了型号 realized，缺经验基线与房东口径。
   // 这里只补 deliveredTh（型号交付算力样本）与 l1ByHost.realized，不动型号 realized。
   backfillDeliveredTh() {
-    if (this.st.deliveredThBackfillV === 5) return { done: false };   // v5：按交付/规格推断 frac
+    if (this.st.deliveredThBackfillV === 6) return { done: false };   // v6：按交付 TH（不是 realized）推断 frac
     this.st.deliveredTh = {};   // 全量重建：之前的 v1/v2/v3 反复追加把同一条租约记了 3 次
     const rows = [];
     for (const l of this.leases) {
@@ -2541,12 +2541,21 @@ export class Engine {
       const rec = ((this.st.l1ByModel ||= {})[k] ||= { samples: [] });
       rec.samples = [];
       rec.prices = [];
+      // frac 推断（2026-11-03，零成本救回历史样本）：交付算力 ≥ 0.85×规格 ⇒ 必然是整卡。
+      // 理由：半卡最多只有整卡能力的一半，2×规格（2080 Ti ≈157 TH）物理上不存在。
+      // 注意：比较的是**交付 TH**，不是 realized（那是相对基线的比值，之前拿它跟规格比，什么也没推断出来）。
+      const specRef = this.thFor(list[0].l.gpu)?.effective || 0;
       for (const { l, deliveredTh } of list.slice(-20)) {
         const v = +(deliveredTh / base).toFixed(3);
         if (!(v > 0.15 && v < 2)) continue;
+        const idx = rec.samples.length;
         rec.samples.push(v);
         rec.prices.push(Number(l.dphTotalActual ?? l.bidFinal ?? 0) || null);
         rec.lastLease = String(l.id);
+        const q = rec.qual?.[idx];
+        if (q && q.frac == null && specRef > 0 && deliveredTh >= specRef * 0.85) {
+          q.frac = 1; q.fracInferred = true; q.fracWhy = 'delivered>=0.85*spec';
+        }
         if (l.hostId != null && v > 0.15 && v < 2) {
           const hr = ((this.st.l1ByHost ||= {})[String(l.hostId)] ||= { samples: [] });
           if (!hr.samples.includes(v) || hr.lastLease !== String(l.id)) {
@@ -2559,21 +2568,9 @@ export class Engine {
       }
       rec.n = rec.samples.length;
       rec.median = null;
-      // frac 推断（2026-11-03，零成本救回历史样本）：
-      // 台账与日志里都没有 gpu_frac，但「交付算力 ÷ 规格」给了硬约束——
-      // 半卡最多只有整卡能力的一半，2 × 规格 ≈ 157 TH 对 2080 Ti 不可能。
-      // 判据：交付 ≥ 0.85 × 规格 ⇒ 必然是整卡（frac=1，标 fracInferred）。
-      const spec = this.thFor(list[0].l.gpu)?.effective || 0;
-      if (spec > 0) {
-        for (let i = 0; i < rec.samples.length; i++) {
-          const q = rec.qual?.[i];
-          if (!q || q.frac != null) continue;
-          if (rec.samples[i] >= spec * 0.85) { q.frac = 1; q.fracInferred = true; q.fracWhy = 'delivered>=0.85*spec'; }
-        }
-        this.save();
-      }
+      this.save();
     }
-    this.st.deliveredThBackfillV = 5;
+    this.st.deliveredThBackfillV = 6;
     this.save();
     if (kept) this.log('info', `经验基线回填：${kept} 条租约（realized 已按经验基线重算）`);
     return { done: true, kept };

@@ -154,7 +154,9 @@ console.log('— 端到端：真实 bash + 真包（review #8）');
 console.log('— 引擎在清单不可用时不租');
 const { Engine } = await import(U('src/engine.js'));
 const e = new Engine();
-e.cfg.uncalibratedFactor = 1;   // 测试里关掉「未校准型号 ×0.6」的保守系数
+// 不打生产参数的主意：给每个型号注入 5 条健康交付样本（= 规格算力、fid 1.0、存活 90 分钟），
+// 让定价走真实的 high-confidence 路径；未校准兜底仍保持生产值 0.6
+for (const g of e.table) for (let i = 0; i < 5; i++) e.recordDeliveredTh(g.name, g.effective, 0.12, { fid: 1.0, mins: 90 });
 e.log = () => {};
 e.minerManifest = null;
 e.minerError = '模拟：清单损坏';

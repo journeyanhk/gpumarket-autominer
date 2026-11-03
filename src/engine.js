@@ -214,14 +214,27 @@ export class Engine {
     return { th: spec, src: 'spec', n: s.length, spec };
   }
 
-  recordDeliveredTh(gpuName, thPerGpu, pricePerGpu = null) {
+  recordDeliveredTh(gpuName, thPerGpu, pricePerGpu = null, quality = null) {
     if (!(thPerGpu > 5 && thPerGpu < 800)) return;
     const k = gpuKey(gpuName);
-    const rec = ((this.st.deliveredTh ||= {})[k] ||= { samples: [], prices: [] });
+    const rec = ((this.st.deliveredTh ||= {})[k] ||= { samples: [], prices: [], qual: [] });
     rec.samples.push(+thPerGpu.toFixed(1));
     (rec.prices ||= []).push(Number(pricePerGpu) > 0 ? +Number(pricePerGpu).toFixed(4) : null);
-    if (rec.samples.length > 20) { rec.samples.splice(0, rec.samples.length - 20); rec.prices.splice(0, rec.prices.length - 20); }
+    // quality: {fid, mins} —— 只有"机器健康"的样本才能压低贵档估计（2026-11-03 用户要求）
+    (rec.qual ||= []).push(quality && Number.isFinite(Number(quality.fid))
+      ? { fid: +Number(quality.fid).toFixed(2), mins: Math.round(Number(quality.mins) || 0) } : null);
+    if (rec.samples.length > 20) {
+      rec.samples.splice(0, rec.samples.length - 20);
+      rec.prices.splice(0, rec.prices.length - 20);
+      rec.qual.splice(0, rec.qual.length - 20);
+    }
     rec.n = rec.samples.length;
+  }
+
+  // 样本是否"机器健康"：保真度 ≥0.7（自报没离谱）且存活 ≥60 分钟
+  _healthySample(q) {
+    if (!q) return false;
+    return q.fid >= 0.7 && q.mins >= 60;
   }
 
   // 按价格带的预期交付算力（2026-11-03 用户改）：**唯一**的定价输入。
@@ -237,24 +250,45 @@ export class Engine {
     const med = arr => { const a = arr.map(x => x.v).sort((x, y) => x - y); const m = Math.floor(a.length / 2); return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
     const sane = th => (spec > 0 ? Math.abs(th / spec - 1) <= 0.4 : null);
     const priced = pairs.filter(x => x.p > 0).sort((a, b) => a.p - b.p);
-    // 置信度（2026-11-03 用户要求）：用 2 个样本冒充"价格带估计"在统计上等于没估计。
-    //   >=5 条 → high（带内中位）
-    //   2~4 条 → low（带内中位 ×0.85 安全系数）
-    //   <2 条 → 退型号中位（>=5 条），否则 规格×0.6 并标 uncalibrated
+    const qual = rec?.qual || [];
+    const healthyOf = arr => arr.filter(x => this._healthySample(qual[(rec.samples || []).indexOf(x.v)]));
+    // 置信度（2026-11-03）：>=5 条 high；2~4 条 low（×0.85）；<2 条退型号中位或规格×0.6（uncalibrated）
+    // 单调性（同日补）：贵档不得低于便宜档——用保序（取 max）而不是各自独立取中位；
+    // 且**烂机器样本不能定义贵档上限**：贵档只认"健康样本"（fid>=0.7 且存活>=60min）。
     if (priced.length >= 2 && Number(pricePerGpu) > 0) {
       const pMed = priced[Math.floor(priced.length / 2)].p;
       const cheapSide = Number(pricePerGpu) <= pMed;
-      const band = cheapSide ? priced.filter(x => x.p <= pMed) : priced.filter(x => x.p > pMed);
-      if (band.length >= 2) {
-        const raw = +med(band).toFixed(1);
-        const high = band.length >= 5;
+      const cheapArr = priced.filter(x => x.p <= pMed);
+      const premArr = priced.filter(x => x.p > pMed);
+      const band = cheapSide ? cheapArr : premArr;
+      let useArr = band;
+      if (!cheapSide) {
+        const healthyPrem = healthyOf(premArr);
+        useArr = healthyPrem.length >= 2 ? healthyPrem : [];      // 贵档没有健康样本 → 不估
+      }
+      if (useArr.length >= 2) {
+        const raw0 = med(useArr);
+        const cheapMed = cheapArr.length ? med(cheapArr) : 0;
+        const raw = +Math.max(raw0, cheapMed).toFixed(1);         // 单调：贵档 >= 便宜档
+        const high = useArr.length >= 5;
         const th = high ? raw : +(raw * 0.85).toFixed(1);
-        return { th, raw, src: cheapSide ? 'cheap-band' : 'premium-band', confidence: high ? 'high' : 'low', n: band.length, spec, sane: sane(th) };
+        return { th, raw, src: cheapSide ? 'cheap-band' : 'premium-band', confidence: high ? 'high' : 'low', n: useArr.length, spec, sane: sane(th) };
       }
     }
     if (pairs.length >= 5) {
       const raw = +med(pairs).toFixed(1);
       return { th: raw, raw, src: 'model-median', confidence: 'model', n: pairs.length, spec, sane: sane(raw) };
+    }
+    // 贵档没有健康样本时：不低于便宜档中位（宁可沿用便宜档，也不用烂机器把上限压低）
+    if (priced.length >= 2) {
+      const pMed = priced[Math.floor(priced.length / 2)].p;
+      const cheapArr = priced.filter(x => x.p <= pMed);
+      if (cheapArr.length >= 2) {
+        const raw = +med(cheapArr).toFixed(1);
+        const high = cheapArr.length >= 5;
+        const th = high ? raw : +(raw * 0.85).toFixed(1);
+        return { th, raw, src: 'cheap-carryover', confidence: high ? 'high' : 'low', n: cheapArr.length, spec, sane: sane(th) };
+      }
     }
     const th = +(spec * Number(this.cfg.uncalibratedFactor ?? 0.6)).toFixed(1);
     return { th, raw: th, src: 'spec', confidence: 'uncalibrated', n: pairs.length, spec, sane: null };
@@ -3524,6 +3558,28 @@ export class Engine {
       hosts: { whitelist: this.whitelistRows(), bans: this.st.hostBans || {}, unknownCap: Math.max(1, Number(this.cfg.unknownHostMaxConcurrent ?? 1)) },
       rentBlocked: this.st.rentBlocked || null,
       l1: Object.fromEntries(Object.entries(this.st.l1ByModel || {}).map(([k, v]) => [k, { n: v.n, median: v.median }])),
+      // 定价参照表（2026-11-03 用户要求）：型号 × 当前最低价 → 定价 TH / 置信度 / 达标所需密度。
+      // 规则一变就整表重算，避免把过期的"还差多少"带进判断（例：×0.85 上线后 2080 Ti 从 ×1.67 变 ×1.93）。
+      pricingTable: (() => {
+        const rows = [];
+        const byModel = {};
+        for (const o of this.offers || []) (byModel[gpuKey(o.gpuName)] ||= []).push(o);
+        for (const g of this.table || []) {
+          const list = byModel[g.key] || [];
+          if (!list.length) continue;
+          const cheapest = list.reduce((a, o) => (o.dph < a.dph ? o : a), list[0]);
+          const per = cheapest.dph / Math.max(1, Number(cheapest.numGpus) || 1);
+          const band = this.expectedDeliveredTh(g.name, per);
+          const dens = this.usdHsHr6h * 1e12 * 24;
+          const need = band.th > 0 ? +(per * (1 + this.cfg.targetProfitPct / 100) * 24 / band.th).toFixed(4) : null;
+          rows.push({
+            model: g.name, pricePerGpu: +per.toFixed(4), th: band.th, confidence: band.confidence || '—', n: band.n ?? 0,
+            band: band.src, needDensity: need, nowDensity: +dens.toFixed(4),
+            gapPct: need && dens > 0 ? +((need / dens - 1) * 100).toFixed(0) : null,
+          });
+        }
+        return rows.sort((a, b) => (a.needDensity ?? 9e9) - (b.needDensity ?? 9e9));
+      })(),
       // 价位分带：l1Model（全体中位，估收入）vs l1RealizedCheap（便宜带中位，决定能不能租）
       l1Split: Object.fromEntries(Object.keys(this.st.l1ByModel || {}).map(k => [k, this.l1Split(k)])),
       l1Host: Object.fromEntries(Object.entries(this.st.l1ByHost || {}).map(([k, v]) => [k, { n: v.n, median: v.median, machines: Object.entries(this.st.machineHost || {}).filter(([, h]) => String(h) === String(k)).map(([mid]) => mid) }])),

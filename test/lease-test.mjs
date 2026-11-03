@@ -457,6 +457,43 @@ console.log('— 从台账回填 l1Realized + 白名单老化（2026-11-03）');
   ok(e2.hostBehavior7d(300).n === 0, '7 天窗口之外的租约不参与行为判定');
 }
 
+console.log('— 置信度护栏：推断样本封顶 low / 交付<0.4x规格标 suspect（2026-11-03）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.st.deliveredTh = {};
+  const add = (th, price, q) => e.recordDeliveredTh('RTX 3080', th, price, q);
+  // 5 条全是「推断 frac」的样本 → 置信度必须封顶 low
+  for (let i = 0; i < 5; i++) add(90 + i, 0.12, { fid: 1, mins: 90, host: 1 + i, frac: 1, fracInferred: true });
+  const a = e.expectedDeliveredTh('RTX 3080', 0.12);
+  ok(a.confidence === 'low', `5 条全是推断样本 → 置信度封顶 ${a.confidence}（不能升 high）`);
+  // 再加 1 条直接测得 frac 的 → 可升 high
+  add(91, 0.12, { fid: 1, mins: 90, host: 9, frac: 1, fracInferred: false });
+  const b = e.expectedDeliveredTh('RTX 3080', 0.12);
+  ok(b.confidence === 'high', `有 1 条直接测得 → ${b.confidence}（n=${b.n}）`);
+
+  // 反向标记：交付 < 0.4x规格 → fracSuspect，且不参与整卡定价
+  const e2 = new Engine();
+  e2.log = () => {};
+  e2.st.deliveredTh = {}; delete e2.st.deliveredThBackfillV;
+  e2.leases = []; e2.st.leases = [];
+  const mk = (id, th, mins = 60) => {
+    const end = Date.now();
+    const l = newLease(id, { gpuName: 'RTX 3080', spot: true, bid: 0.1, rentedAt: end - (mins + 10) * 60e3 }, {}, end - (mins + 10) * 60e3);
+    l.tFirstShare = l.tRent + 60e3; l.tEnd = end; l.localThAvg = th; l.dphTotalActual = 0.1;
+    // 交付 30 TH（<0.4x规格 114.8）需要 shares*diff*2^32/secs = 30e12
+    const secs = mins * 60;
+    l.difficulty = 2097152; l.sharesAccepted = Math.round(30e12 * secs / (2097152 * 4294967296));
+    e2.leases.push(l);
+  };
+  mk('S1', 100);
+  e2.backfillDeliveredTh();
+  const q = (e2.st.deliveredTh.RTX3080.qual || [])[0];
+  ok(q && q.fracSuspect === true, `交付 30 TH（<0.4×规格）→ fracSuspect=${q?.fracSuspect}`);
+  const c = e2.expectedDeliveredTh('RTX 3080', 0.12);
+  ok(c.n === 0 && c.confidence === 'uncalibrated', `suspect 样本不参与整卡定价（n=${c.n}, ${c.confidence}）`);
+}
+
 console.log('— 定价不变量：唯一真源 + 回填幂等（2026-11-03 用户要求）');
 {
   const e = new Engine();

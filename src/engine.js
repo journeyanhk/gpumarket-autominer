@@ -228,6 +228,10 @@ export class Engine {
           // 可比性键（2026-11-03）：半卡的交付天然只有整卡一半，跨 frac 组取中位会把型号拉低 40%
           frac: Number(quality.frac) > 0 ? +Number(quality.frac).toFixed(3) : null,
           nGpu: Number(quality.nGpu) > 0 ? Math.round(Number(quality.nGpu)) : null,
+          // 来源标记必须一起带上（否则置信度护栏读不到 inferred/suspect）
+          ...(quality.fracInferred ? { fracInferred: true } : {}),
+          ...(quality.fracSuspect ? { fracSuspect: true } : {}),
+          ...(quality.fracWhy ? { fracWhy: quality.fracWhy } : {}),
         } : null);
     if (rec.samples.length > 20) {
       rec.samples.splice(0, rec.samples.length - 20);
@@ -252,17 +256,20 @@ export class Engine {
     const k = gpuKey(gpuName);
     const rec = (this.st.deliveredTh || {})[k];
     const spec = this.thFor(gpuName)?.effective || 0;
-    const pairs = (rec?.samples || []).map((v, i) => ({ v, p: (rec.prices || [])[i] })).filter(x => Number.isFinite(x.v) && x.v > 5);
+    // 按**索引**配对样本与质量标记（不能按值找：同型号同价会出现重复的交付值，
+    // indexOf 会全部映射到第一条，置信度护栏就读错了来源）
+    const pairs = (rec?.samples || []).map((v, i) => ({
+      v, p: (rec.prices || [])[i], q: (rec.qual || [])[i] || null,
+    })).filter(x => Number.isFinite(x.v) && x.v > 5);
     const med = arr => { const a = arr.map(x => x.v).sort((x, y) => x - y); const m = Math.floor(a.length / 2); return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
     const sane = th => (spec > 0 ? Math.abs(th / spec - 1) <= 0.4 : null);
-    const qual = rec?.qual || [];
-    const qualOf = (v) => qual[(rec.samples || []).indexOf(v)] || null;
+    const qualOf = (x) => (x && x.q) || null;
     // 可比性（2026-11-03 用户要求）：只用「整卡（frac>=0.99）」样本定价；缺 frac 的历史样本
     // 标 fracUnknown 并排除（宁可慢一点，不要脏样本——半卡会把型号中位凭空拉低 40%）。
-    const wholePairs = pairs.filter(x => { const q = qualOf(x.v); return q && Number(q.frac) >= 0.99; });
+    const wholePairs = pairs.filter(x => { const q = qualOf(x); return q && Number(q.frac) >= 0.99; });
     const unknownFrac = pairs.length - wholePairs.length;
     const priced = wholePairs.filter(x => x.p > 0).sort((a, b) => a.p - b.p);
-    const healthyOf = arr => arr.filter(x => this._healthySample(qualOf(x.v)));
+    const healthyOf = arr => arr.filter(x => this._healthySample(qualOf(x)));
     const stat = { n: wholePairs.length, unknownFrac };
     // 置信度（2026-11-03）：>=5 条 high；2~4 条 low（×0.85）；<2 条退型号中位或规格×0.6（uncalibrated）
     // 单调性（同日补）：贵档不得低于便宜档——用保序（取 max）而不是各自独立取中位；
@@ -282,15 +289,19 @@ export class Engine {
         const raw0 = med(useArr);
         const cheapMed = cheapArr.length ? med(cheapArr) : 0;
         const raw = +Math.max(raw0, cheapMed).toFixed(1);         // 单调：贵档 >= 便宜档
-        const high = useArr.length >= 5;
+        // 置信度护栏（2026-11-03 用户定）：组内只要全是 fracInferred 样本，封顶 low；
+        // 升 high 必须有 >=1 条「直接测得 frac」的样本。
+        const measured = useArr.some(x => qualOf(x)?.fracInferred !== true);
+        const high = useArr.length >= 5 && measured;
         const th = high ? raw : +(raw * 0.85).toFixed(1);
         return { th, raw, src: cheapSide ? 'cheap-band' : 'premium-band', confidence: high ? 'high' : 'low', n: useArr.length, unknownFrac: stat.unknownFrac, spec, sane: sane(th) };
       }
     }
     if (wholePairs.length >= 5) {
       // 型号中位还要「>=2 个不同 host」：否则型号画像会变成某一台机器的画像
-      const hosts = new Set(wholePairs.map(x => qualOf(x.v)?.host).filter(h => h != null).map(String));
-      if (hosts.size >= 2) {
+      const hosts = new Set(wholePairs.map(x => qualOf(x)?.host).filter(h => h != null).map(String));
+      const measured = wholePairs.some(x => qualOf(x)?.fracInferred !== true);
+      if (hosts.size >= 2 && measured) {
         const raw = +med(wholePairs).toFixed(1);
         return { th: raw, raw, src: 'model-median', confidence: 'model', n: wholePairs.length, unknownFrac: stat.unknownFrac, spec, sane: sane(raw) };
       }
@@ -2514,7 +2525,7 @@ export class Engine {
   // 补一轮回填（2026-11-03 v2）：上一次只写了型号 realized，缺经验基线与房东口径。
   // 这里只补 deliveredTh（型号交付算力样本）与 l1ByHost.realized，不动型号 realized。
   backfillDeliveredTh() {
-    if (this.st.deliveredThBackfillV === 7) return { done: false };   // v7：qual 写在 deliveredTh 里
+    if (this.st.deliveredThBackfillV === 8) return { done: false };   // v8：置信度护栏 + fracSuspect
     this.st.deliveredTh = {};   // 全量重建：之前的 v1/v2/v3 反复追加把同一条租约记了 3 次
     const rows = [];
     for (const l of this.leases) {
@@ -2555,8 +2566,14 @@ export class Engine {
         // qual 存在 deliveredTh 里（不是 l1ByModel）——之前写错对象，所以一条都没推断出来
         const drec = (this.st.deliveredTh || {})[k];
         const q = drec?.qual?.[idx];
-        if (q && q.frac == null && specRef > 0 && deliveredTh >= specRef * 0.85) {
-          q.frac = 1; q.fracInferred = true; q.fracWhy = 'delivered>=0.85*spec';
+        if (q && specRef > 0) {
+          if (q.frac == null && deliveredTh >= specRef * 0.85) {
+            q.frac = 1; q.fracInferred = true; q.fracWhy = 'delivered>=0.85*spec';
+          } else if (q.frac == null && deliveredTh < specRef * 0.4) {
+            // 反向标记（2026-11-03）：交付不到规格的 40% —— 要么是切片，要么是坏盒子。
+            // 这批样本（之前那批 45 TH 的 3080）不该参与整卡定价。
+            q.fracSuspect = true; q.fracWhy = 'delivered<0.4*spec';
+          }
         }
         if (l.hostId != null && v > 0.15 && v < 2) {
           const hr = ((this.st.l1ByHost ||= {})[String(l.hostId)] ||= { samples: [] });
@@ -2572,7 +2589,7 @@ export class Engine {
       rec.median = null;
       this.save();
     }
-    this.st.deliveredThBackfillV = 7;
+    this.st.deliveredThBackfillV = 8;
     this.save();
     if (kept) this.log('info', `经验基线回填：${kept} 条租约（realized 已按经验基线重算）`);
     return { done: true, kept };

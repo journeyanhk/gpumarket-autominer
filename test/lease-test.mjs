@@ -427,17 +427,19 @@ console.log('— L1 稳态窗口均值（不取最早、不取最新，取窗口
   e.log = () => {};
   e.st.l1ByModel = {}; e.st.l1ByHost = {}; e.l1buf = new Map();
   const t0 = Date.now() - 30 * MIN;
-  const push = (mins, r, hs) => e.noteL1('L1', { t: t0 + mins * MIN, gpu: 'RTX 3080', hostId: 1, r, hs });
+  // r = fidelity（份额÷自报），realized = 份额÷型号基线（定价用）
+  const push = (mins, r, hs, realized) => e.noteL1('L1', { t: t0 + mins * MIN, gpu: 'RTX 3080', hostId: 1, r, realized, hs });
   // 生产里 noteL1 的调用点已经过滤掉「首份份额 +10 分钟内」的爬坡样本，这里直接喂稳态段
-  for (const m of [11, 13, 15, 17, 19]) push(m, 0.9, 120); // 稳态段
-  for (const m of [21, 23, 25]) push(m, 0.45, 60);       // 衰减段（算力掉到 50%）
+  for (const m of [11, 13, 15, 17, 19]) push(m, 0.9, 120, 0.5); // 稳态段
+  for (const m of [21, 23, 25]) push(m, 0.45, 60, 0.25);       // 衰减段（算力掉到 50%）
   const s = e.steadyL1('L1');
-  ok(s && s.mean === 0.9, `窗口均值 ${s?.mean}（不被衰减段拖到 0.45）`);
+  ok(s && s.mean === 0.9 && s.realized === 0.5, `窗口均值 fidelity ${s?.mean} / realized ${s?.realized}（不被衰减段拖低）`);
   ok(s.n === 5 && s.min === 0.9 && s.max === 0.9, `窗口内 ${s?.n} 个样本，min/max ${s?.min}/${s?.max}`);
   ok(s.decayed === true, '检测到算力衰减 → 窗口止于衰减点');
   const c = e.commitL1('L1');
   const rec = e.st.l1ByModel.RTX3080;
-  ok(c && rec.samples.length === 1 && rec.samples[0] === 0.9, `提交后型号样本 = [${rec.samples}]`);
+  ok(c && rec.samples.length === 1 && rec.samples[0] === 0.5, `定价样本入的是 realized：[${rec.samples}]`);
+  ok(rec.fidelity && rec.fidelity[0] === 0.9, `fidelity 单独留一份：[${rec.fidelity}]（不参与定价）`);
   ok(rec.evidence && rec.evidence['L1'] && rec.evidence['L1'].min === 0.9, '证据里留了 min/max/n 与 decayed');
   ok(e.steadyL1('L1') === null, '提交后缓冲清空（同租约不会再刷样本）');
 }
@@ -476,7 +478,7 @@ console.log('— L1 样本按租约去重 + 分数卡不按整卡估价（2026-1
   for (const v of [0.31, 0.33, 0.35, 0.34, 0.36]) e.recordL1('RTX 3080', v, 540351, 'lease-A');
   const m1 = e.st.l1ByModel.RTX3080;
   ok(m1.samples.length === 1 && m1.samples[0] === 0.36, `同一租约 5 次采样只留 1 个（且取最新值 ${m1.samples[0]}）`);
-  ok(e.l1For('RTX 3080') === 0.8, '1 个样本不够 → 仍然回落 l1Default 0.8（一台机器不能代表一个型号）');
+  ok(e.l1For('RTX 3080') === 0.5, `1 个样本不够 → 回落 3080 的保守先验 ${e.l1For('RTX 3080')}（2026-11-03 从 0.8 下调）`);
   for (const [v, lid] of [[0.95, 'lease-B'], [1.02, 'lease-C']]) e.recordL1('RTX 3080', v, 540351, lid);
   ok(e.st.l1ByModel.RTX3080.samples.length === 3, '三条不同租约 → 三个样本');
   ok(Math.abs(e.l1For('RTX 3080') - 0.95) < 1e-9, `三样本中位数 ${e.l1For('RTX 3080')}（0.36/0.95/1.02 → 0.95）`);
@@ -805,10 +807,11 @@ console.log('— L1（份额反推算力 ÷ 矿工自报）按型号维护');
   e.log = () => {};
   e.cfg.l1Default = 0.8;
   e.st.l1ByModel = {};
-  ok(e.l1For('RTX 3080') === 0.8, '没有样本的型号用全局保守值 0.8');
+  ok(e.l1For('RTX 3080') === 0.5, `3080 没有样本 → 用实测得来的先验 ${e.l1For('RTX 3080')}（2026-11-03 从 0.8 下调）`);
+  ok(e.l1For('RTX 9999') === 0.8, '表里没有的型号用全局兜底 0.8');
   e.recordL1('RTX 3080', 0.70);
   e.recordL1('RTX 3080', 0.90);
-  ok(e.l1For('RTX 3080') === 0.8, '样本 <3 仍用全局值（不拿两台机器当结论）');
+  ok(e.l1For('RTX 3080') === 0.5, '样本 <3 仍用先验（不拿两台机器当结论）');
   e.recordL1('RTX 3080', 0.95);
   ok(Math.abs(e.l1For('RTX 3080') - 0.90) < 1e-9, `样本 3 条 → 中位数 ${e.l1For('RTX 3080')}`);
   e.recordL1('RTX 3080', 5);      // 明显异常值

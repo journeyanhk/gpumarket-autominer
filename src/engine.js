@@ -206,6 +206,7 @@ export class Engine {
   start() {
     this.log('info', `程序启动（脚本版本 v${SCRIPT_VERSION}；若与 src/onstart.js 不一致说明进程未重载）`);
     // 一次性：把历史租约反算成「房东口径 L1」（幂等，跑过一次就写 l1HostBackfilledAt）
+    this.migrateL1Split();   // 先拆口径，再把历史租约回填成房东口径 L1
     this.backfillHostL1();
     this.loop(() => this.refreshMarket(), 15_000);
     this.loop(() => this.refreshKryptex(), 30_000, 3000);
@@ -510,9 +511,12 @@ export class Engine {
               const secs = l.tFirstShare ? (Date.now() - l.tFirstShare) / 1000 : 0;
               if (secs > 600 && l.sharesAccepted > 0 && Number(l.difficulty) > 0 && Number(l.lastHs) > 0) {
                 const derived = l.sharesAccepted * Number(l.difficulty) * 4294967296 / secs;
+                const baseTh = (this.thFor(m.gpuName)?.effective || 0) * Math.max(1, Number(l.numGpus) || 1);
                 this.noteL1(l.id, {
                   t: Date.now(), gpu: m.gpuName, hostId: l.hostId ?? i.host_id ?? null,
-                  r: derived / Number(l.lastHs), hs: Number(l.lastHs),
+                  r: derived / Number(l.lastHs),                    // fidelity：份额 ÷ 自报
+                  realized: baseTh > 0 ? derived / (baseTh * 1e12) : null, // realized：份额 ÷ 型号基线
+                  hs: Number(l.lastHs),
                   dph: Number(x.dph) ? +(Number(x.dph) / Math.max(1, Number(x.numGpus) || 1)).toFixed(4) : null,
                 });
                 if (!l.l1Committed && secs > 1200 && this.commitL1(l.id)) l.l1Committed = true;
@@ -2123,11 +2127,13 @@ export class Engine {
   // ---------- 份额反推 L1（按型号） ----------
   // L1 = 份额反推算力 ÷ 矿工自报。出价评估用的是"参考算力"，而参考算力来自矿工自报，
   // 所以必须乘 L1 才是真实可卖的算力；样本不足 3 的型号用全局保守值 0.8。
+  // 定价用的实现率：份额反推算力 ÷ **型号基线**（不是 ÷ 矿工自报）。
+  // 与 l1Fidelity 分开：fidelity 只描述"机器自报老实不老实"，realized 才是能拿来估收入的数。
   l1For(gpuName) {
     const k = gpuKey(gpuName);
     const rec = (this.st.l1ByModel || {})[k];
-    const s = (rec?.samples || []).filter(x => Number.isFinite(x) && x > 0.3 && x < 1.5);
-    if (s.length < 3) return Number(this.cfg.l1Default ?? 0.8);
+    const s = (rec?.samples || []).filter(x => Number.isFinite(x) && x > 0.2 && x < 1.5);
+    if (s.length < 3) return Number((this.cfg.l1RealizedDefaults || {})[k] ?? this.cfg.l1Default ?? 0.8);
     const sorted = [...s].sort((a, b) => a - b);
     const mid = Math.floor(sorted.length / 2);
     const med = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
@@ -2174,8 +2180,10 @@ export class Engine {
     if (use.length < 3) return null;
     const rs = use.map(s => s.r).sort((a, b) => a - b);
     const mean = rs.reduce((a, b) => a + b, 0) / rs.length;
+    const rz = use.map(s => s.realized).filter(Number.isFinite);
     return {
       mean: +mean.toFixed(3), min: +rs[0].toFixed(3), max: +rs[rs.length - 1].toFixed(3),
+      realized: rz.length ? +(rz.reduce((a, b) => a + b, 0) / rz.length).toFixed(3) : null,
       n: rs.length, decayed: !!decayAt, gpu: use[0].gpu, hostId: use[0].hostId, dph: use[0].dph ?? null,
     };
   }
@@ -2184,7 +2192,10 @@ export class Engine {
   commitL1(leaseId) {
     const s = this.steadyL1(leaseId);
     if (!s) return null;
-    this.recordL1(s.gpu, s.mean, s.hostId, leaseId, { min: s.min, max: s.max, n: s.n, decayed: s.decayed, dph: s.dph });
+    // samples 只存 realized（定价用），fidelity 单独存（机器老实度）
+    if (s.realized != null) {
+      this.recordL1(s.gpu, s.realized, s.hostId, leaseId, { min: s.min, max: s.max, n: s.n, decayed: s.decayed, dph: s.dph }, s.mean);
+    }
     (this.l1buf || new Map()).delete(String(leaseId));
     return s;
   }
@@ -2210,8 +2221,8 @@ export class Engine {
     return { n: pairs.length, all: +med(pairs).toFixed(3), cheap, premium, cheapN, premiumN };
   }
 
-  recordL1(gpuName, ratio, hostId = null, leaseId = null, evidence = null) {
-    if (!(ratio > 0.3 && ratio < 2.0)) return;
+  recordL1(gpuName, ratio, hostId = null, leaseId = null, evidence = null, fidelity = null) {
+    if (!(ratio > 0.2 && ratio < 2.0)) return;   // realized 可能低到 0.25（廉价卡），下界放宽
     const k = gpuKey(gpuName);
     const st = this.st.l1ByModel ||= {};
     const rec = st[k] ||= { samples: [] };
@@ -2220,6 +2231,16 @@ export class Engine {
     // 2026-11-02 实测一台故障 3080 在 20 分钟里刷了 7 个样本，直接把型号中位数压到 0.343，
     // 然后所有 3080 的估价都按它打折。现在同租约内改写最后一个值，换租约才追加。
     const lid = leaseId == null ? null : String(leaseId);
+    // fidelity 与 realized 是两个口径：前者份额÷自报（机器老实不老实），后者份额÷基线（能不能赚钱）。
+    // 站内样本数组只存 realized；fidelity 另存一份，绝不参与定价。
+    if (fidelity != null) {
+      const fv = +Number(fidelity).toFixed(3);
+      const fa = (rec.fidelity ||= []);
+      if (lid && rec.lastFidLease === lid && fa.length) fa[fa.length - 1] = fv;
+      else fa.push(fv);
+      rec.lastFidLease = lid;
+      if (fa.length > 20) fa.splice(0, fa.length - 20);
+    }
     const price = evidence && Number.isFinite(Number(evidence.dph)) ? +Number(evidence.dph).toFixed(4) : null;
     if (lid && rec.lastLease === lid && rec.samples.length) {
       rec.samples[rec.samples.length - 1] = v;
@@ -2261,6 +2282,16 @@ export class Engine {
     return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   }
 
+  // 机器「老实度」：份额反推算力 ÷ 矿工自报。只用于记录与排查，不参与定价。
+  l1Fidelity(gpuName) {
+    const rec = (this.st.l1ByModel || {})[gpuKey(gpuName)];
+    const s = (rec?.fidelity || []).filter(x => Number.isFinite(x) && x > 0.2 && x < 2.0);
+    if (s.length < 3) return null;
+    const a = [...s].sort((x, y) => x - y);
+    const m = Math.floor(a.length / 2);
+    return +(a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2).toFixed(3);
+  }
+
   // 选机用的 L1：房东优先、型号兜底
   l1ForMachine(gpuName, machineId) {
     const hostId = machineId != null ? this.st.machineHost?.[String(machineId)] : null;
@@ -2275,6 +2306,28 @@ export class Engine {
   //   累计份额 × 难度 × 2^32 ÷ 秒数 = 反推算力（H/s），再除以矿工自报（lastHs 或 localThAvg×1e12）。
   // 验收带比在线采样更严（0.5~1.5，在线是 0.3~2.0）：回填每条租约只有一个终点值，而 pool_alloc 的
   // 分摊会把别人的币记到这台机器上（482330 那条 764 分钟只得 0.228，明显是分摊污染），宽口径会污染中位数。
+  // 一次性迁移（2026-11-03）：历史 samples 是「份额÷自报」的 fidelity 口径，
+  // 而定价现在要的是「份额÷基线」的 realized。把旧样本挪到 fidelity，realized 从空开始，
+  // 让 l1RealizedDefaults（3080=0.5 等）先顶上，等真实租约攒到 n≥5 再覆盖。
+  migrateL1Split() {
+    if (this.st.l1SplitMigratedAt) return { done: false };
+    let moved = 0;
+    for (const rec of Object.values(this.st.l1ByModel || {})) {
+      if (!rec || !Array.isArray(rec.samples)) continue;
+      if (rec.samples.length && !(rec.fidelity || []).length) {
+        rec.fidelity = rec.samples.slice();
+        moved += rec.samples.length;
+        rec.samples = [];
+      }
+      rec.n = (rec.samples || []).length;
+      rec.median = null;   // 交给 l1For 现算
+    }
+    this.st.l1SplitMigratedAt = Date.now();
+    this.save();
+    if (moved) this.log('info', `L1 口径拆分迁移：${moved} 个旧样本（份额÷自报）转入 fidelity，realized 从默认值起步`);
+    return { done: true, moved };
+  }
+
   backfillHostL1() {
     if (this.st.l1HostBackfilledAt) return { done: false, already: true };
     const hosts = this.st.l1ByHost ||= {};

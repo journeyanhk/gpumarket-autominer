@@ -75,6 +75,12 @@ try {
   const prevKx = prevKryptex();
   out.kryptexPrev = prevKx;
   out.kryptexChangePct = prevKx && out.kryptex ? +((out.kryptex.poolHsEh / prevKx.poolHsEh - 1) * 100).toFixed(2) : null;
+  // 用户 2026-11-03：看**占比**而不是绝对值——池掉 5% 且全网也掉 5% 是市场整体撤退（好消息），
+  // 池掉 5% 而全网平只是矿工换池（与我们无关）。两种情形处置完全不同。
+  out.kryptexShareChangePct = prevKx && out.kryptex && prevKx.sharePct > 0 && out.kryptex.sharePct != null
+    ? +((out.kryptex.sharePct / prevKx.sharePct - 1) * 100).toFixed(2) : null;
+  out.netChangePct = prevKx && out.kryptex && prevKx.netHsEh > 0
+    ? +((out.kryptex.netHsEh / prevKx.netHsEh - 1) * 100).toFixed(2) : null;
   // 信号：Pearl 难度停滞或回落 = 流入停/外流；其余 GPU 币难度下跌 = 矿工在离开别的币
   const gpu = Object.entries(out.coins).filter(([k, v]) => k !== 'Pearl' && v.change24hPct != null);
   const falling = gpu.filter(([, v]) => v.change24hPct < -3).map(([k]) => k);
@@ -82,8 +88,10 @@ try {
     pearlFlat: out.pearl != null && Math.abs(out.pearl) < 1.5,
     pearlFalling: out.pearl != null && out.pearl < -1.5,
     gpuFalling: falling,
-    // 领先信号：池算力日变化 ≤ -3%（比难度更早反映外流）
-    poolFalling: out.kryptexChangePct != null && out.kryptexChangePct <= -3,
+    // 领先信号：**池占比**日变化 ≤ -3%（比难度更早反映"矿工在离开我们这条链"）
+    poolShareFalling: out.kryptexShareChangePct != null && out.kryptexShareChangePct <= -3,
+    // 市场整体撤退：池算力与全网同时下降（对密度是好消息）
+    marketRetreat: out.kryptexChangePct != null && out.netChangePct != null && out.kryptexChangePct <= -3 && out.netChangePct <= -3,
   };
 } catch (e) { out.error = e.message.slice(0, 120); }
 
@@ -101,10 +109,12 @@ for (const [name, v] of Object.entries(out.coins)) {
 }
 if (out.kryptex) {
   const chg = out.kryptexChangePct == null ? '（无历史基线）' : `${out.kryptexChangePct > 0 ? '+' : ''}${out.kryptexChangePct}%`;
-  console.log(`Kryptex 池算力 ${out.kryptex.poolHsEh} EH/s（占全网 ${out.kryptex.sharePct}%，日变化 ${chg}）`);
+  const shChg = out.kryptexShareChangePct == null ? '—' : `${out.kryptexShareChangePct > 0 ? '+' : ''}${out.kryptexShareChangePct}%`;
+  console.log(`Kryptex 池算力 ${out.kryptex.poolHsEh} EH/s（占全网 ${out.kryptex.sharePct}%，算力日变化 ${chg}，占比日变化 ${shChg}）`);
 }
 const s = out.signal || {};
-if (s.poolFalling) console.log('→ Kryptex 池算力日降 ≥3%：领先信号出现（比全网难度早一个 retarget 周期）');
+if (s.marketRetreat) console.log(`→ 池算力 ${out.kryptexChangePct}% 且全网 ${out.netChangePct}%：市场整体撤退（对密度是好消息）`);
+else if (s.poolShareFalling) console.log(`→ Kryptex 池占比日降 ${out.kryptexShareChangePct}%：矿工在离开这条链（领先信号）`);
 if (s.pearlFalling) console.log('→ Pearl 难度回落：矿工开始撤离（对密度是正向信号）');
 else if (s.pearlFlat) console.log('→ Pearl 难度停滞：流入已停（尚未外流）');
 else if (out.pearl != null) console.log('→ Pearl 难度仍在涨：矿工还在往里挤');

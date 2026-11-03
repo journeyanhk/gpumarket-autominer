@@ -214,14 +214,42 @@ export class Engine {
     return { th: spec, src: 'spec', n: s.length, spec };
   }
 
-  recordDeliveredTh(gpuName, thPerGpu) {
+  recordDeliveredTh(gpuName, thPerGpu, pricePerGpu = null) {
     if (!(thPerGpu > 5 && thPerGpu < 800)) return;
     const k = gpuKey(gpuName);
-    const rec = ((this.st.deliveredTh ||= {})[k] ||= { samples: [] });
+    const rec = ((this.st.deliveredTh ||= {})[k] ||= { samples: [], prices: [] });
     rec.samples.push(+thPerGpu.toFixed(1));
-    if (rec.samples.length > 20) rec.samples.splice(0, rec.samples.length - 20);
+    (rec.prices ||= []).push(Number(pricePerGpu) > 0 ? +Number(pricePerGpu).toFixed(4) : null);
+    if (rec.samples.length > 20) { rec.samples.splice(0, rec.samples.length - 20); rec.prices.splice(0, rec.prices.length - 20); }
     rec.n = rec.samples.length;
-    rec.median = this.baseThOf(gpuName).th;
+  }
+
+  // 按价格带的预期交付算力（2026-11-03 用户改）：**唯一**的定价输入。
+  // 不做"规格 × 经验基线 × realized"的链式折算：三层里任何一层错都会被另外两层掩盖，
+  // 而廉价段的样本会把逆向选择固化成型号基线（3080 交付 45 TH 就是这么来的）。
+  // 规则：按样本价格中位数切两半，取同带（≥2 条）的交付算力中位；不够退全体中位；再不够用规格。
+  // 规格数字只做合理性校验（偏离 ±40% 报警），不参与出价。
+  expectedDeliveredTh(gpuName, pricePerGpu = null) {
+    const k = gpuKey(gpuName);
+    const rec = (this.st.deliveredTh || {})[k];
+    const spec = this.thFor(gpuName)?.effective || 0;
+    const pairs = (rec?.samples || []).map((v, i) => ({ v, p: (rec.prices || [])[i] })).filter(x => Number.isFinite(x.v) && x.v > 5);
+    const med = arr => { const a = arr.map(x => x.v).sort((x, y) => x - y); const m = Math.floor(a.length / 2); return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
+    const priced = pairs.filter(x => x.p > 0).sort((a, b) => a.p - b.p);
+    if (priced.length >= 2 && Number(pricePerGpu) > 0) {
+      const pMed = priced[Math.floor(priced.length / 2)].p;
+      const cheapSide = Number(pricePerGpu) <= pMed;
+      const band = cheapSide ? priced.filter(x => x.p <= pMed) : priced.filter(x => x.p > pMed);
+      if (band.length >= 2) {
+        const th = +med(band).toFixed(1);
+        return { th, src: cheapSide ? 'cheap-band' : 'premium-band', n: band.length, spec, sane: spec > 0 ? Math.abs(th / spec - 1) <= 0.4 : null };
+      }
+    }
+    if (pairs.length >= 3) {
+      const th = +med(pairs).toFixed(1);
+      return { th, src: 'all-samples', n: pairs.length, spec, sane: spec > 0 ? Math.abs(th / spec - 1) <= 0.4 : null };
+    }
+    return { th: spec, src: 'spec', n: pairs.length, spec, sane: null };
   }
 
   thFor(name) {
@@ -1347,10 +1375,15 @@ export class Engine {
   priceOffer(o, usd) {
     const ref = this.thFor(o.gpuName);
     if (ref) {
-      const base = this.baseThOf(o.gpuName);
-      o.thRaw = base.th * o.numGpus;
+      // 单一定价输入：按价格带的预期交付算力。不再乘 L1 —— 链式折算会叠乘折扣
+      // （2026-11-03 实测：3080 真实交付 45 TH 被算成 20 TH）。
+      const per = Number(o.dph) / Math.max(1, Number(o.numGpus) || 1);
+      const band = this.expectedDeliveredTh(o.gpuName, per);
+      o.thRaw = band.th * o.numGpus;
       o.source = ref.source; o.autoOk = ref.autoOk;
-      o.baseSrc = base.src; o.baseTh = base.th;
+      o.baseSrc = band.src; o.baseTh = band.th;
+      o.l1 = band.spec > 0 ? +(band.th / band.spec).toFixed(3) : o.l1;   // 只做展示：交付 ÷ 规格
+      if (band.sane === false) this._warnOnce(`spec-${o.gpuName}`, `${o.gpuName} 的经验交付 ${band.th} TH 偏离规格 ${band.spec} TH 超 40%（${band.src}，n=${band.n}），查规格表`);
     }
     // L1 折算必须收敛在这里：参考算力来自矿工自报，卖出去的只有 0.76~0.93 倍。
     // 之前 evaluateOffers 里乘过 L1，但这里又用 ref.effective 覆盖了 o.th，等于白乘。
@@ -1890,6 +1923,8 @@ export class Engine {
       if (b.done < Number(cfg.minLeases ?? 3)) continue;                       // 样本太少不表态
       if (b.medianLife == null || b.medianLife < Number(cfg.minMedianLifeMin ?? 60)) continue;
       if (b.netPerHour == null || b.netPerHour <= Number(cfg.minNetPerHour ?? 0)) continue;
+      // 入场也看收回率（2026-11-03）：67% 收回意味着 3 条里 2 条没了，不能只看中位存活
+      if (b.rate > Number(cfg.maxReclaimPct ?? 70)) continue;
       // 退出只看**行为**（收回率 / 中位存活），不看收益——收益随币价重估，
       // 用它当退出条件会在币价下跌时把白名单集体清空，恰好在窗口要开、最需要折扣的时候。
       // 收益只做入场条件（上面那行 netPerHour > 0）。
@@ -1931,8 +1966,10 @@ export class Engine {
     const rate = reclaims / ls.length * 100;
     const lives = ls.map(l => (l.tEnd - l.tRent) / 60000).sort((a, b) => a - b);
     const med = lives[Math.floor(lives.length / 2)];
-    const ok = rate <= Number(cfg.exitReclaimPct ?? 80) && med >= Number(cfg.exitMedianLifeMin ?? 30);
-    return { n: ls.length, rate: +rate.toFixed(0), medianLife: +med.toFixed(0), ok };
+    const minLife = Number(this.cfg.survivalMinLifeMin ?? 30);
+    const share = ls.filter(l => (l.tEnd - l.tRent) / 60000 >= Math.max(60, minLife)).length / ls.length;
+    const ok = rate <= Number(cfg.exitReclaimPct ?? 75) && med >= Number(cfg.exitMedianLifeMin ?? 30);
+    return { n: ls.length, rate: +rate.toFixed(0), medianLife: +med.toFixed(0), survivalShare: +share.toFixed(2), ok };
   }
 
   isWhitelisted(hostId) {
@@ -1950,7 +1987,13 @@ export class Engine {
   // 为什么陌生房东只给 1 台：部署失败/被收回的代价是"每台一份"，而陌生房东的存活率恰恰是未知的；
   // 一次押 3 台等于把同一个未知概率乘 3，失败成本按台数翻倍。
   hostConcurrentCap(hostId) {
-    if (this.isWhitelisted(hostId)) return Number(this.cfg.hostWhitelist?.perHostMachines ?? 2);
+    if (this.isWhitelisted(hostId)) {
+      const beh = this.hostBehavior7d(hostId);
+      const cap = Number(this.cfg.hostWhitelist?.perHostMachines ?? 2);
+      // 双峰分布下中位数会骗人：只有「7 天里活够 60 分钟的占比 ≥50%」才给 2 台，否则退回 1 台
+      const shareOk = beh.survivalShare == null || beh.survivalShare >= Number(this.cfg.hostWhitelist?.dualSlotSurvivalShare ?? 0.5);
+      return shareOk ? cap : 1;
+    }
     return Math.max(1, Number(this.cfg.unknownHostMaxConcurrent ?? 1));
   }
 
@@ -2377,7 +2420,7 @@ export class Engine {
       const nGpu = Math.max(1, Number(l.numGpus) || 1);
       const deliveredTh = sh * diff * 4294967296 / secs / 1e12 / nGpu;
       if (!(deliveredTh > 5 && deliveredTh < 800)) continue;
-      this.recordDeliveredTh(l.gpu, deliveredTh);
+      this.recordDeliveredTh(l.gpu, deliveredTh, (Number(l.dphTotalActual ?? l.bidFinal ?? 0) || 0) / nGpu);
       rows.push({ l, deliveredTh });
     }
     // 第二遍：realized 重算为「相对经验基线」的偏差（不能用规格表当分母——否则两把折扣叠乘，
@@ -2433,7 +2476,7 @@ export class Engine {
       const baseTh = this.baseThOf(l.gpu).th * nGpu;
       if (!(baseTh > 0)) { dropped++; continue; }
       const derived = sh * diff * 4294967296 / secs;
-      this.recordDeliveredTh(l.gpu, derived / 1e12 / nGpu);   // 经验基线样本（份额反算，不信自报）
+      this.recordDeliveredTh(l.gpu, derived / 1e12 / nGpu, (Number(l.dphTotalActual ?? l.bidFinal ?? 0) || 0) / nGpu);   // 经验基线样本（份额反算，不信自报）
       const realized = derived / (baseTh * 1e12);
       if (!(realized > 0.15 && realized < 2)) { dropped++; continue; }
       const k = gpuKey(l.gpu);

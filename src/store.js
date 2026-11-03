@@ -88,7 +88,7 @@ export const DEFAULT_CONFIG = {
   // 不能把历史回放里那 +$0.03/机时 当成白名单的功劳。
   // 退出条件只看行为（2026-11-03）：收回率 >80% 或 7 天中位存活 <30 分钟才降级。
   // 门槛刻意比入场（中位 >60）更松：入场看收益，出场看行为，且"明显变差"才动手。
-  hostWhitelist: { enabled: true, minLeases: 3, minNetPerHour: 0, minMedianLifeMin: 60, perHostMachines: 2, stablePct: 50, exitReclaimPct: 80, exitMedianLifeMin: 30 },
+  hostWhitelist: { enabled: true, minLeases: 3, minNetPerHour: 0, minMedianLifeMin: 60, maxReclaimPct: 70, perHostMachines: 2, dualSlotSurvivalShare: 0.5, stablePct: 50, exitReclaimPct: 75, exitMedianLifeMin: 30 },
   windowScanIntervalSec: 90,
   // 按需机（B 型窗口的工具）：合同期内不会被房东收回，所以不打存活折扣。
   onDemand: {

@@ -576,6 +576,9 @@ export class Engine {
                   hs: Number(l.lastHs),
                   dph: Number(x.dph) ? +(Number(x.dph) / Math.max(1, Number(x.numGpus) || 1)).toFixed(4) : null,
                 });
+                // 同时喂价格带样本（份额反算的交付算力 + 该机器单价）
+                this.recordDeliveredTh(m.gpuName, derived / 1e12 / Math.max(1, Number(l.numGpus) || 1),
+                  (Number(x.dph) || 0) / Math.max(1, Number(x.numGpus) || 1));
                 if (!l.l1Committed && secs > 1200 && this.commitL1(l.id)) l.l1Committed = true;
               }
             }
@@ -2412,7 +2415,8 @@ export class Engine {
   // 补一轮回填（2026-11-03 v2）：上一次只写了型号 realized，缺经验基线与房东口径。
   // 这里只补 deliveredTh（型号交付算力样本）与 l1ByHost.realized，不动型号 realized。
   backfillDeliveredTh() {
-    if (this.st.deliveredThBackfillV === 3) return { done: false };   // v3：补单价（价格带用）
+    if (this.st.deliveredThBackfillV === 4) return { done: false };   // v4：全量重建（去重）
+    this.st.deliveredTh = {};   // 全量重建：之前的 v1/v2/v3 反复追加把同一条租约记了 3 次
     const rows = [];
     for (const l of this.leases) {
       if (!l.tEnd || !l.tFirstShare) continue;
@@ -2455,7 +2459,7 @@ export class Engine {
       rec.n = rec.samples.length;
       rec.median = null;
     }
-    this.st.deliveredThBackfillV = 3;
+    this.st.deliveredThBackfillV = 4;
     this.save();
     if (kept) this.log('info', `经验基线回填：${kept} 条租约（realized 已按经验基线重算）`);
     return { done: true, kept };

@@ -428,11 +428,11 @@ console.log('— L1 稳态窗口均值（不取最早、不取最新，取窗口
   e.st.l1ByModel = {}; e.st.l1ByHost = {}; e.l1buf = new Map();
   const t0 = Date.now() - 30 * MIN;
   const push = (mins, r, hs) => e.noteL1('L1', { t: t0 + mins * MIN, gpu: 'RTX 3080', hostId: 1, r, hs });
-  for (const m of [1, 3, 6, 9]) push(m, 0.5, 120);      // 爬坡段（10 分钟内）→ 不计入窗口
+  // 生产里 noteL1 的调用点已经过滤掉「首份份额 +10 分钟内」的爬坡样本，这里直接喂稳态段
   for (const m of [11, 13, 15, 17, 19]) push(m, 0.9, 120); // 稳态段
   for (const m of [21, 23, 25]) push(m, 0.45, 60);       // 衰减段（算力掉到 50%）
   const s = e.steadyL1('L1');
-  ok(s && s.mean === 0.9, `窗口均值 ${s?.mean}（不是最早的 0.5、也不是最新的 0.45）`);
+  ok(s && s.mean === 0.9, `窗口均值 ${s?.mean}（不被衰减段拖到 0.45）`);
   ok(s.n === 5 && s.min === 0.9 && s.max === 0.9, `窗口内 ${s?.n} 个样本，min/max ${s?.min}/${s?.max}`);
   ok(s.decayed === true, '检测到算力衰减 → 窗口止于衰减点');
   const c = e.commitL1('L1');

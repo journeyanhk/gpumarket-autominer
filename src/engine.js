@@ -515,7 +515,7 @@ export class Engine {
                   r: derived / Number(l.lastHs), hs: Number(l.lastHs),
                   dph: Number(x.dph) ? +(Number(x.dph) / Math.max(1, Number(x.numGpus) || 1)).toFixed(4) : null,
                 });
-                if (!l.l1Committed && secs > 1500 && this.commitL1(l.id)) l.l1Committed = true;
+                if (!l.l1Committed && secs > 1200 && this.commitL1(l.id)) l.l1Committed = true;
               }
             }
             const sh = this.sharesOf(i.id);
@@ -2156,9 +2156,12 @@ export class Engine {
   steadyL1(leaseId) {
     const arr = (this.l1buf || new Map()).get(String(leaseId)) || [];
     if (!arr.length) return null;
-    const t0 = arr[0].t;
-    const win = arr.filter(s => s.t - t0 >= 10 * MIN);
-    if (win.length < 3) return null;
+    // 缓冲区里的样本**本身**已经是"首份份额 +10 分钟之后"的（noteL1 的调用点已过滤），
+    // 这里不能再要求"再满 10 分钟"——那等于把窗口推到 +20 分钟，25~28 分钟的租约永远提交不了
+    // （2026-11-03 实测：两台校准机都因此没落样本）。
+    const win = arr;
+    const span = win.length ? (win[win.length - 1].t - win[0].t) / MIN : 0;
+    if (win.length < 3 || span < 3) return null;
     const hsSorted = win.map(s => s.hs).filter(x => x > 0).sort((a, b) => a - b);
     const hsMed = hsSorted[Math.floor(hsSorted.length / 2)] || 0;
     let decayAt = null;

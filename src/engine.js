@@ -252,6 +252,20 @@ export class Engine {
   // 而廉价段的样本会把逆向选择固化成型号基线（3080 交付 45 TH 就是这么来的）。
   // 规则：按样本价格中位数切两半，取同带（≥2 条）的交付算力中位；不够退全体中位；再不够用规格。
   // 规格数字只做合理性校验（偏离 ±40% 报警），不参与出价。
+  // 该型号「历史上实际交付过的整卡归一化算力」的最大值（2026-11-03 最后一条不变量）。
+  // 用途：给定价加一个天花板，防止"把脏样本全排除后反而变乐观"以及"规格基线偏高"。
+  // 归一化：半卡样本除以 frac，换算成整卡口径（45 TH 的半卡 = 90 TH 的整卡）。
+  maxDeliveredTh(gpuName) {
+    const rec = (this.st.deliveredTh || {})[gpuKey(gpuName)];
+    let max = 0;
+    (rec?.samples || []).forEach((v, i) => {
+      const f = Number((rec.qual || [])[i]?.frac);
+      const whole = v / (f > 0 ? f : 1);
+      if (Number.isFinite(whole) && whole > max) max = whole;
+    });
+    return max > 0 ? +max.toFixed(1) : null;
+  }
+
   expectedDeliveredTh(gpuName, pricePerGpu = null) {
     const k = gpuKey(gpuName);
     const rec = (this.st.deliveredTh || {})[k];
@@ -294,7 +308,7 @@ export class Engine {
         const measured = useArr.some(x => qualOf(x)?.fracInferred !== true);
         const high = useArr.length >= 5 && measured;
         const th = high ? raw : +(raw * 0.85).toFixed(1);
-        return { th, raw, src: cheapSide ? 'cheap-band' : 'premium-band', confidence: high ? 'high' : 'low', n: useArr.length, unknownFrac: stat.unknownFrac, spec, sane: sane(th) };
+        return { th: this._capTh(gpuName, th), raw, src: cheapSide ? 'cheap-band' : 'premium-band', confidence: high ? 'high' : 'low', n: useArr.length, unknownFrac: stat.unknownFrac, spec, sane: sane(th) };
       }
     }
     if (wholePairs.length >= 5) {
@@ -303,7 +317,7 @@ export class Engine {
       const measured = wholePairs.some(x => qualOf(x)?.fracInferred !== true);
       if (hosts.size >= 2 && measured) {
         const raw = +med(wholePairs).toFixed(1);
-        return { th: raw, raw, src: 'model-median', confidence: 'model', n: wholePairs.length, unknownFrac: stat.unknownFrac, spec, sane: sane(raw) };
+        return { th: this._capTh(gpuName, raw), raw, src: 'model-median', confidence: 'model', n: wholePairs.length, unknownFrac: stat.unknownFrac, spec, sane: sane(raw) };
       }
     }
     // 贵档没有健康样本时：不低于便宜档中位（宁可沿用便宜档，也不用烂机器把上限压低）
@@ -314,11 +328,18 @@ export class Engine {
         const raw = +med(cheapArr).toFixed(1);
         const high = cheapArr.length >= 5;
         const th = high ? raw : +(raw * 0.85).toFixed(1);
-        return { th, raw, src: 'cheap-carryover', confidence: high ? 'high' : 'low', n: cheapArr.length, unknownFrac: stat.unknownFrac, spec, sane: sane(th) };
+        return { th: this._capTh(gpuName, th), raw, src: 'cheap-carryover', confidence: high ? 'high' : 'low', n: cheapArr.length, unknownFrac: stat.unknownFrac, spec, sane: sane(th) };
       }
     }
     const th = +(spec * Number(this.cfg.uncalibratedFactor ?? 0.6)).toFixed(1);
-    return { th, raw: th, src: 'spec', confidence: 'uncalibrated', n: 0, unknownFrac: stat.unknownFrac, spec, sane: null };
+    return { th: this._capTh(gpuName, th), raw: th, src: 'spec', confidence: 'uncalibrated', n: 0, unknownFrac: stat.unknownFrac, spec, sane: null };
+  }
+
+  // 不变量：定价不得超过该型号历史最大交付（整卡归一化）
+  _capTh(gpuName, th) {
+    const cap = this.maxDeliveredTh(gpuName);
+    if (cap == null || !(cap > 0)) return +Number(th).toFixed(1);
+    return +Math.min(Number(th), cap).toFixed(1);
   }
 
   thFor(name) {

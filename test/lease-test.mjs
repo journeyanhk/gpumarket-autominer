@@ -457,6 +457,20 @@ console.log('— 从台账回填 l1Realized + 白名单老化（2026-11-03）');
   ok(e2.hostBehavior7d(300).n === 0, '7 天窗口之外的租约不参与行为判定');
 }
 
+console.log('— 不变量：定价不得超过该型号历史最大交付（2026-11-03 最后一条）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.st.deliveredTh = {};
+  // 只见过 30 TH 的交付（且被判 suspect）→ 未校准兜底（规格×0.6=68.9）必须被压到 <=30
+  e.recordDeliveredTh('RTX 3080', 30, 0.12, { fid: 0.5, mins: 20, host: 1, frac: 1, fracSuspect: true });
+  const a = e.expectedDeliveredTh('RTX 3080', 0.12);
+  ok(a.th <= 30, `样本全被排除时仍受历史交付封顶：${a.th} TH（规格×0.6 会是 68.9）`);
+  // 半卡样本要按整卡归一化后再封顶：45 TH 的半卡 = 90 TH 整卡能力
+  e.recordDeliveredTh('RTX 3080 Ti', 45, 0.12, { fid: 1, mins: 90, host: 2, frac: 0.5 });
+  ok(e.maxDeliveredTh('RTX 3080 Ti') === 90, `半卡交付 45 TH 归一化为整卡 ${e.maxDeliveredTh('RTX 3080 Ti')} TH`);
+}
+
 console.log('— 置信度护栏：推断样本封顶 low / 交付<0.4x规格标 suspect（2026-11-03）');
 {
   const e = new Engine();

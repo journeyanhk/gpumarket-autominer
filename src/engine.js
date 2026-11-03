@@ -2514,7 +2514,7 @@ export class Engine {
   // 补一轮回填（2026-11-03 v2）：上一次只写了型号 realized，缺经验基线与房东口径。
   // 这里只补 deliveredTh（型号交付算力样本）与 l1ByHost.realized，不动型号 realized。
   backfillDeliveredTh() {
-    if (this.st.deliveredThBackfillV === 6) return { done: false };   // v6：按交付 TH（不是 realized）推断 frac
+    if (this.st.deliveredThBackfillV === 7) return { done: false };   // v7：qual 写在 deliveredTh 里
     this.st.deliveredTh = {};   // 全量重建：之前的 v1/v2/v3 反复追加把同一条租约记了 3 次
     const rows = [];
     for (const l of this.leases) {
@@ -2552,7 +2552,9 @@ export class Engine {
         rec.samples.push(v);
         rec.prices.push(Number(l.dphTotalActual ?? l.bidFinal ?? 0) || null);
         rec.lastLease = String(l.id);
-        const q = rec.qual?.[idx];
+        // qual 存在 deliveredTh 里（不是 l1ByModel）——之前写错对象，所以一条都没推断出来
+        const drec = (this.st.deliveredTh || {})[k];
+        const q = drec?.qual?.[idx];
         if (q && q.frac == null && specRef > 0 && deliveredTh >= specRef * 0.85) {
           q.frac = 1; q.fracInferred = true; q.fracWhy = 'delivered>=0.85*spec';
         }
@@ -2570,7 +2572,7 @@ export class Engine {
       rec.median = null;
       this.save();
     }
-    this.st.deliveredThBackfillV = 6;
+    this.st.deliveredThBackfillV = 7;
     this.save();
     if (kept) this.log('info', `经验基线回填：${kept} 条租约（realized 已按经验基线重算）`);
     return { done: true, kept };

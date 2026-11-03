@@ -2322,6 +2322,20 @@ export class Engine {
       rec.n = (rec.samples || []).length;
       rec.median = null;   // 交给 l1For 现算
     }
+    // 房东口径同理：旧样本也是「份额÷自报」，一起挪走，避免它继续影响 l1ForMachine 的定价
+    if (!this.st.l1HostSplitMigratedAt) {
+      for (const rec of Object.values(this.st.l1ByHost || {})) {
+        if (!rec || !Array.isArray(rec.samples)) continue;
+        if (rec.samples.length && !(rec.fidelity || []).length) {
+          rec.fidelity = rec.samples.slice();
+          moved += rec.samples.length;
+          rec.samples = [];
+        }
+        rec.n = (rec.samples || []).length;
+        rec.median = null;
+      }
+      this.st.l1HostSplitMigratedAt = Date.now();
+    }
     this.st.l1SplitMigratedAt = Date.now();
     this.save();
     if (moved) this.log('info', `L1 口径拆分迁移：${moved} 个旧样本（份额÷自报）转入 fidelity，realized 从默认值起步`);

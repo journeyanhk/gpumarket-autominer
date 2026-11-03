@@ -3600,7 +3600,8 @@ export class Engine {
         for (const g of this.table || []) {
           // 与 applyGates **同一个** isRentable：切片（gpu_frac<1）不进参照表，
           // 否则半张卡 $0.0533 会被当成"最近可达的那条线"（2026-11-03 踩过）。
-          const list = (byModel[g.key] || []).filter(o => !this.isRentable(o));
+          const all = byModel[g.key] || [];
+          const list = all.filter(o => !this.isRentable(o));   // 与 applyGates 同一套过滤
           if (!list.length) continue;
           const nGpu = o => Math.max(1, Number(o.numGpus) || 1);
           const frac = o => (Number(o.gpuFrac) > 0 ? Number(o.gpuFrac) : 1);
@@ -3611,10 +3612,10 @@ export class Engine {
           const per = suspect ? medBid : minBid;
           const band = this.expectedDeliveredTh(g.name, per);
           const need = band.th > 0 ? +(per * (1 + roiReq / 100) * 24 / band.th).toFixed(4) : null;
-          const wholeCount = list.filter(o => frac(o) >= 0.99).length;
+          const wholeCount = list.filter(o => frac(o) >= 0.99).length;   // 过滤后仍可租的整卡数
           rows.push({
             model: g.name, minBid, medianBid: medBid, suspect, pricePerGpu: per,
-            wholeCardOnly: wholeCount, fracOffers: list.length - wholeCount,
+            wholeCardOnly: wholeCount, excluded: all.length - list.length, offers: all.length,
             th: band.th, confidence: band.confidence || '—', n: band.n ?? 0, band: band.src,
             needDensity: need, nowDensity: +dens6.toFixed(4),
             gapPct: need && dens6 > 0 ? +((need / dens6 - 1) * 100).toFixed(0) : null,

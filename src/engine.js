@@ -222,7 +222,7 @@ export class Engine {
     (rec.prices ||= []).push(Number(pricePerGpu) > 0 ? +Number(pricePerGpu).toFixed(4) : null);
     // quality: {fid, mins} —— 只有"机器健康"的样本才能压低贵档估计（2026-11-03 用户要求）
     (rec.qual ||= []).push(quality && Number.isFinite(Number(quality.fid))
-      ? { fid: +Number(quality.fid).toFixed(2), mins: Math.round(Number(quality.mins) || 0) } : null);
+      ? { fid: +Number(quality.fid).toFixed(2), mins: Math.round(Number(quality.mins) || 0), host: quality.host ?? null } : null);
     if (rec.samples.length > 20) {
       rec.samples.splice(0, rec.samples.length - 20);
       rec.prices.splice(0, rec.prices.length - 20);
@@ -276,8 +276,12 @@ export class Engine {
       }
     }
     if (pairs.length >= 5) {
-      const raw = +med(pairs).toFixed(1);
-      return { th: raw, raw, src: 'model-median', confidence: 'model', n: pairs.length, spec, sane: sane(raw) };
+      // 型号中位还要「>=2 个不同 host」：否则型号画像会变成某一台机器的画像
+      const hosts = new Set((rec?.qual || []).map(q => q?.host).filter(h => h != null).map(String));
+      if (hosts.size >= 2) {
+        const raw = +med(pairs).toFixed(1);
+        return { th: raw, raw, src: 'model-median', confidence: 'model', n: pairs.length, spec, sane: sane(raw) };
+      }
     }
     // 贵档没有健康样本时：不低于便宜档中位（宁可沿用便宜档，也不用烂机器把上限压低）
     if (priced.length >= 2) {
@@ -620,7 +624,8 @@ export class Engine {
                 });
                 // 同时喂价格带样本（份额反算的交付算力 + 该机器单价）
                 this.recordDeliveredTh(m.gpuName, derived / 1e12 / Math.max(1, Number(l.numGpus) || 1),
-                  (Number(x.dph) || 0) / Math.max(1, Number(x.numGpus) || 1));
+                  (Number(x.dph) || 0) / Math.max(1, Number(x.numGpus) || 1),
+                  { fid: derived / Number(l.lastHs), mins: (Date.now() - l.tRent) / 60000, host: l.hostId });
                 if (!l.l1Committed && secs > 1200 && this.commitL1(l.id)) l.l1Committed = true;
               }
             }
@@ -1477,6 +1482,19 @@ export class Engine {
 
   // 统一的门槛判定：房东黑名单/假释、期望 ROI。evaluateOffers 与 repriceOffers 都必须调用，
   // 否则重算一次价格就把 spotSkip 清掉（2026-10-29 实测：两条 offer 因此被"复活"）。
+  // 纯判定：这台报价"能不能租"。applyGates 与 pricingTable 必须共用同一套规则——
+  // 三轮叠乘 bug 的同源问题就是"同一规则写两遍"（gpu_frac 只在 applyGates 生效，
+  // 参照表把半张卡 $0.0533 当成了整卡最低价）。
+  isRentable(o) {
+    if (o.minBid != null && !(Number(o.minBid) > 0)) return 'no_min_bid';   // 只有显式给了非法价才拦
+    if (o.gpuFrac != null && Number(o.gpuFrac) > 0 && Number(o.gpuFrac) < 0.99) return 'frac';
+    if (o.floorSkip) return 'floor';
+    if (o.insaneSkip) return 'insane';
+    if (o.blacklisted) return 'blacklist';
+    if (o.avoidHost) return 'avoid_host';
+    return null;
+  }
+
   applyGates(offer, now = Date.now()) {
     // 按需机：合同期内不会被收回，P=1；房东黑名单对它无意义。
     if ((offer.onDemand || offer.spot === false) && this.cfg.onDemand?.enabled !== false) {
@@ -1491,12 +1509,19 @@ export class Engine {
       else if (this.cfg.survivalGate !== false && offer.expRoi != null && offer.expRoi < this.cfg.targetProfitPct) { offer.spotSkip = true; offer.expRoiSkip = true; }
       return offer;
     }
-    // 分数卡（gpu_frac < 1）：vast 卖的是"半张/四分之一张"卡，但算力参考值是整卡的，
-    // 按整卡估价会系统性高估（实测一台 3080 的份额反算只有 0.343）。直接跳过，不做概率游戏。
-    if (offer.gpuFrac != null && Number(offer.gpuFrac) > 0 && Number(offer.gpuFrac) < 0.99) {
-      offer.spotSkip = true; offer.fracSkip = true;
-      offer.skipWhy = `gpu_frac=${offer.gpuFrac}（分数卡，不是整卡）`;
-      return offer;
+    // 统一过滤（分数卡 / 价格地板 / 荒谬 ROI / 黑名单 / 交不出份额的房东）：
+    // 规则只在 isRentable 里写一次，参照表也用同一个函数。
+    {
+      const why = this.isRentable(offer);
+      if (why) {
+        offer.spotSkip = true;
+        if (why === 'frac') { offer.fracSkip = true; offer.skipWhy = `gpu_frac=${offer.gpuFrac}（分数卡，不是整卡）`; }
+        else if (why === 'floor') offer.floorSkip = true;
+        else if (why === 'insane') offer.insaneSkip = true;
+        else if (why === 'avoid_host') offer.avoidHost = true;
+        else offer.skipWhy ||= `不可租：${why}`;
+        return offer;
+      }
     }
     const ban = this.hostBanned(offer.hostId, now);
     offer.hostBanned = null; offer.hostParole = false; offer.expRoiSkip = false;
@@ -2469,7 +2494,9 @@ export class Engine {
       const nGpu = Math.max(1, Number(l.numGpus) || 1);
       const deliveredTh = sh * diff * 4294967296 / secs / 1e12 / nGpu;
       if (!(deliveredTh > 5 && deliveredTh < 800)) continue;
-      this.recordDeliveredTh(l.gpu, deliveredTh, (Number(l.dphTotalActual ?? l.bidFinal ?? 0) || 0) / nGpu);
+      const derivedHs = sh * diff * 4294967296 / secs;
+      this.recordDeliveredTh(l.gpu, deliveredTh, (Number(l.dphTotalActual ?? l.bidFinal ?? 0) || 0) / nGpu,
+        { fid: l.lastHs ? derivedHs / Number(l.lastHs) : null, mins: (l.tEnd - l.tRent) / 60000, host: l.hostId });
       rows.push({ l, deliveredTh });
     }
     // 第二遍：realized 重算为「相对经验基线」的偏差（不能用规格表当分母——否则两把折扣叠乘，
@@ -2525,7 +2552,8 @@ export class Engine {
       const baseTh = this.baseThOf(l.gpu).th * nGpu;
       if (!(baseTh > 0)) { dropped++; continue; }
       const derived = sh * diff * 4294967296 / secs;
-      this.recordDeliveredTh(l.gpu, derived / 1e12 / nGpu, (Number(l.dphTotalActual ?? l.bidFinal ?? 0) || 0) / nGpu);   // 经验基线样本（份额反算，不信自报）
+      this.recordDeliveredTh(l.gpu, derived / 1e12 / nGpu, (Number(l.dphTotalActual ?? l.bidFinal ?? 0) || 0) / nGpu,
+        { fid: l.lastHs ? derived / Number(l.lastHs) : null, mins: (l.tEnd - l.tRent) / 60000, host: l.hostId });   // 经验基线样本（份额反算，不信自报）
       const realized = derived / (baseTh * 1e12);
       if (!(realized > 0.15 && realized < 2)) { dropped++; continue; }
       const k = gpuKey(l.gpu);
@@ -3570,25 +3598,28 @@ export class Engine {
         const deployPct = (Number(this.cfg.deployCostMin) || 2) / 60 * 100;
         const roiReq = p > 0 ? (Number(this.cfg.targetProfitPct ?? 20) + deployPct) / p : Number(this.cfg.targetProfitPct ?? 20);
         for (const g of this.table || []) {
-          // 价格列必须用**过滤后的 min_bid**（不是 dph：dph 是我们的出价/挂牌，min_bid 才是入场价），
-          // 并给出中位价；min < 0.5×中位 直接标 suspect（假挂牌特征：4090 $0.007、三型号同价 $0.053）。
-          const list = (byModel[g.key] || []).filter(o => !o.floorSkip && !o.insaneSkip && Number(o.minBid) > 0);
+          // 与 applyGates **同一个** isRentable：切片（gpu_frac<1）不进参照表，
+          // 否则半张卡 $0.0533 会被当成"最近可达的那条线"（2026-11-03 踩过）。
+          const list = (byModel[g.key] || []).filter(o => !this.isRentable(o));
           if (!list.length) continue;
-          const bids = list.map(o => Number(o.minBid) / Math.max(1, Number(o.numGpus) || 1));
-          const minBid = +Math.min(...bids).toFixed(4);
-          const medBid = +med(bids).toFixed(4);
+          const nGpu = o => Math.max(1, Number(o.numGpus) || 1);
+          const frac = o => (Number(o.gpuFrac) > 0 ? Number(o.gpuFrac) : 1);
+          const full = list.map(o => Number(o.minBid) / nGpu(o) / frac(o));   // 折整卡价
+          const minBid = +Math.min(...full).toFixed(4);
+          const medBid = +med(full).toFixed(4);
           const suspect = medBid > 0 && minBid < medBid * 0.5;
-          const per = suspect ? medBid : minBid;          // 幽灵价不参与估价
+          const per = suspect ? medBid : minBid;
           const band = this.expectedDeliveredTh(g.name, per);
           const need = band.th > 0 ? +(per * (1 + roiReq / 100) * 24 / band.th).toFixed(4) : null;
+          const wholeCount = list.filter(o => frac(o) >= 0.99).length;
           rows.push({
             model: g.name, minBid, medianBid: medBid, suspect, pricePerGpu: per,
+            wholeCardOnly: wholeCount, fracOffers: list.length - wholeCount,
             th: band.th, confidence: band.confidence || '—', n: band.n ?? 0, band: band.src,
             needDensity: need, nowDensity: +dens6.toFixed(4),
             gapPct: need && dens6 > 0 ? +((need / dens6 - 1) * 100).toFixed(0) : null,
           });
         }
-        // 排序：非 suspect 优先，再按差距
         return rows.sort((a, b) => (a.suspect ? 1 : 0) - (b.suspect ? 1 : 0) || (a.needDensity ?? 9e9) - (b.needDensity ?? 9e9));
       })(),
       pricingAsof: {

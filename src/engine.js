@@ -2310,9 +2310,13 @@ export class Engine {
   // 而定价现在要的是「份额÷基线」的 realized。把旧样本挪到 fidelity，realized 从空开始，
   // 让 l1RealizedDefaults（3080=0.5 等）先顶上，等真实租约攒到 n≥5 再覆盖。
   migrateL1Split() {
-    if (this.st.l1SplitMigratedAt) return { done: false };
+    // 两个口径各自幂等：型号层与房东层分别有迁移标记（2026-11-03 补：只设了型号标记时
+    // 房东层会被提前 return 跳过，导致 l1ForMachine 继续用 fidelity 值估价）
+    const needModel = !this.st.l1SplitMigratedAt;
+    const needHost = !this.st.l1HostSplitMigratedAt;
+    if (!needModel && !needHost) return { done: false };
     let moved = 0;
-    for (const rec of Object.values(this.st.l1ByModel || {})) {
+    for (const rec of needModel ? Object.values(this.st.l1ByModel || {}) : []) {
       if (!rec || !Array.isArray(rec.samples)) continue;
       if (rec.samples.length && !(rec.fidelity || []).length) {
         rec.fidelity = rec.samples.slice();
@@ -2323,7 +2327,7 @@ export class Engine {
       rec.median = null;   // 交给 l1For 现算
     }
     // 房东口径同理：旧样本也是「份额÷自报」，一起挪走，避免它继续影响 l1ForMachine 的定价
-    if (!this.st.l1HostSplitMigratedAt) {
+    if (needHost) {
       for (const rec of Object.values(this.st.l1ByHost || {})) {
         if (!rec || !Array.isArray(rec.samples)) continue;
         if (rec.samples.length && !(rec.fidelity || []).length) {

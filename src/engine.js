@@ -235,6 +235,7 @@ export class Engine {
     // 一次性：把历史租约反算成「房东口径 L1」（幂等，跑过一次就写 l1HostBackfilledAt）
     this.migrateL1Split();   // 先拆口径，再把历史租约回填成房东口径 L1
     this.backfillRealizedFromLeases();  // 用台账里的份额/难度/自报回填 l1Realized
+    this.backfillDeliveredTh();         // 经验基线 + 房东口径 realized
     this.backfillHostL1();
     this.loop(() => this.refreshMarket(), 15_000);
     this.loop(() => this.refreshKryptex(), 30_000, 3000);
@@ -2361,6 +2362,38 @@ export class Engine {
     const byHost = this.l1ForHost(hostId);
     if (byHost != null) return { l1: byHost, source: 'host', hostId };
     return { l1: this.l1For(gpuName), source: 'model', hostId: hostId ?? null };
+  }
+
+  // 补一轮回填（2026-11-03 v2）：上一次只写了型号 realized，缺经验基线与房东口径。
+  // 这里只补 deliveredTh（型号交付算力样本）与 l1ByHost.realized，不动型号 realized。
+  backfillDeliveredTh() {
+    if (this.st.deliveredThBackfilledAt) return { done: false };
+    let kept = 0, dropped = 0;
+    for (const l of this.leases) {
+      if (!l.tEnd || !l.tFirstShare) continue;
+      const secs = (l.tEnd - l.tFirstShare) / 1000;
+      const sh = Number(l.sharesAccepted), diff = Number(l.difficulty);
+      if (!(secs > 300 && sh > 0 && diff > 0)) { dropped++; continue; }
+      const nGpu = Math.max(1, Number(l.numGpus) || 1);
+      const derivedTh = sh * diff * 4294967296 / secs / 1e12;
+      this.recordDeliveredTh(l.gpu, derivedTh / nGpu);
+      const baseTh = this.baseThOf(l.gpu).th * nGpu;
+      const realized = baseTh > 0 ? derivedTh / baseTh : null;
+      if (realized != null && realized > 0.15 && realized < 2 && l.hostId != null) {
+        const hr = ((this.st.l1ByHost ||= {})[String(l.hostId)] ||= { samples: [] });
+        const v = +realized.toFixed(3);
+        if (!hr.samples.includes(v) || hr.lastLease !== String(l.id)) {
+          hr.samples.push(v); hr.lastLease = String(l.id);
+          if (hr.samples.length > 20) hr.samples.splice(0, hr.samples.length - 20);
+          hr.n = hr.samples.length;
+        }
+      }
+      kept++;
+    }
+    this.st.deliveredThBackfilledAt = Date.now();
+    this.save();
+    if (kept) this.log('info', `经验基线/房东 realized 补回填：${kept} 条租约（丢弃 ${dropped}）`);
+    return { done: true, kept, dropped };
   }
 
   // 从台账回填 l1Realized（2026-11-03 用户要求）：旧样本只有 fidelity，但每条租约都留着

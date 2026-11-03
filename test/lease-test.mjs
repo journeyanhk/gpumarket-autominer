@@ -405,6 +405,49 @@ console.log('— 房东三层制：白名单（黑名单让你少亏，白名单
   ok(offHard.spotSkip === true && !!offHard.hostBanned, '硬封房东即使有正收益样本也不出价');
 }
 
+console.log('— 从台账回填 l1Realized + 白名单老化（2026-11-03）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.st.l1ByModel = {}; delete e.st.l1RealizedBackfilledAt;
+  const now = Date.now();
+  // 一条 3080：1000 秒、10 个 diff=2M 的份额、自报 100 TH → derived=10*2M*2^32/1000≈8.6e13=86 TH
+  // realized = 86 / 基线 114.76 ≈ 0.75
+  const mk = (id, gpu, secs, sh, diff, th) => {
+    const l = newLease(id, { gpuName: gpu, spot: true, bid: 0.1, rentedAt: now - (secs + 600) * 1000 }, {}, now - (secs + 600) * 1000);
+    l.tFirstShare = l.tRent + 600 * 1000; l.tEnd = l.tFirstShare + secs * 1000;
+    l.sharesAccepted = sh; l.difficulty = diff; l.localThAvg = th; l.dphTotalActual = 0.1;
+    e.leases.push(l); return l;
+  };
+  mk('B1', 'RTX 3080', 1000, 10, 2097152, 100);
+  mk('B2', 'RTX 3080', 1000, 3, 2097152, 100);   // 份额少 → realized 低但仍在带内
+  const r = e.backfillRealizedFromLeases();
+  ok(r.done && r.kept === 2, `回填 ${r.kept} 条租约（丢弃 ${r.dropped}）`);
+  const rec = e.st.l1ByModel.RTX3080;
+  ok(rec.samples.length === 2 && rec.samples[0] > 0.6 && rec.samples[0] < 1.0 && rec.samples[1] < rec.samples[0],
+     `realized 样本 ${JSON.stringify(rec.samples)}（份额多的那条更高）`);
+  ok(e.backfillRealizedFromLeases().done === false, '回填幂等（第二次直接返回）');
+
+  // 白名单老化：连续 3 天每机时 ≤0 就退出白名单
+  const e2 = new Engine();
+  e2.log = () => {};
+  e2.st.hostWhite = {}; e2.st.l1ByHost = {}; e2.market.price = 1.4;
+  e2.leases = []; e2.st.leases = [];
+  const dayLease = (id, dayOffset, prl, dph = 0.1, mins = 60) => {
+    const end = Date.now() - dayOffset * 24 * 3600e3;
+    const l = newLease(id, { gpuName: 'RTX 2080 Ti', spot: true, bid: dph, rentedAt: end - mins * 60e3, hostId: 777 }, {}, end - mins * 60e3);
+    l.hostId = 777; l.tEnd = end; l.tFirstShare = l.tRent + 60e3;
+    l.creditedPrl = prl; l.dphTotalActual = dph; l.endReason = 'our_stoploss';
+    e2.leases.push(l); return l;
+  };
+  // 三天都是亏的（1 小时 × $0.1 = $0.1 成本，入账 0.01 PRL ≈ $0.014）
+  dayLease('D1', 1, 0.01); dayLease('D2', 2, 0.01); dayLease('D3', 3, 0.01);
+  ok(e2.hostWeakStreak(777) === 3, `连续 3 天每机时 ≤0 → ${e2.hostWeakStreak(777)}`);
+  // 再补一条盈利的日子（最近的）→ 重置
+  dayLease('D0', 0, 0.2);
+  ok(e2.hostWeakStreak(777) === 0, '最近一天转正 → 连负计数归零');
+}
+
 console.log('— L1 价位分带：l1Model 与 l1RealizedCheap 分开（2026-11-02）');
 {
   const e = new Engine();

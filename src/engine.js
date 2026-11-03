@@ -207,6 +207,7 @@ export class Engine {
     this.log('info', `程序启动（脚本版本 v${SCRIPT_VERSION}；若与 src/onstart.js 不一致说明进程未重载）`);
     // 一次性：把历史租约反算成「房东口径 L1」（幂等，跑过一次就写 l1HostBackfilledAt）
     this.migrateL1Split();   // 先拆口径，再把历史租约回填成房东口径 L1
+    this.backfillRealizedFromLeases();  // 用台账里的份额/难度/自报回填 l1Realized
     this.backfillHostL1();
     this.loop(() => this.refreshMarket(), 15_000);
     this.loop(() => this.refreshKryptex(), 30_000, 3000);
@@ -1856,6 +1857,17 @@ export class Engine {
       if (b.done < Number(cfg.minLeases ?? 3)) continue;                       // 样本太少不表态
       if (b.medianLife == null || b.medianLife < Number(cfg.minMedianLifeMin ?? 60)) continue;
       if (b.netPerHour == null || b.netPerHour <= Number(cfg.minNetPerHour ?? 0)) continue;
+      // 老化：连续 3 天每机时 ≤0 → 退回观察层（局部失效，不是永久拉黑）
+      const weak = this.hostWeakStreak(h, now);
+      if (weak >= 3) {
+        (this.st.hostWhiteWeak ||= {})[h] = { at: now, streak: weak };
+        if (!(this._weakLogged ||= {})[h]) {
+          this._weakLogged[h] = true;
+          this.log('warn', `房东 ${h} 连续 ${weak} 天每机时净收益 ≤0 → 退出白名单（回到 24h 观察，不再享受 P/L1 折扣）`);
+        }
+        continue;
+      }
+      delete (this.st.hostWhiteWeak || {})[h];
       // 硬封（7 天档）压过白名单；24 小时观察期不压——白名单的三条样本已经把这个房东的
       // 收回率定价过了（netPerHour 为正、中位 >60 分钟），观察期只是"样本不足"的保守默认值。
       const ban = (this.st.hostBans || {})[h];
@@ -1869,6 +1881,37 @@ export class Engine {
       this.log('info', `房东白名单新增 ${added.length} 个：${added.map(h => `${h}（每机时 $${white[h].netPerHour}、中位 ${white[h].medianLife} 分钟、${white[h].n} 条）`).join('；')}`);
     }
     return Object.keys(white);
+  }
+
+  // 白名单老化（2026-11-03 用户要求）：白名单是一次性判定，房东会"变老"。
+  // 按 UTC 日切桶算每机时净收益，最近 3 个**有数据**的日子都 ≤0 → 退回 24h 观察（不再享受 P/L1 折扣）。
+  // 之后若三条入场条件再次同时满足（且不再连续为负），会自动回到白名单。
+  hostWeakStreak(hostId, now = Date.now()) {
+    if (hostId == null) return 0;
+    const price = Number(this.market.price) || 0;
+    if (!(price > 0)) return 0;
+    const days = {};
+    for (const l of this.leases) {
+      if (!l.tEnd || String(l.hostId) !== String(hostId)) continue;
+      if (isOurKill(l)) continue;                       // 我们自己杀的不算房东表现
+      const day = new Date(l.tEnd).toISOString().slice(0, 10);
+      const hrs = Math.max(0, (l.tEnd - l.tRent) / 3_600_000);
+      const b = days[day] ||= { hrs: 0, paid: 0, prl: 0 };
+      b.hrs += hrs;
+      b.paid += (Number(l.dphTotalActual ?? l.bidFinal ?? 0) || 0) * hrs;
+      b.prl += Number(l.creditedPrl) || 0;
+    }
+    const keys = Object.keys(days).sort().slice(-3);
+    if (keys.length < 3) return 0;                      // 不足 3 天有数据 → 不判定
+    let streak = 0;
+    for (const k of keys) {
+      const b = days[k];
+      if (b.hrs < 0.05) return 0;                       // 当天几乎没跑 → 不算一天
+      const netHr = (b.prl * price - b.paid) / b.hrs;
+      if (netHr > 0) return 0;                          // 有一天为正就重置
+      streak++;
+    }
+    return streak;
   }
 
   isWhitelisted(hostId) {
@@ -2298,6 +2341,43 @@ export class Engine {
     const byHost = this.l1ForHost(hostId);
     if (byHost != null) return { l1: byHost, source: 'host', hostId };
     return { l1: this.l1For(gpuName), source: 'model', hostId: hostId ?? null };
+  }
+
+  // 从台账回填 l1Realized（2026-11-03 用户要求）：旧样本只有 fidelity，但每条租约都留着
+  // 份额、难度与矿工自报，可以直接算 realized = (份额×难度×2^32÷秒数) ÷ 型号基线。
+  // 缺 localHs/份额的租约才丢弃。一次性、幂等。
+  backfillRealizedFromLeases() {
+    if (this.st.l1RealizedBackfilledAt) return { done: false };
+    const rec = this.st.l1ByModel ||= {};
+    let kept = 0, dropped = 0;
+    for (const l of this.leases) {
+      if (!l.tEnd || !l.tFirstShare) continue;
+      const secs = (l.tEnd - l.tFirstShare) / 1000;
+      const sh = Number(l.sharesAccepted), diff = Number(l.difficulty);
+      const hs = Number(l.lastHs) || Number(l.localThAvg) * 1e12;
+      if (!(secs > 300 && sh > 0 && diff > 0 && hs > 0)) { dropped++; continue; }
+      const table = this.thFor(l.gpu);
+      const baseTh = (table?.effective || 0) * Math.max(1, Number(l.numGpus) || 1);
+      if (!(baseTh > 0)) { dropped++; continue; }
+      const derived = sh * diff * 4294967296 / secs;
+      const realized = derived / (baseTh * 1e12);
+      if (!(realized > 0.15 && realized < 2)) { dropped++; continue; }
+      const k = gpuKey(l.gpu);
+      const r = rec[k] ||= { samples: [] };
+      const v = +realized.toFixed(3);
+      if (!r.samples.includes(v) || r.lastLease !== String(l.id)) {
+        r.samples.push(v);
+        (r.prices ||= []).push(Number(l.dphTotalActual ?? l.bidFinal ?? 0) || null);
+        r.lastLease = String(l.id);
+      }
+      if (r.samples.length > 20) r.samples.splice(0, r.samples.length - 20);
+      r.n = r.samples.length;
+      kept++;
+    }
+    this.st.l1RealizedBackfilledAt = Date.now();
+    this.save();
+    if (kept) this.log('info', `l1Realized 回填：${kept} 条租约（丢弃 ${dropped} 条缺份额/自报）`);
+    return { done: true, kept, dropped };
   }
 
   // 一次性回填「房东口径 L1」（2026-10-30）。

@@ -23,7 +23,7 @@ const ok = (c, m) => { if (c) { pass++; console.log('  ✓', m); } else { fail++
 const e = new Engine();
 // 不打生产参数的主意：给每个型号注入 5 条健康交付样本（= 规格算力、fid 1.0、存活 90 分钟），
 // 让定价走真实的 high-confidence 路径；未校准兜底仍保持生产值 0.6
-for (const g of e.table) for (let i = 0; i < 5; i++) e.recordDeliveredTh(g.name, g.effective, 0.12, { fid: 1.0, mins: 90 });
+for (const g of e.table) for (let i = 0; i < 5; i++) e.recordDeliveredTh(g.name, g.effective, 0.12, { fid: 1.0, mins: 90, frac: 1, nGpu: 1 });
 e.log = () => {};
 await e.refreshVast();
 ok(e.instancesOk === true, 'v0 返回 410 的平台上，实例列表仍然读得到（走 v1）');

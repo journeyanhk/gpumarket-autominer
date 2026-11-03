@@ -222,7 +222,13 @@ export class Engine {
     (rec.prices ||= []).push(Number(pricePerGpu) > 0 ? +Number(pricePerGpu).toFixed(4) : null);
     // quality: {fid, mins} —— 只有"机器健康"的样本才能压低贵档估计（2026-11-03 用户要求）
     (rec.qual ||= []).push(quality && Number.isFinite(Number(quality.fid))
-      ? { fid: +Number(quality.fid).toFixed(2), mins: Math.round(Number(quality.mins) || 0), host: quality.host ?? null } : null);
+      ? {
+          fid: +Number(quality.fid).toFixed(2), mins: Math.round(Number(quality.mins) || 0),
+          host: quality.host ?? null,
+          // 可比性键（2026-11-03）：半卡的交付天然只有整卡一半，跨 frac 组取中位会把型号拉低 40%
+          frac: Number(quality.frac) > 0 ? +Number(quality.frac).toFixed(3) : null,
+          nGpu: Number(quality.nGpu) > 0 ? Math.round(Number(quality.nGpu)) : null,
+        } : null);
     if (rec.samples.length > 20) {
       rec.samples.splice(0, rec.samples.length - 20);
       rec.prices.splice(0, rec.prices.length - 20);
@@ -249,9 +255,15 @@ export class Engine {
     const pairs = (rec?.samples || []).map((v, i) => ({ v, p: (rec.prices || [])[i] })).filter(x => Number.isFinite(x.v) && x.v > 5);
     const med = arr => { const a = arr.map(x => x.v).sort((x, y) => x - y); const m = Math.floor(a.length / 2); return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
     const sane = th => (spec > 0 ? Math.abs(th / spec - 1) <= 0.4 : null);
-    const priced = pairs.filter(x => x.p > 0).sort((a, b) => a.p - b.p);
     const qual = rec?.qual || [];
-    const healthyOf = arr => arr.filter(x => this._healthySample(qual[(rec.samples || []).indexOf(x.v)]));
+    const qualOf = (v) => qual[(rec.samples || []).indexOf(v)] || null;
+    // 可比性（2026-11-03 用户要求）：只用「整卡（frac>=0.99）」样本定价；缺 frac 的历史样本
+    // 标 fracUnknown 并排除（宁可慢一点，不要脏样本——半卡会把型号中位凭空拉低 40%）。
+    const wholePairs = pairs.filter(x => { const q = qualOf(x.v); return q && Number(q.frac) >= 0.99; });
+    const unknownFrac = pairs.length - wholePairs.length;
+    const priced = wholePairs.filter(x => x.p > 0).sort((a, b) => a.p - b.p);
+    const healthyOf = arr => arr.filter(x => this._healthySample(qualOf(x.v)));
+    const stat = { n: wholePairs.length, unknownFrac };
     // 置信度（2026-11-03）：>=5 条 high；2~4 条 low（×0.85）；<2 条退型号中位或规格×0.6（uncalibrated）
     // 单调性（同日补）：贵档不得低于便宜档——用保序（取 max）而不是各自独立取中位；
     // 且**烂机器样本不能定义贵档上限**：贵档只认"健康样本"（fid>=0.7 且存活>=60min）。
@@ -272,15 +284,15 @@ export class Engine {
         const raw = +Math.max(raw0, cheapMed).toFixed(1);         // 单调：贵档 >= 便宜档
         const high = useArr.length >= 5;
         const th = high ? raw : +(raw * 0.85).toFixed(1);
-        return { th, raw, src: cheapSide ? 'cheap-band' : 'premium-band', confidence: high ? 'high' : 'low', n: useArr.length, spec, sane: sane(th) };
+        return { th, raw, src: cheapSide ? 'cheap-band' : 'premium-band', confidence: high ? 'high' : 'low', n: useArr.length, unknownFrac: stat.unknownFrac, spec, sane: sane(th) };
       }
     }
-    if (pairs.length >= 5) {
+    if (wholePairs.length >= 5) {
       // 型号中位还要「>=2 个不同 host」：否则型号画像会变成某一台机器的画像
-      const hosts = new Set((rec?.qual || []).map(q => q?.host).filter(h => h != null).map(String));
+      const hosts = new Set(wholePairs.map(x => qualOf(x.v)?.host).filter(h => h != null).map(String));
       if (hosts.size >= 2) {
-        const raw = +med(pairs).toFixed(1);
-        return { th: raw, raw, src: 'model-median', confidence: 'model', n: pairs.length, spec, sane: sane(raw) };
+        const raw = +med(wholePairs).toFixed(1);
+        return { th: raw, raw, src: 'model-median', confidence: 'model', n: wholePairs.length, unknownFrac: stat.unknownFrac, spec, sane: sane(raw) };
       }
     }
     // 贵档没有健康样本时：不低于便宜档中位（宁可沿用便宜档，也不用烂机器把上限压低）
@@ -291,11 +303,11 @@ export class Engine {
         const raw = +med(cheapArr).toFixed(1);
         const high = cheapArr.length >= 5;
         const th = high ? raw : +(raw * 0.85).toFixed(1);
-        return { th, raw, src: 'cheap-carryover', confidence: high ? 'high' : 'low', n: cheapArr.length, spec, sane: sane(th) };
+        return { th, raw, src: 'cheap-carryover', confidence: high ? 'high' : 'low', n: cheapArr.length, unknownFrac: stat.unknownFrac, spec, sane: sane(th) };
       }
     }
     const th = +(spec * Number(this.cfg.uncalibratedFactor ?? 0.6)).toFixed(1);
-    return { th, raw: th, src: 'spec', confidence: 'uncalibrated', n: pairs.length, spec, sane: null };
+    return { th, raw: th, src: 'spec', confidence: 'uncalibrated', n: 0, unknownFrac: stat.unknownFrac, spec, sane: null };
   }
 
   thFor(name) {
@@ -1659,6 +1671,25 @@ export class Engine {
       total: raw.length, known, profitable: out.filter(x => x.roi !== null && x.roi >= this.cfg.targetProfitPct).length,
       scannedAt: now, error: null,
     };
+    // 供给厚度（2026-11-03 用户要求，为 D14 服务）：每小时记一次「可租整卡数」。
+    // 没有这个数，"密度够了却只租到 1 台"会被误读成策略失败，实际是供给只有 1-2 条。
+    {
+      const hourKey = Math.floor(now / 3600e3);
+      if (this._supplyHour !== hourKey) {
+        const counts = {};
+        for (const o of out) {
+          if (this.isRentable(o)) continue;
+          if (Number(o.gpuFrac ?? 1) < 0.99) continue;
+          const k = gpuKey(o.gpuName);
+          counts[k] = (counts[k] || 0) + 1;
+        }
+        const hist = (this.st.supplyHist ||= []);
+        hist.push({ t: now, counts });
+        if (hist.length > 168) hist.splice(0, hist.length - 168);   // 7 天小时级
+        this._supplyHour = hourKey;
+        this.save();
+      }
+    }
   }
 
   // min_bid 走势：返回 { unstable, changePct, spanMin }；样本不足返回 null（不误杀新机）
@@ -3623,6 +3654,11 @@ export class Engine {
         }
         return rows.sort((a, b) => (a.suspect ? 1 : 0) - (b.suspect ? 1 : 0) || (a.needDensity ?? 9e9) - (b.needDensity ?? 9e9));
       })(),
+      supply: {
+        at: this.st.supplyHist?.at(-1)?.t || null,
+        counts: this.st.supplyHist?.at(-1)?.counts || null,
+        recent: (this.st.supplyHist || []).slice(-24).map(h => ({ t: h.t, counts: h.counts })),
+      },
       pricingAsof: {
         densityAt: this.market.updatedAt || null, densitySrc: this.cfg.revenueSource || 'min',
         quotesAt: this.offerStats.scannedAt || null, targetProfitPct: Number(this.cfg.targetProfitPct ?? 20),

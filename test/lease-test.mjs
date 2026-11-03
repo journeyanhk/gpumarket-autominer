@@ -22,7 +22,7 @@ console.log('— (a) 追价开关默认关闭');
   const e = new Engine();
 // 不打生产参数的主意：给每个型号注入 5 条健康交付样本（= 规格算力、fid 1.0、存活 90 分钟），
 // 让定价走真实的 high-confidence 路径；未校准兜底仍保持生产值 0.6
-for (const g of e.table) for (let i = 0; i < 5; i++) e.recordDeliveredTh(g.name, g.effective, 0.12, { fid: 1.0, mins: 90 });
+for (const g of e.table) for (let i = 0; i < 5; i++) e.recordDeliveredTh(g.name, g.effective, 0.12, { fid: 1.0, mins: 90, frac: 1, nGpu: 1 });
   e.log = () => {};
   ok(Number(e.cfg.maxBidRaises) === 0, `默认 maxBidRaises=0（当前 ${e.cfg.maxBidRaises}）`);
   e.rawInstances = [{ id: 501, label: '', gpu_name: 'RTX 3090', num_gpus: 1, dph_total: 0.12, dph_base: 0.12, actual_status: 'stopped', intended_status: 'stopped', start_date: Date.now() / 1000 - 600, machine_id: 9, min_bid: 0.2 }];
@@ -463,7 +463,7 @@ console.log('— 定价不变量：唯一真源 + 回填幂等（2026-11-03 用�
   e.log = () => {};
   e.cfg.uncalibratedFactor = 1; e.cfg.targetProfitPct = 20;
   // 合成一条价格带样本：3080 交付 90 TH、单价 $0.12
-  e.st.deliveredTh = { RTX3080: { samples: [90, 88, 92, 89, 91], prices: [0.12, 0.12, 0.12, 0.12, 0.12] } };
+  e.st.deliveredTh = { RTX3080: { samples: [90, 88, 92, 89, 91], prices: [0.12, 0.12, 0.12, 0.12, 0.12], qual: Array.from({ length: 5 }, () => ({ fid: 1.0, mins: 90, host: 1, frac: 1, nGpu: 1 })) } };
   const mk = (l1) => {
     const o = { id: 1, machineId: 1, gpuName: 'RTX 3080', numGpus: 1, dph: 0.12, listDph: 0.12,
       bid: null, spotSkip: false, spot: true, minBid: 0.12, l1, hostId: null };

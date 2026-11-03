@@ -25,7 +25,7 @@ const logs = [];
 const e = new Engine();
 // 不打生产参数的主意：给每个型号注入 5 条健康交付样本（= 规格算力、fid 1.0、存活 90 分钟），
 // 让定价走真实的 high-confidence 路径；未校准兜底仍保持生产值 0.6
-for (const g of e.table) for (let i = 0; i < 5; i++) e.recordDeliveredTh(g.name, g.effective, 0.12, { fid: 1.0, mins: 90 });
+for (const g of e.table) for (let i = 0; i < 5; i++) e.recordDeliveredTh(g.name, g.effective, 0.12, { fid: 1.0, mins: 90, frac: 1, nGpu: 1 });
 // L1 折算（份额反推算力 ÷ 矿工自报）会整体压低报价；这些用例测的是别的逻辑，
 // 所以这里把它设成 1，L1 本身由 lease-test 的「L1 按型号维护」一节覆盖。
 e.cfg.l1Default = 1;

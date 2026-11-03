@@ -3571,7 +3571,12 @@ export class Engine {
           const per = cheapest.dph / Math.max(1, Number(cheapest.numGpus) || 1);
           const band = this.expectedDeliveredTh(g.name, per);
           const dens = this.usdHsHr6h * 1e12 * 24;
-          const need = band.th > 0 ? +(per * (1 + this.cfg.targetProfitPct / 100) * 24 / band.th).toFixed(4) : null;
+          // 达标密度必须用**期望 ROI 门槛**（含 P 与部署成本），不能只用名义 20%：
+          //   roiReq = (target + deployPct) / P；陌生人 P=0.5、deploy=3.33% → ×1.467
+          const p = Number(this.cfg.pSurviveDefault ?? 0.5);
+          const deployPct = (Number(this.cfg.deployCostMin) || 2) / 60 * 100;
+          const roiReq = p > 0 ? (Number(this.cfg.targetProfitPct ?? 20) + deployPct) / p : Number(this.cfg.targetProfitPct ?? 20);
+          const need = band.th > 0 ? +(per * (1 + roiReq / 100) * 24 / band.th).toFixed(4) : null;
           rows.push({
             model: g.name, pricePerGpu: +per.toFixed(4), th: band.th, confidence: band.confidence || '—', n: band.n ?? 0,
             band: band.src, needDensity: need, nowDensity: +dens.toFixed(4),

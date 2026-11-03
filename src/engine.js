@@ -1388,7 +1388,9 @@ export class Engine {
     // L1 折算必须收敛在这里：参考算力来自矿工自报，卖出去的只有 0.76~0.93 倍。
     // 之前 evaluateOffers 里乘过 L1，但这里又用 ref.effective 覆盖了 o.th，等于白乘。
     o.l1 = Number.isFinite(Number(o.l1)) ? Number(o.l1) : this.l1For(o.gpuName);
-    o.th = (Number(o.thRaw) || Number(o.th) || 0) * o.l1;
+    // 有型号表时 thRaw 就是「价格带预期交付」（已含该价位的实现水平），不再乘 l1；
+    // 表外型号没有 band，才退回 thRaw × l1 的老路径。
+    o.th = this.thFor(o.gpuName) ? (Number(o.thRaw) || 0) : (Number(o.thRaw) || Number(o.th) || 0) * o.l1;
     o.revenueHr = o.th * 1e12 * usd;
     if (!o.spot) {
       o.spotSkip = false;
@@ -2410,7 +2412,7 @@ export class Engine {
   // 补一轮回填（2026-11-03 v2）：上一次只写了型号 realized，缺经验基线与房东口径。
   // 这里只补 deliveredTh（型号交付算力样本）与 l1ByHost.realized，不动型号 realized。
   backfillDeliveredTh() {
-    if (this.st.deliveredThBackfillV === 2) return { done: false };   // v2：按经验基线重算 realized
+    if (this.st.deliveredThBackfillV === 3) return { done: false };   // v3：补单价（价格带用）
     const rows = [];
     for (const l of this.leases) {
       if (!l.tEnd || !l.tFirstShare) continue;
@@ -2453,7 +2455,7 @@ export class Engine {
       rec.n = rec.samples.length;
       rec.median = null;
     }
-    this.st.deliveredThBackfillV = 2;
+    this.st.deliveredThBackfillV = 3;
     this.save();
     if (kept) this.log('info', `经验基线回填：${kept} 条租约（realized 已按经验基线重算）`);
     return { done: true, kept };

@@ -42,6 +42,22 @@ async function fetchKryptex() {
   }
   return null;
 }
+// 7 日占比基线（2026-11-03 用户要求）：单日占比会因矿工换池抖动 ±3~5 个点，
+// 用"昨天"当基线误报太多；改成"低于 7 日中位 5 个点以上"才算信号。
+function shareHistory() {
+  try {
+    const lines = fs.readFileSync(OUT, 'utf8').trim().split('\n').filter(Boolean);
+    const vals = [];
+    for (const ln of lines) {
+      const o = JSON.parse(ln);
+      const v = o?.kryptex?.sharePct;
+      if (Number(v) > 0) vals.push(Number(v));
+    }
+    return vals.slice(-7);
+  } catch { return []; }
+}
+const median = a => { const v = [...a].sort((x, y) => x - y); if (!v.length) return null; const m = Math.floor(v.length / 2); return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2; };
+
 // 前一天同一份 jsonl 的最后一条，用来算池算力的日变化
 function prevKryptex() {
   try {
@@ -79,6 +95,9 @@ try {
   // 池掉 5% 而全网平只是矿工换池（与我们无关）。两种情形处置完全不同。
   out.kryptexShareChangePct = prevKx && out.kryptex && prevKx.sharePct > 0 && out.kryptex.sharePct != null
     ? +((out.kryptex.sharePct / prevKx.sharePct - 1) * 100).toFixed(2) : null;
+  const hist = shareHistory();
+  out.shareBaseline7d = hist.length >= 3 ? +median(hist).toFixed(1) : null;
+  out.shareDropPts = out.shareBaseline7d != null && out.kryptex?.sharePct != null ? +(out.kryptex.sharePct - out.shareBaseline7d).toFixed(1) : null;
   out.netChangePct = prevKx && out.kryptex && prevKx.netHsEh > 0
     ? +((out.kryptex.netHsEh / prevKx.netHsEh - 1) * 100).toFixed(2) : null;
   // 信号：Pearl 难度停滞或回落 = 流入停/外流；其余 GPU 币难度下跌 = 矿工在离开别的币
@@ -89,7 +108,7 @@ try {
     pearlFalling: out.pearl != null && out.pearl < -1.5,
     gpuFalling: falling,
     // 领先信号：**池占比**日变化 ≤ -3%（比难度更早反映"矿工在离开我们这条链"）
-    poolShareFalling: out.kryptexShareChangePct != null && out.kryptexShareChangePct <= -3,
+    poolShareFalling: out.shareDropPts != null && out.shareDropPts <= -5,   // 低于 7 日中位 5 个点
     // 市场整体撤退：池算力与全网同时下降（对密度是好消息）
     marketRetreat: out.kryptexChangePct != null && out.netChangePct != null && out.kryptexChangePct <= -3 && out.netChangePct <= -3,
   };
@@ -110,7 +129,9 @@ for (const [name, v] of Object.entries(out.coins)) {
 if (out.kryptex) {
   const chg = out.kryptexChangePct == null ? '（无历史基线）' : `${out.kryptexChangePct > 0 ? '+' : ''}${out.kryptexChangePct}%`;
   const shChg = out.kryptexShareChangePct == null ? '—' : `${out.kryptexShareChangePct > 0 ? '+' : ''}${out.kryptexShareChangePct}%`;
-  console.log(`Kryptex 池算力 ${out.kryptex.poolHsEh} EH/s（占全网 ${out.kryptex.sharePct}%，算力日变化 ${chg}，占比日变化 ${shChg}）`);
+  const base = out.shareBaseline7d == null ? '—' : `${out.shareBaseline7d}%（7 日中位）`;
+  const drop = out.shareDropPts == null ? '—' : `${out.shareDropPts > 0 ? '+' : ''}${out.shareDropPts}pt`;
+  console.log(`Kryptex 池算力 ${out.kryptex.poolHsEh} EH/s（占全网 ${out.kryptex.sharePct}%，7 日基线 ${base}，偏离 ${drop}；算力日变化 ${chg}）`);
 }
 const s = out.signal || {};
 if (s.marketRetreat) console.log(`→ 池算力 ${out.kryptexChangePct}% 且全网 ${out.netChangePct}%：市场整体撤退（对密度是好消息）`);

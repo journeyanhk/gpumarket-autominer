@@ -235,21 +235,29 @@ export class Engine {
     const spec = this.thFor(gpuName)?.effective || 0;
     const pairs = (rec?.samples || []).map((v, i) => ({ v, p: (rec.prices || [])[i] })).filter(x => Number.isFinite(x.v) && x.v > 5);
     const med = arr => { const a = arr.map(x => x.v).sort((x, y) => x - y); const m = Math.floor(a.length / 2); return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
+    const sane = th => (spec > 0 ? Math.abs(th / spec - 1) <= 0.4 : null);
     const priced = pairs.filter(x => x.p > 0).sort((a, b) => a.p - b.p);
+    // 置信度（2026-11-03 用户要求）：用 2 个样本冒充"价格带估计"在统计上等于没估计。
+    //   >=5 条 → high（带内中位）
+    //   2~4 条 → low（带内中位 ×0.85 安全系数）
+    //   <2 条 → 退型号中位（>=5 条），否则 规格×0.6 并标 uncalibrated
     if (priced.length >= 2 && Number(pricePerGpu) > 0) {
       const pMed = priced[Math.floor(priced.length / 2)].p;
       const cheapSide = Number(pricePerGpu) <= pMed;
       const band = cheapSide ? priced.filter(x => x.p <= pMed) : priced.filter(x => x.p > pMed);
       if (band.length >= 2) {
-        const th = +med(band).toFixed(1);
-        return { th, src: cheapSide ? 'cheap-band' : 'premium-band', n: band.length, spec, sane: spec > 0 ? Math.abs(th / spec - 1) <= 0.4 : null };
+        const raw = +med(band).toFixed(1);
+        const high = band.length >= 5;
+        const th = high ? raw : +(raw * 0.85).toFixed(1);
+        return { th, raw, src: cheapSide ? 'cheap-band' : 'premium-band', confidence: high ? 'high' : 'low', n: band.length, spec, sane: sane(th) };
       }
     }
-    if (pairs.length >= 2) {   // 两条独立租约就比规格表可信（规格只做校验）
-      const th = +med(pairs).toFixed(1);
-      return { th, src: 'all-samples', n: pairs.length, spec, sane: spec > 0 ? Math.abs(th / spec - 1) <= 0.4 : null };
+    if (pairs.length >= 5) {
+      const raw = +med(pairs).toFixed(1);
+      return { th: raw, raw, src: 'model-median', confidence: 'model', n: pairs.length, spec, sane: sane(raw) };
     }
-    return { th: spec, src: 'spec', n: pairs.length, spec, sane: null };
+    const th = +(spec * Number(this.cfg.uncalibratedFactor ?? 0.6)).toFixed(1);
+    return { th, raw: th, src: 'spec', confidence: 'uncalibrated', n: pairs.length, spec, sane: null };
   }
 
   thFor(name) {
@@ -1385,6 +1393,7 @@ export class Engine {
       o.thRaw = band.th * o.numGpus;
       o.source = ref.source; o.autoOk = ref.autoOk;
       o.baseSrc = band.src; o.baseTh = band.th;
+      o.confidence = band.confidence; o.bandN = band.n; o.bandRaw = band.raw;
       o.l1 = band.spec > 0 ? +(band.th / band.spec).toFixed(3) : o.l1;   // 只做展示：交付 ÷ 规格
       if (band.sane === false) this._warnOnce(`spec-${o.gpuName}`, `${o.gpuName} 的经验交付 ${band.th} TH 偏离规格 ${band.spec} TH 超 40%（${band.src}，n=${band.n}），查规格表`);
     }
@@ -2792,7 +2801,7 @@ export class Engine {
     const tp = this.thPer01Of(offer);
     const lineTxt = line && tp ? `｜${Math.round(tp).toLocaleString('en-US')} TH/$0.1h，今日线 ${Math.round(line)}，${tp >= line ? '过线' : '不过线'}` : '';
     const tag = by === 'auto' ? '自动' : '手动';
-    this.log('success', `${tag}租用 ${offer.numGpus}×${offer.gpuName}（实例 ${id}）${offer.spot ? '竞价出价' : ''}$${offer.dph.toFixed(4)}/h${ratio}，挖 ${poolName(def)}，预计收益率 ${offer.roi == null ? '—（force 手抄单）' : offer.roi.toFixed(1) + '%'}${lineTxt}`);
+    this.log('success', `${tag}租用 ${offer.numGpus}×${offer.gpuName}（实例 ${id}）${offer.spot ? '竞价出价' : ''}$${offer.dph.toFixed(4)}/h${ratio}，挖 ${poolName(def)}，预计收益率 ${offer.roi == null ? '—（force 手抄单）' : offer.roi.toFixed(1) + '%'}｜定价置信度 ${offer.confidence || '—'}（${offer.baseSrc || '?'}，n=${offer.bandN ?? '—'}）${lineTxt}`);
     setTimeout(() => this.refreshVast(), 3000);
     return id;
   }

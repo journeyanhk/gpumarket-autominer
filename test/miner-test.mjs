@@ -154,6 +154,7 @@ console.log('— 端到端：真实 bash + 真包（review #8）');
 console.log('— 引擎在清单不可用时不租');
 const { Engine } = await import(U('src/engine.js'));
 const e = new Engine();
+e.cfg.uncalibratedFactor = 1;   // 测试里关掉「未校准型号 ×0.6」的保守系数
 e.log = () => {};
 e.minerManifest = null;
 e.minerError = '模拟：清单损坏';

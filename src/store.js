@@ -72,6 +72,8 @@ export const DEFAULT_CONFIG = {
   // 2026-11-03 用户定：3080 从 0.8 降到 0.5（两台实测 0.39/0.50），4070S 同档 0.5，
   // 2080 Ti 用类比估计 0.72。这些是"保守先验"，等真实租约攒到 n≥5 再用实测覆盖。
   l1RealizedDefaults: { RTX2080TI: 0.72, RTX3080: 0.5, RTX4070S: 0.5 },
+  // 没有交付样本的型号：按规格 × 这个系数保守定价（2026-11-03 用户定 0.6），并标 uncalibrated
+  uncalibratedFactor: 0.6,
   l1Default: 0.8,           // 上表没有的型号的兜底
   l1ModelCap: 1.5,          // 型号口径封顶（2026-11-03 从 1.0 放宽）：realized 是相对经验基线的偏差，>1 合法
   maxSaneRoiPct: 500,       // 名义 ROI 超过它的报价视为错标（正常 0~200%）

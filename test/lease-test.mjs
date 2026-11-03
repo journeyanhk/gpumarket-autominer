@@ -20,6 +20,7 @@ const MIN_ = MIN;
 console.log('— (a) 追价开关默认关闭');
 {
   const e = new Engine();
+e.cfg.uncalibratedFactor = 1;   // 测试里关掉「未校准型号 ×0.6」的保守系数
   e.log = () => {};
   ok(Number(e.cfg.maxBidRaises) === 0, `默认 maxBidRaises=0（当前 ${e.cfg.maxBidRaises}）`);
   e.rawInstances = [{ id: 501, label: '', gpu_name: 'RTX 3090', num_gpus: 1, dph_total: 0.12, dph_base: 0.12, actual_status: 'stopped', intended_status: 'stopped', start_date: Date.now() / 1000 - 600, machine_id: 9, min_bid: 0.2 }];
@@ -452,6 +453,40 @@ console.log('— 从台账回填 l1Realized + 白名单老化（2026-11-03）');
   e2.leases = []; e2.leases.push(...[['O1', 10, 10]]);
   mkL('O1', 300, 10, { reclaim: true, daysAgo: 10 });
   ok(e2.hostBehavior7d(300).n === 0, '7 天窗口之外的租约不参与行为判定');
+}
+
+console.log('— 定价不变量：唯一真源 + 回填幂等（2026-11-03 用户要求）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.cfg.uncalibratedFactor = 1; e.cfg.targetProfitPct = 20;
+  // 合成一条价格带样本：3080 交付 90 TH、单价 $0.12
+  e.st.deliveredTh = { RTX3080: { samples: [90, 88, 92, 89, 91], prices: [0.12, 0.12, 0.12, 0.12, 0.12] } };
+  const mk = (l1) => {
+    const o = { id: 1, machineId: 1, gpuName: 'RTX 3080', numGpus: 1, dph: 0.12, listDph: 0.12,
+      bid: null, spotSkip: false, spot: true, minBid: 0.12, l1, hostId: null };
+    e.priceOffer(o, e.usdHsHr6h || 1e-12);
+    return o;
+  };
+  const a = mk(0.3), b = mk(1.4);
+  ok(a.th === b.th && a.revenueHr === b.revenueHr, `定价唯一真源：l1 从 0.3 改到 1.4，th 不变（${a.th} TH）`);
+  ok(a.confidence === 'high' && a.bandN === 5, `置信度标签：${a.confidence}（n=${a.bandN}）`);
+
+  // 回填幂等：同一份台账连跑三次，deliveredTh 不变
+  const e2 = new Engine();
+  e2.log = () => {};
+  e2.st.deliveredTh = {}; delete e2.st.deliveredThBackfillV;
+  e2.leases = []; e2.st.leases = [];
+  const mkL = (id, mins, sh, diff, th) => {
+    const end = Date.now();
+    const l = newLease(id, { gpuName: 'RTX 3080', spot: true, bid: 0.1, rentedAt: end - (mins + 10) * 60e3 }, {}, end - (mins + 10) * 60e3);
+    l.tFirstShare = l.tRent + 60e3; l.tEnd = end; l.sharesAccepted = sh; l.difficulty = diff; l.localThAvg = th; l.dphTotalActual = 0.1;
+    e2.leases.push(l);
+  };
+  mkL('I1', 20, 10, 2097152, 100);
+  const snapshots = [];
+  for (let i = 0; i < 3; i++) { delete e2.st.deliveredThBackfillV; e2.backfillDeliveredTh(); snapshots.push(JSON.stringify(e2.st.deliveredTh)); }
+  ok(snapshots[0] === snapshots[1] && snapshots[1] === snapshots[2], `回填幂等：三次结果一致（${JSON.parse(snapshots[0]).RTX3080.samples.length} 条样本）`);
 }
 
 console.log('— L1 价位分带：l1Model 与 l1RealizedCheap 分开（2026-11-02）');

@@ -428,24 +428,30 @@ console.log('— 从台账回填 l1Realized + 白名单老化（2026-11-03）');
      `realized 样本 ${JSON.stringify(rec.samples)}（份额多的那条更高）`);
   ok(e.backfillRealizedFromLeases().done === false, '回填幂等（第二次直接返回）');
 
-  // 白名单老化：连续 3 天每机时 ≤0 就退出白名单
+  // 白名单退出只看行为（2026-11-03 改）：收回率与中位存活，收益不参与退出判定
   const e2 = new Engine();
   e2.log = () => {};
-  e2.st.hostWhite = {}; e2.st.l1ByHost = {}; e2.market.price = 1.4;
-  e2.leases = []; e2.st.leases = [];
-  const dayLease = (id, dayOffset, prl, dph = 0.1, mins = 60) => {
-    const end = Date.now() - dayOffset * 24 * 3600e3;
-    const l = newLease(id, { gpuName: 'RTX 2080 Ti', spot: true, bid: dph, rentedAt: end - mins * 60e3, hostId: 777 }, {}, end - mins * 60e3);
-    l.hostId = 777; l.tEnd = end; l.tFirstShare = l.tRent + 60e3;
-    l.creditedPrl = prl; l.dphTotalActual = dph; l.endReason = 'our_stoploss';
+  e2.cfg.hostWhitelist = { enabled: true, minLeases: 3, minNetPerHour: 0, minMedianLifeMin: 60, perHostMachines: 2, stablePct: 50, exitReclaimPct: 80, exitMedianLifeMin: 30 };
+  const mkL = (id, hostId, mins, { reclaim = false, daysAgo = 0 } = {}) => {
+    const end = Date.now() - daysAgo * 24 * 3600e3;
+    const l = newLease(id, { gpuName: 'RTX 3080', spot: true, bid: 0.1, rentedAt: end - mins * 60e3, hostId }, {}, end - mins * 60e3);
+    l.hostId = hostId; l.tEnd = end; l.tFirstShare = l.tRent + 60e3;
+    l.creditedPrl = 0.05; l.dphTotalActual = 0.1;
+    l.endReason = reclaim ? 'host_reclaim' : 'our_stoploss';
     e2.leases.push(l); return l;
   };
-  // 三天都是亏的（1 小时 × $0.1 = $0.1 成本，入账 0.01 PRL ≈ $0.014）
-  dayLease('D1', 1, 0.01); dayLease('D2', 2, 0.01); dayLease('D3', 3, 0.01);
-  ok(e2.hostWeakStreak(777) === 3, `连续 3 天每机时 ≤0 → ${e2.hostWeakStreak(777)}`);
-  // 再补一条盈利的日子（最近的）→ 重置
-  dayLease('D0', 0, 0.2);
-  ok(e2.hostWeakStreak(777) === 0, '最近一天转正 → 连负计数归零');
+  // 好房东：3 条、中位 100 分钟、收回 1/3（33%）→ 行为正常
+  mkL('G1', 100, 100); mkL('G2', 100, 100); mkL('G3', 100, 100, { reclaim: true });
+  const g = e2.hostBehavior7d(100);
+  ok(g.ok === true && g.rate === 33, `好房东行为正常（收回 ${g.rate}%、中位 ${g.medianLife} 分钟）`);
+  // 退化房东：3 条全收回、中位 10 分钟 → 退出
+  mkL('B1', 200, 10, { reclaim: true }); mkL('B2', 200, 10, { reclaim: true }); mkL('B3', 200, 10, { reclaim: true });
+  const b = e2.hostBehavior7d(200);
+  ok(b.ok === false && b.rate === 100 && b.medianLife === 10, `退化房东被识别（收回 ${b.rate}%、中位 ${b.medianLife} 分钟）`);
+  // 7 天窗口外的旧账不算
+  e2.leases = []; e2.leases.push(...[['O1', 10, 10]]);
+  mkL('O1', 300, 10, { reclaim: true, daysAgo: 10 });
+  ok(e2.hostBehavior7d(300).n === 0, '7 天窗口之外的租约不参与行为判定');
 }
 
 console.log('— L1 价位分带：l1Model 与 l1RealizedCheap 分开（2026-11-02）');
@@ -638,9 +644,11 @@ console.log('— L1 按房东维护（型号可能被标错，份额不会）');
   // 没有 host 记录的机器回退型号口径
   const m2 = e.l1ForMachine('RTX 3080', '999999');
   ok(m2.source === 'model', '未知机器回退到型号口径');
-  // 对照：型号口径被这台假 2080 Ti 污染
-  // 型号口径封顶 1.0：>1.0 的增益只允许通过房东口径使用，否则会跨房东虚高
-  ok(e.l1For('RTX 2080 Ti') === 1.0, `型号口径被封顶在 ${e.l1For('RTX 2080 Ti')}（1.19 只在本房东生效）`);
+  // 封顶从 1.0 放宽到 1.5（2026-11-03）：realized 是"相对经验基线"的偏差，>1 合法；
+  // 真正的上限由经验基线本身承担（baseThOf 用健康租约的交付算力中位）
+  ok(Math.abs(e.l1For('RTX 2080 Ti') - 1.19) < 1e-9, `型号口径不再被 1.0 截断：${e.l1For('RTX 2080 Ti')}`);
+  e.recordL1('RTX 2080 Ti', 1.7); e.recordL1('RTX 2080 Ti', 1.8);
+  ok(e.l1For('RTX 2080 Ti') <= 1.5, `超过 1.5 仍被封顶：${e.l1For('RTX 2080 Ti')}`);
 }
 
 console.log('— 场所单点降级：库存超上限才停租');

@@ -73,7 +73,7 @@ export const DEFAULT_CONFIG = {
   // 2080 Ti 用类比估计 0.72。这些是"保守先验"，等真实租约攒到 n≥5 再用实测覆盖。
   l1RealizedDefaults: { RTX2080TI: 0.72, RTX3080: 0.5, RTX4070S: 0.5 },
   l1Default: 0.8,           // 上表没有的型号的兜底
-  l1ModelCap: 1.0,          // 型号口径封顶：>1.0 的增益只允许通过房东口径使用（防跨房东虚高）
+  l1ModelCap: 1.5,          // 型号口径封顶（2026-11-03 从 1.0 放宽）：realized 是相对经验基线的偏差，>1 合法
   maxSaneRoiPct: 500,       // 名义 ROI 超过它的报价视为错标（正常 0~200%）
   minBidFloorDefault: 0.02, // 型号没有历史时（<10 样本）的 min_bid 地板，低于它 ×0.5 视为钓鱼
   // 场所单点降级：Gate 现货（唯一变现出口）或 Lighter 永续（唯一对冲腿）任一不可用 → 保护态
@@ -86,7 +86,9 @@ export const DEFAULT_CONFIG = {
   // 就给「房东口径的 L1 与 P + 放宽 min_bid 稳定性 + 同房东 2 台」。
   // 注意：白名单是从已发生租约里学出来的，本身带幸存者偏差——它的收益只能在后续租用里兑现，
   // 不能把历史回放里那 +$0.03/机时 当成白名单的功劳。
-  hostWhitelist: { enabled: true, minLeases: 3, minNetPerHour: 0, minMedianLifeMin: 60, perHostMachines: 2, stablePct: 50 },
+  // 退出条件只看行为（2026-11-03）：收回率 >80% 或 7 天中位存活 <30 分钟才降级。
+  // 门槛刻意比入场（中位 >60）更松：入场看收益，出场看行为，且"明显变差"才动手。
+  hostWhitelist: { enabled: true, minLeases: 3, minNetPerHour: 0, minMedianLifeMin: 60, perHostMachines: 2, stablePct: 50, exitReclaimPct: 80, exitMedianLifeMin: 30 },
   windowScanIntervalSec: 90,
   // 按需机（B 型窗口的工具）：合同期内不会被房东收回，所以不打存活折扣。
   onDemand: {

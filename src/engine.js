@@ -197,6 +197,33 @@ export class Engine {
   get usdHsHr() { return this.usdHsHrFor(this.defaultPool); }
   get defaultPool() { return this.poolConfigured(this.cfg.defaultPool) ? this.cfg.defaultPool : (this.configuredPools()[0] || this.cfg.defaultPool || 'pearlhash'); }
   get marketFresh() { return Date.now() - this.market.updatedAt < 5 * MIN && this.usdHsHrPrl > 0; }
+  // 经验基线（2026-11-03 用户要求）：型号的"名义算力"用规格表数字时，3080 偏高、2080 Ti 偏低，
+  // 同一条定价公式对前者过严、对后者过松。改成用**健康租约实测交付算力**的中位（n≥5），
+  // realized 的含义随之固定为"这台机器相对于该型号通常水平"，跨型号才可比。
+  // 样本来自份额反算（不来自矿工自报），所以"报得高"骗不了它。
+  baseThOf(gpuName) {
+    const k = gpuKey(gpuName);
+    const ref = this.thFor(gpuName);
+    const spec = ref?.effective || 0;
+    const s = ((this.st.deliveredTh || {})[k]?.samples || []).filter(x => Number.isFinite(x) && x > 5);
+    if (s.length >= 5) {
+      const a = [...s].sort((x, y) => x - y);
+      const med = a[Math.floor(a.length / 2)];
+      return { th: +med.toFixed(2), src: 'empirical', n: s.length, spec };
+    }
+    return { th: spec, src: 'spec', n: s.length, spec };
+  }
+
+  recordDeliveredTh(gpuName, thPerGpu) {
+    if (!(thPerGpu > 5 && thPerGpu < 800)) return;
+    const k = gpuKey(gpuName);
+    const rec = ((this.st.deliveredTh ||= {})[k] ||= { samples: [] });
+    rec.samples.push(+thPerGpu.toFixed(1));
+    if (rec.samples.length > 20) rec.samples.splice(0, rec.samples.length - 20);
+    rec.n = rec.samples.length;
+    rec.median = this.baseThOf(gpuName).th;
+  }
+
   thFor(name) {
     const k = gpuKey(name);
     return this.table.find(g => g.key === k) || null;
@@ -512,7 +539,7 @@ export class Engine {
               const secs = l.tFirstShare ? (Date.now() - l.tFirstShare) / 1000 : 0;
               if (secs > 600 && l.sharesAccepted > 0 && Number(l.difficulty) > 0 && Number(l.lastHs) > 0) {
                 const derived = l.sharesAccepted * Number(l.difficulty) * 4294967296 / secs;
-                const baseTh = (this.thFor(m.gpuName)?.effective || 0) * Math.max(1, Number(l.numGpus) || 1);
+                const baseTh = this.baseThOf(m.gpuName).th * Math.max(1, Number(l.numGpus) || 1);
                 this.noteL1(l.id, {
                   t: Date.now(), gpu: m.gpuName, hostId: l.hostId ?? i.host_id ?? null,
                   r: derived / Number(l.lastHs),                    // fidelity：份额 ÷ 自报
@@ -1318,7 +1345,12 @@ export class Engine {
   // 否则同一台机器会在「扫描结果」和「每 20 秒重算」之间反复出现/消失（review #7）。
   priceOffer(o, usd) {
     const ref = this.thFor(o.gpuName);
-    if (ref) { o.thRaw = ref.effective * o.numGpus; o.source = ref.source; o.autoOk = ref.autoOk; }
+    if (ref) {
+      const base = this.baseThOf(o.gpuName);
+      o.thRaw = base.th * o.numGpus;
+      o.source = ref.source; o.autoOk = ref.autoOk;
+      o.baseSrc = base.src; o.baseTh = base.th;
+    }
     // L1 折算必须收敛在这里：参考算力来自矿工自报，卖出去的只有 0.76~0.93 倍。
     // 之前 evaluateOffers 里乘过 L1，但这里又用 ref.effective 覆盖了 o.th，等于白乘。
     o.l1 = Number.isFinite(Number(o.l1)) ? Number(o.l1) : this.l1For(o.gpuName);
@@ -1857,13 +1889,15 @@ export class Engine {
       if (b.done < Number(cfg.minLeases ?? 3)) continue;                       // 样本太少不表态
       if (b.medianLife == null || b.medianLife < Number(cfg.minMedianLifeMin ?? 60)) continue;
       if (b.netPerHour == null || b.netPerHour <= Number(cfg.minNetPerHour ?? 0)) continue;
-      // 老化：连续 3 天每机时 ≤0 → 退回观察层（局部失效，不是永久拉黑）
-      const weak = this.hostWeakStreak(h, now);
-      if (weak >= 3) {
-        (this.st.hostWhiteWeak ||= {})[h] = { at: now, streak: weak };
+      // 退出只看**行为**（收回率 / 中位存活），不看收益——收益随币价重估，
+      // 用它当退出条件会在币价下跌时把白名单集体清空，恰好在窗口要开、最需要折扣的时候。
+      // 收益只做入场条件（上面那行 netPerHour > 0）。
+      const beh = this.hostBehavior7d(h, now);
+      if (!beh.ok) {
+        (this.st.hostWhiteWeak ||= {})[h] = { at: now, ...beh };
         if (!(this._weakLogged ||= {})[h]) {
           this._weakLogged[h] = true;
-          this.log('warn', `房东 ${h} 连续 ${weak} 天每机时净收益 ≤0 → 退出白名单（回到 24h 观察，不再享受 P/L1 折扣）`);
+          this.log('warn', `房东 ${h} 行为退化（7 天 ${beh.n} 条：收回 ${beh.rate}%、中位 ${beh.medianLife} 分钟）→ 退出白名单（回到 24h 观察）`);
         }
         continue;
       }
@@ -1883,35 +1917,21 @@ export class Engine {
     return Object.keys(white);
   }
 
-  // 白名单老化（2026-11-03 用户要求）：白名单是一次性判定，房东会"变老"。
-  // 按 UTC 日切桶算每机时净收益，最近 3 个**有数据**的日子都 ≤0 → 退回 24h 观察（不再享受 P/L1 折扣）。
-  // 之后若三条入场条件再次同时满足（且不再连续为负），会自动回到白名单。
-  hostWeakStreak(hostId, now = Date.now()) {
-    if (hostId == null) return 0;
-    const price = Number(this.market.price) || 0;
-    if (!(price > 0)) return 0;
-    const days = {};
-    for (const l of this.leases) {
-      if (!l.tEnd || String(l.hostId) !== String(hostId)) continue;
-      if (isOurKill(l)) continue;                       // 我们自己杀的不算房东表现
-      const day = new Date(l.tEnd).toISOString().slice(0, 10);
-      const hrs = Math.max(0, (l.tEnd - l.tRent) / 3_600_000);
-      const b = days[day] ||= { hrs: 0, paid: 0, prl: 0 };
-      b.hrs += hrs;
-      b.paid += (Number(l.dphTotalActual ?? l.bidFinal ?? 0) || 0) * hrs;
-      b.prl += Number(l.creditedPrl) || 0;
-    }
-    const keys = Object.keys(days).sort().slice(-3);
-    if (keys.length < 3) return 0;                      // 不足 3 天有数据 → 不判定
-    let streak = 0;
-    for (const k of keys) {
-      const b = days[k];
-      if (b.hrs < 0.05) return 0;                       // 当天几乎没跑 → 不算一天
-      const netHr = (b.prl * price - b.paid) / b.hrs;
-      if (netHr > 0) return 0;                          // 有一天为正就重置
-      streak++;
-    }
-    return streak;
+  // 白名单退出判据（2026-11-03 用户改）：**只看行为，不看收益**。
+  // 收回率 / 中位存活是房东的属性；每机时净收益会随币价重估，不能拿来追责房东
+  // （否则币价一跌，白名单集体消失，恰好是最需要折扣的窗口期）。
+  hostBehavior7d(hostId, now = Date.now()) {
+    const cfg = this.cfg.hostWhitelist || {};
+    if (hostId == null) return { n: 0, ok: true };
+    const cut = now - 7 * 24 * 3600e3;
+    const ls = this.leases.filter(l => String(l.hostId) === String(hostId) && l.tEnd && l.tEnd >= cut && !isOurKill(l));
+    if (ls.length < 2) return { n: ls.length, ok: true };   // 样本太少不表态
+    const reclaims = ls.filter(l => l.endReason === 'host_reclaim').length;
+    const rate = reclaims / ls.length * 100;
+    const lives = ls.map(l => (l.tEnd - l.tRent) / 60000).sort((a, b) => a - b);
+    const med = lives[Math.floor(lives.length / 2)];
+    const ok = rate <= Number(cfg.exitReclaimPct ?? 80) && med >= Number(cfg.exitMedianLifeMin ?? 30);
+    return { n: ls.length, rate: +rate.toFixed(0), medianLife: +med.toFixed(0), ok };
   }
 
   isWhitelisted(hostId) {
@@ -2182,7 +2202,7 @@ export class Engine {
     const med = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
     // 型号口径封顶 1.0：目前 20 条 2080 Ti 样本全部来自同一个房东（1.17，疑似"假 2080 Ti"），
     // 直接套到陌生房东会虚高。超过 1.0 的信息只能通过【房东口径】使用（那里 ≥3 样本才生效）。
-    const cap = Number(this.cfg.l1ModelCap ?? 1.0);
+    const cap = Number(this.cfg.l1ModelCap ?? 1.5);
     return Math.min(med, cap);
   }
 
@@ -2356,10 +2376,11 @@ export class Engine {
       const sh = Number(l.sharesAccepted), diff = Number(l.difficulty);
       const hs = Number(l.lastHs) || Number(l.localThAvg) * 1e12;
       if (!(secs > 300 && sh > 0 && diff > 0 && hs > 0)) { dropped++; continue; }
-      const table = this.thFor(l.gpu);
-      const baseTh = (table?.effective || 0) * Math.max(1, Number(l.numGpus) || 1);
+      const nGpu = Math.max(1, Number(l.numGpus) || 1);
+      const baseTh = this.baseThOf(l.gpu).th * nGpu;
       if (!(baseTh > 0)) { dropped++; continue; }
       const derived = sh * diff * 4294967296 / secs;
+      this.recordDeliveredTh(l.gpu, derived / 1e12 / nGpu);   // 经验基线样本（份额反算，不信自报）
       const realized = derived / (baseTh * 1e12);
       if (!(realized > 0.15 && realized < 2)) { dropped++; continue; }
       const k = gpuKey(l.gpu);
@@ -2372,6 +2393,14 @@ export class Engine {
       }
       if (r.samples.length > 20) r.samples.splice(0, r.samples.length - 20);
       r.n = r.samples.length;
+      if (l.hostId != null) {
+        const hr = ((this.st.l1ByHost ||= {})[String(l.hostId)] ||= { samples: [] });
+        if (!hr.samples.includes(v) || hr.lastLease !== String(l.id)) {
+          hr.samples.push(v); hr.lastLease = String(l.id);
+          if (hr.samples.length > 20) hr.samples.splice(0, hr.samples.length - 20);
+          hr.n = hr.samples.length;
+        }
+      }
       kept++;
     }
     this.st.l1RealizedBackfilledAt = Date.now();
@@ -2504,7 +2533,7 @@ export class Engine {
     const { l1, source: l1Src } = this.l1ForMachine(gpuName, machineId);
     const offer = this.priceOffer({
       id: Number(offerId), machineId: machineId ? Number(machineId) : null, gpuName, numGpus: Number(numGpus) || 1,
-      th: ref.effective * (Number(numGpus) || 1), l1, l1Src,
+      th: this.baseThOf(gpuName).th * (Number(numGpus) || 1), l1, l1Src,
       dph: Number(dph), listDph: Number(dph), bid: null, spotSkip: false,
       spot: !!this.cfg.useSpot, minBid: Number(minBid ?? dph),
       reliability, geolocation, inetDown, cuda: null, source: '手抄', autoOk: ref.autoOk,

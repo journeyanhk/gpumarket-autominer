@@ -3753,8 +3753,8 @@ export class Engine {
           const need = band.th > 0 ? +(per * (1 + roiReq / 100) * 24 / band.th).toFixed(4) : null;
           const wholeCount = list.filter(o => frac(o) >= 0.99).length;   // 过滤后仍可租的整卡数
           // CPU 腿影子列（P0）：同型号可租整卡的 effective 线程中位 + 该价位的影子 ROI
-          const effs = list.filter(o => frac(o) >= 0.99).map(o => Number(o.effThreads) || 0).filter(x => x > 0);
-          const effMed = effs.length ? +med(effs.map(x => ({ v: x }))).toFixed(0) : null;
+          const effs = list.filter(o => frac(o) >= 0.99).map(o => Number(o.effThreads) || 0).filter(x => x > 0).sort((a, b) => a - b);
+          const effMed = effs.length ? Math.round(effs.length % 2 ? effs[(effs.length - 1) / 2] : (effs[effs.length / 2 - 1] + effs[effs.length / 2]) / 2) : null;
           const cpuLeg = effMed != null ? this.cpuLegUsdHr(effMed) : 0;
           const cheapOffer = list.reduce((a, o) => (Number(o.minBid) / nGpu(o) < Number(a.minBid) / nGpu(a) ? o : a), list[0]);
           rows.push({

@@ -488,6 +488,25 @@ console.log('— CPU 腿影子模式（P0，2026-11-04）：连续计价 + 27 �
   ok(off1.th === off2.th && off1.bid === off2.bid && off1.roi === off2.roi, `CPU 腿开关不改变 th/bid/roi（${off1.th} TH）`);
 }
 
+console.log('— CPU 腿 RAM 门控（2026-11-04）：Argon2id 每线程 2GB，核多≠线程多');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.cfg.cpuLeg = { enabled: true, pricingEnabled: false, ratePerThreadHr: 0.002, maxThreads: 27, contentionFactor: 1, ramPerThreadGb: 2 };
+  // 24 线程 + 16GB → 只能 8 线程（RAM 先掐死）
+  const a = e.usableThreads(24, 16 * 1024);
+  ok(a.threads === 8 && a.ramLimited === true, `24 核/16GB → ${a.threads} 线程（RAM 门控）`);
+  ok(e.cpuLegUsdHr(24, 16 * 1024) === 0.016, `CPU 腿 $${e.cpuLegUsdHr(24, 16 * 1024)}/h（不是 $0.048）`);
+  // 同 24 线程 + 64GB → 满 24
+  const b = e.usableThreads(24, 64 * 1024);
+  ok(b.threads === 24 && b.ramLimited === false, `24 核/64GB → ${b.threads} 线程（内存够）`);
+  // 32 线程 + 128GB 仍被 27 截断
+  ok(e.usableThreads(32, 128 * 1024).threads === 27, '内存再大也被 27 截断');
+  // 无 RAM 数据时不臆造：只按核数
+  ok(e.usableThreads(20, null).threads === 20, '缺 RAM 字段时只按核数（宁可高估也不静默归零）');
+  ok(e.usableThreads(0, 0).threads === 0, '核数为 0 → 0 线程');
+}
+
 console.log('— 不变量：定价不得超过该型号历史最大交付（2026-11-03 最后一条）');
 {
   const e = new Engine();

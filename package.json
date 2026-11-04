@@ -6,10 +6,22 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/run.mjs"
+    "test": "node test/run.mjs",
+    "test:smoke": "node test/smoke.mjs"
   },
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "author": "X:@zaijin338191 (https://x.com/zaijin338191)",
   "license": "MIT",
-  "keywords": ["pearl", "prl", "vast.ai", "gpu", "mining", "pearlhash", "kryptex", "nockchain"]
+  "keywords": [
+    "pearl",
+    "prl",
+    "vast.ai",
+    "gpu",
+    "mining",
+    "pearlhash",
+    "kryptex",
+    "nockchain"
+  ]
 }

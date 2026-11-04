@@ -1608,7 +1608,8 @@ export class Engine {
         o.effThreads = Number(o.cpu_cores_effective) || 0;
         o.cpuRam = Number(o.cpu_ram) || 0;
       }
-      o.cpuLegUsdHr = this.cpuLegUsdHr(o.effThreads);
+      o.usableThreads = this.usableThreads(o.effThreads, o.cpuRam);
+      o.cpuLegUsdHr = this.cpuLegUsdHr(o.effThreads, o.cpuRam);
       o.cpuThreadsNeeded = this.threadsNeeded(o);
       const bl = this.st.blacklist[o.machineId];
       o.blacklisted = bl && bl.until > now ? bl.reason : null;
@@ -1669,7 +1670,9 @@ export class Engine {
       offer.cpuCores = Number(o.cpu_cores) || 0;
       offer.effThreads = Number(o.cpu_cores_effective) || 0;
       offer.cpuRam = Number(o.cpu_ram) || 0;
-      offer.cpuLegUsdHr = this.cpuLegUsdHr(offer.effThreads);
+      offer.usableThreads = this.usableThreads(offer.effThreads, offer.cpuRam);
+      offer.ramLimited = offer.usableThreads.ramLimited;
+      offer.cpuLegUsdHr = this.cpuLegUsdHr(offer.effThreads, offer.cpuRam);
       offer.cpuThreadsNeeded = this.threadsNeeded(offer);
       if (offer.dph > 0) {
         offer.shadowRoi = +(((offer.revenueHr + offer.cpuLegUsdHr) - offer.dph) / offer.dph * 100).toFixed(1);
@@ -2396,10 +2399,24 @@ export class Engine {
   // ---------- CPU 腿（P0 影子，只读） ----------
   // vast 的 cpu_cores 是名义核数，cpu_cores_effective 才是实际能用的（实测样例 64 vs 8，差 8 倍）。
   // 影子模式下它只出现在面板与报价字段里，**不进 bid / roi / expRoi**。
-  cpuLegUsdHr(effThreads) {
+  // Argon2id 每线程约 2GB（Blocknet 官方公告）→ CPU 腿是**内存门控**，不是核心门控。
+  // 24 线程 + 16GB 的机器实际只能跑 8 线程；按核数建模会把这种"看着肥其实瘦"的机器当金矿。
+  usableThreads(effCores, ramMB) {
+    const cfg = this.cfg.cpuLeg || {};
+    const byCore = Number(effCores) || 0;
+    const ramGb = Number(ramMB) ? Number(ramMB) / 1024 : null;
+    const byRam = ramGb != null ? Math.floor(ramGb / Number(cfg.ramPerThreadGb ?? 2)) : Infinity;
+    return {
+      threads: Math.max(0, Math.min(byCore, byRam, Number(cfg.maxThreads ?? 27))),
+      byCore, byRam: Number.isFinite(byRam) ? byRam : null,
+      ramLimited: Number.isFinite(byRam) && byRam < byCore,
+    };
+  }
+
+  cpuLegUsdHr(effThreads, ramMB) {
     const cfg = this.cfg.cpuLeg || {};
     if (cfg.enabled === false) return 0;
-    const t = Math.min(Math.max(0, Number(effThreads) || 0), Number(cfg.maxThreads ?? 27));
+    const t = this.usableThreads(effThreads, ramMB).threads;
     return +(t * Number(cfg.ratePerThreadHr ?? 0) * Number(cfg.contentionFactor ?? 1)).toFixed(4);
   }
 
@@ -3489,7 +3506,7 @@ export class Engine {
         const out = { ...(next.cpuLeg || {}) };
         if (v.enabled !== undefined) out.enabled = !!v.enabled;
         if (v.pricingEnabled !== undefined) out.pricingEnabled = !!v.pricingEnabled;
-        for (const [k, lo, hi] of [['ratePerThreadHr', 0, 0.1], ['maxThreads', 1, 128], ['contentionFactor', 0, 1]]) {
+        for (const [k, lo, hi] of [['ratePerThreadHr', 0, 0.1], ['maxThreads', 1, 128], ['contentionFactor', 0, 1], ['ramPerThreadGb', 0.5, 16]]) {
           if (v[k] === undefined) continue;
           const n = Number(v[k]);
           if (!Number.isFinite(n) || n < lo || n > hi) throw new Error(`「cpuLeg.${k}」应在 ${lo}~${hi} 之间`);
@@ -3765,14 +3782,20 @@ export class Engine {
           const need = band.th > 0 ? +(per * (1 + roiReq / 100) * 24 / band.th).toFixed(4) : null;
           const wholeCount = list.filter(o => frac(o) >= 0.99).length;   // 过滤后仍可租的整卡数
           // CPU 腿影子列（P0）：同型号可租整卡的 effective 线程中位 + 该价位的影子 ROI
-          const effs = list.filter(o => frac(o) >= 0.99).map(o => Number(o.effThreads) || 0).filter(x => x > 0).sort((a, b) => a - b);
-          const effMed = effs.length ? Math.round(effs.length % 2 ? effs[(effs.length - 1) / 2] : (effs[effs.length / 2 - 1] + effs[effs.length / 2]) / 2) : null;
-          const cpuLeg = effMed != null ? this.cpuLegUsdHr(effMed) : 0;
+          const whole = list.filter(o => frac(o) >= 0.99);
+          const pick = (arr) => { const a = arr.filter(x => x > 0).sort((x, y) => x - y); if (!a.length) return null;
+            return Math.round(a.length % 2 ? a[(a.length - 1) / 2] : (a[a.length / 2 - 1] + a[a.length / 2]) / 2); };
+          const effMed = pick(whole.map(o => Number(o.effThreads) || 0));
+          const ramMed = pick(whole.map(o => Number(o.cpuRam) || 0));
+          const usable = effMed != null ? this.usableThreads(effMed, ramMed) : null;
+          const cpuLeg = usable ? this.cpuLegUsdHr(effMed, ramMed) : 0;
+          const ramLimited = whole.filter(o => Number(o.ramLimited) === true || (o.usableThreads && o.usableThreads.ramLimited)).length;
           const cheapOffer = list.reduce((a, o) => (Number(o.minBid) / nGpu(o) < Number(a.minBid) / nGpu(a) ? o : a), list[0]);
           rows.push({
             model: g.name, minBid, medianBid: medBid, suspect, pricePerGpu: per,
             wholeCardOnly: wholeCount, excluded: all.length - list.length, offers: all.length,
-            effThreads: effMed, cpuLegUsdHr: cpuLeg,
+            effThreads: effMed, ramMb: ramMed, usableThreads: usable ? usable.threads : null,
+            ramLimited, cpuLegUsdHr: cpuLeg,
             threadsNeeded: this.threadsNeeded({ ...cheapOffer, dph: per, revenueHr: band.th * dens6 / 24 }),
             shadowExpRoi: cheapOffer.shadowExpRoi ?? null,
             th: band.th, confidence: band.confidence || '—', n: band.n ?? 0, band: band.src,
@@ -3791,6 +3814,11 @@ export class Engine {
         densityAt: this.market.updatedAt || null, densitySrc: this.cfg.revenueSource || 'min',
         quotesAt: this.offerStats.scannedAt || null, targetProfitPct: Number(this.cfg.targetProfitPct ?? 20),
         roiReqPct: +(((Number(this.cfg.targetProfitPct ?? 20) + (Number(this.cfg.deployCostMin) || 2) / 60 * 100) / Number(this.cfg.pSurviveDefault ?? 0.5))).toFixed(1),
+        // CPU 腿口径：已按 RAM 门控（2GiB/线程），但「每线程时薪」仍是外部观测、未经我们实测
+        // → 面板上的 cpuLegUsdHr / shadowExpRoi 一律视为**上界**，不是可用于出价的收入。
+        cpuLegBasis: this.cfg.cpuLeg?.enabled === false ? 'off'
+          : `ram-gated(${Number(this.cfg.cpuLeg?.ramPerThreadGb ?? 2)}GiB/线程); rate=$${Number(this.cfg.cpuLeg?.ratePerThreadHr ?? 0)}/线程·h（外部观测，未校准）→ upper bound`,
+        cpuLegPricing: !!this.cfg.cpuLeg?.pricingEnabled,
       },
       // 价位分带：l1Model（全体中位，估收入）vs l1RealizedCheap（便宜带中位，决定能不能租）
       l1Split: Object.fromEntries(Object.keys(this.st.l1ByModel || {}).map(k => [k, this.l1Split(k)])),

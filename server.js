@@ -6,7 +6,10 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-process.chdir(ROOT);
+// 冒烟测试要能在临时目录里跑一遍真进程（2026-11-04：不加这个开关，
+// test/smoke.mjs 会把临时种子写进生产 data/）。PRL_HOME 只影响「数据目录」，
+// 静态资源仍然从 ROOT 取。
+process.chdir(process.env.PRL_HOME ? path.resolve(process.env.PRL_HOME) : ROOT);
 
 // 崩溃归因：把未捕获异常/未处理拒绝/退出码写进独立日志。
 // 目的（用户 2026-10-30）：控制台宕机期间等于错过窗口；不能只靠巡检发现，
@@ -141,6 +144,7 @@ if (boot.proxy && !process.env.PRL_PROXY_APPLIED) {
   });
 
   const port = engine.cfg.port || 8290;
+  if (process.env.PRL_DEBUG_PORT) console.error(`[debug] cfg.port=${JSON.stringify(engine.cfg.port)} cwd=${process.cwd()} -> listen ${port}`);
   server.on('error', e => {
     if (e.code === 'EADDRINUSE') { console.error(`\n端口 ${port} 被占用：程序可能已经在运行，已帮你打开 http://127.0.0.1:${port}\n`); openBrowser(`http://127.0.0.1:${port}`); }
     else console.error(e);

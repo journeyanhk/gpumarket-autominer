@@ -62,11 +62,14 @@ if (state) {
   const offers = state.offers || [];
   ok(table.length > 0, `pricingTable 有 ${table.length} 行`);
   ok(offers.length > 0, `offers 有 ${offers.length} 条`);
-  const keys = ['effThreads', 'usableThreads', 'ramMb', 'cpuLegUsdHr', 'threadsNeeded', 'shadowExpRoi', 'ramLimited'];
+  const keys = ['effThreads', 'usableThreads', 'ramMb', 'cpuLegUsdHr', 'threadsNeeded', 'shadowExpRoi', 'ramLimited', 'thSource', 'thCalibrated'];
   const missing = keys.filter(k => table.length > 0 && !(k in table[0]));
   ok(missing.length === 0, `pricingTable 行含全部影子列${missing.length ? `（缺 ${missing.join(',')}）` : ''}`);
   ok(table.some(r => Number(r.effThreads) > 0), 'effThreads 至少一行有值（缓存字段没丢）');
   ok(table.some(r => Number(r.cpuLegUsdHr) > 0), 'cpuLegUsdHr 至少一行 > 0');
+  // 冒烟种子里没有交付样本 → 全部必须是 spec 回退，且 thCalibrated=false
+  ok(table.every(r => r.thSource === 'spec' && r.thCalibrated === false),
+    '没有台账样本时 thSource=spec、thCalibrated=false（不许把规格值当交付值）');
   ok(offers.every(o => 'effThreads' in o && 'cpuLegUsdHr' in o), '每条报价都带 CPU 影子字段');
   ok(state.config?.cpuLeg?.pricingEnabled === false, '定价开关仍关闭（影子模式不得影响出价）');
   // RAM 门控必须真的生效：24 线程 + 16GB 的那台只能算 8 线程

@@ -126,9 +126,15 @@ try {
   // 2026-11-04 发现：这里原来取 g.effective（规格），3080 会被高估约一倍，
   // 于是"盈亏线"算出来 $0.0596 而按交付算只有 $0.0357——Clore 那边直接对比会得出相反结论。
   const refTh = {};
+  const thSource = {};
   for (const r of st?.pricingTable || []) {
     const k = modelKey(r.model);
-    if (k && Number(r.th) > 0) refTh[k] = +Number(r.th).toFixed(1);
+    if (k && Number(r.th) > 0) {
+      refTh[k] = +Number(r.th).toFixed(1);
+      // 规格回退的型号（台账 0 条）必须标出来：它的"不亏线"是规格算力撑起来的，
+      // 拿它去比 Clore 会重复 2026-11-04 那个 62% 高估的错。
+      thSource[k] = r.thCalibrated === false || r.thSource === 'spec' ? 'spec' : (r.thSource || 'sample');
+    }
   }
   for (const g of st?.table || []) {
     const k = modelKey(g.name || g.key);
@@ -155,6 +161,7 @@ try {
     out.ceiling[k] = +(be / (1 + target / 100)).toFixed(4);
   }
   out.targetPct = Number(st?.config?.targetProfitPct) || 20;
+  out.thSourceMap = thSource;
   out.refTh = refTh; out.targetPct = target; out.densitySrc = 'market.usdPerThDay（Kryptex 保守口径）';
 } catch (e) { out.error = `本地口径失败：${e.message.slice(0, 80)}`; }
 
@@ -198,6 +205,7 @@ try {
       nSpot: (spot[k] || []).length, spotMed: sP, spotMin: spot[k]?.length ? +Math.min(...spot[k]).toFixed(4) : null,
       nOnDemand: (ond[k] || []).length, onDemandMed: oP,
       breakeven: be, ceiling: ce, targetPct: out.targetPct ?? null,
+      thSource: (out.thSourceMap?.[k]) || 'spec', thCalibrated: ((out.thSourceMap?.[k]) || 'spec') !== 'spec',
       mrlMin, mrlMed, nSkippedMrl: skippedMrl[k] || 0, mrlMax: MRL_MAX,
       spotVsBreakeven: sP && be ? +(sP / be).toFixed(3) : null,        // <1 表示 Spot 比"不亏线"便宜
       spotVsCeiling: sP && ce ? +(sP / ce).toFixed(3) : null,          // <1 才是"值得租"（期望 ROI 达标）
@@ -222,9 +230,13 @@ if (!rows.length) console.log('（本次没有目标型号的 Clore 报价）');
 else {
   console.log('型号       Spot样本 Spot中位 不亏线 达标线 Spot/达标 Spot/vast 按需中位 按需/达标 mrl中位 长租跳过 汇率依赖');
   for (const [k, v] of rows) {
-    console.log(`${k.padEnd(10)} ${String(v.nSpot).padStart(6)}  ${String(v.spotMed ?? '—').padStart(8)}  ${String(v.breakeven ?? '—').padStart(6)}  ${String(v.ceiling ?? '—').padStart(6)}  ${String(v.spotVsCeiling ?? '—').padStart(8)}  ${String(v.spotVsVast ?? '—').padStart(8)}  ${String(v.onDemandMed ?? '—').padStart(8)}  ${String(v.onDemandVsBreakeven ?? '—').padStart(8)}  ${String(v.mrlMed ?? '—').padStart(7)}  ${String(v.nSkippedMrl ?? 0).padStart(8)}  ${String(v.spotFxShare ?? '—').padStart(4)}%`);
+    const tag = v.thCalibrated === false ? '*' : ' ';
+    console.log(`${(k + tag).padEnd(10)} ${String(v.nSpot).padStart(6)}  ${String(v.spotMed ?? '—').padStart(8)}  ${String(v.breakeven ?? '—').padStart(6)}  ${String(v.ceiling ?? '—').padStart(6)}  ${String(v.spotVsCeiling ?? '—').padStart(8)}  ${String(v.spotVsVast ?? '—').padStart(8)}  ${String(v.onDemandMed ?? '—').padStart(8)}  ${String(v.onDemandVsBreakeven ?? '—').padStart(8)}  ${String(v.mrlMed ?? '—').padStart(7)}  ${String(v.nSkippedMrl ?? 0).padStart(8)}  ${String(v.spotFxShare ?? '—').padStart(4)}%`);
   }
-  const win = rows.filter(([, v]) => (v.spotVsCeiling != null && v.spotVsCeiling < 1) || (v.onDemandVsBreakeven != null && v.onDemandVsBreakeven < 1));
+  // 只有"交付算力有台账支撑"的型号才允许进"便宜"名单（spec 回退的一律不算）
+  const win = rows.filter(([, v]) => v.thCalibrated !== false && ((v.spotVsCeiling != null && v.spotVsCeiling < 1) || (v.onDemandVsBreakeven != null && v.onDemandVsBreakeven < 1)));
+  const specOnly = rows.filter(([, v]) => v.thCalibrated === false).map(([k]) => k);
   console.log(`口径：不亏线 = 交付算力×密度÷24（ROI=0）；达标线 = 不亏线÷(1+${out.targetPct ?? '—'}%)。mrl > ${MRL_MAX}h 已排除。`);
+  if (specOnly.length) console.log(`⚠ 规格回退（台账 0 条，不参与"便宜"判定）：${specOnly.join('、')}`);
   console.log(win.length ? `✅ 低于达标线：${win.map(([k]) => k).join('、')}` : '没有型号的 Spot / 按需低于达标线');
 }

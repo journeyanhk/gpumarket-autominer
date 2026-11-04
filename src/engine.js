@@ -3853,6 +3853,9 @@ export class Engine {
             threadsNeeded: this.threadsNeeded({ ...cheapOffer, dph: per, revenueHr: band.th * dens6 / 24 }),
             shadowExpRoi: cheapOffer.shadowExpRoi ?? null,
             th: band.th, confidence: band.confidence || '—', n: band.n ?? 0, band: band.src,
+            // thSource：th 到底是"台账样本"还是"规格回退"（2026-11-04 用户指出：
+            // 3090 台账 0 条，th=135 是规格值，不标出来就会把"便宜一半"再读成一次假信号）
+            thSource: band.src, thCalibrated: band.src !== 'spec',
             needDensity: need, nowDensity: +dens6.toFixed(4),
             gapPct: need && dens6 > 0 ? +((need / dens6 - 1) * 100).toFixed(0) : null,
           });

@@ -1,0 +1,90 @@
+# CPU 腿 A/B（PRL × BNT 双挖）— 2026-11-04
+
+**结论先行：A/B 没能跑完。** 不是设计问题，是三条链路同时断：**矿池读不到 credited、标准 CPU 矿工不支持这个币、能测的机器只有 2 台且当时都租不到。** 三次尝试共花 **$0.0234**（含 1 个 accepted share， credited 0.0076 PRL ≈ $0.011，净成本约 $0.012）。
+
+按用户 2026-11-04 的指示：**A/B 只做一次、结论落文档、然后冻结 CPU 腿的工程投入**。本文就是这次尝试的完整记录与冻结依据。
+
+---
+
+## 1. 预注册判据（跑之前就定死，禁止事后找解释）
+
+| 项 | 设定 |
+|---|---|
+| 选机 | 2080 Ti，`effCores ≥ 16`、`RAM ≥ 32GiB`、`frac = 1`、`rel ≥ 0.99`、房东无收回史、`≤ $0.07/h` |
+| 三段 | 各 20 分钟：① CPU 关（基准） ② 开 `usableThreads` 全量 ③ 开一半 |
+| 记录 | GPU TH/s、credited BNT、`nvidia-smi` 温度/功耗、OOM 或宿主告警 |
+| 判据 | credited ≥ **$0.0015/线程·h** → CPU 腿成立；< **$0.0010** → **永久关闭**；介于两者 → 只对"GPU 已接近过线"的机器启用 |
+| 成本上限 | $0.08，独立 calibration 桶 |
+
+---
+
+## 2. 三条断链（按发现顺序）
+
+### 2.1 矿池没有可编程接口 → credited 读不到
+AFKPool 公开 API 只有 `GET /api/v1/coins`（返回币种清单：`blocknet` / Argon2id / CPU / beta / explorer）。逐一试探 **10 个**可能的统计端点，**全部 404**：
+
+```
+/api/v1/coins/blocknet            /api/v1/coins/blocknet/stats
+/api/v1/coins/bnt                 /api/v1/coin/blocknet
+/api/v1/pool/blocknet             /api/v1/pool/blocknet/stats
+/api/v1/pools                     /api/v1/stats/blocknet
+/api/v1/wallet/<addr>             /api/v1/miner/<addr>
+```
+前端是 SPA（bundle 里只出现 `/api/v1/coins` 与 `/api/v1/coins/${id}`），钱包视图必须靠浏览器渲染。**结论：credited BNT 只能人工看面板，脚本读不到。**
+
+### 2.2 标准 CPU 矿工不支持这个币 → 收益腿本身没被验证过
+我们机器上已经在跑的 SRBMiner-Multi 3.8.3，`--list-algorithms` 全表里 **没有 Argon2id**：
+
+```
+argon2d_16000   argon2d_dynamic   randomx   verushash   yescrypt*  yespower*  flex  minotaurx …
+```
+Blocknet 的共识是 **Argon2id**，所以 BNT 腿需要**另一个专用矿工二进制**（`miner_profile: blocknet` 指的就是它）。这意味着附件里"运维复杂度中等"的判断偏乐观：不是"起第二个进程"，是"引入第二个矿工生态 + 它的完整性/升级/校验"。
+
+### 2.3 能测的硬件只有 2 台，且当时都租不到
+满足 §1 选机条件的 2080 Ti 整卡，全市场只有 **2 台**：
+
+| machine | 价格 | effCores | RAM | rel |
+|---|---:|---:|---:|---:|
+| 155316 | $0.0676→0.0689 | 24 | 63 GB | 0.978 |
+| 63 | $0.0696 | 40 | 378 GB | 0.999 |
+
+三次下单分别以 `这台机器刚被别人租走了` 失败；最后一次两台同时拒绝。**这正是 D14 的结论在硬件层面的复现：整卡供给 1–2 条，连做实验都要抢。**
+
+---
+
+## 3. 三次尝试的真实经过（都是我自己踩的坑，写下来防复发）
+
+| # | 实例 | 结果 | 花了 | 教训 |
+|---|---|---|---|---|
+| 1 | 59051459 | 开机脚本跑了，但**实验钩子没执行** | $0.0070 | `launchMode=args` 时开机脚本**以矿工前台运行结尾**，接在后面的命令永远不会执行 → 钩子必须**前置**（已修，见 `154fe2b`） |
+| 2 | 59052146 | 钩子执行了，**6 个采样全是 `hs: null`** | $0.0103 | 按"假想的 JSON 结构"解析矿工 API = 赌运气。**先 grep 原文、再结构化解析**，并把原文样本带回来 |
+| 3 | 59052936 | 解析到了，但拿到的是 **`shares.total`（1.0）** 而不是算力 | $0.0061 | SRB 的 JSON 里 `"total"` 不止一个。算力应该从**矿工日志**的 `xx.xx TH/s` 读，取最近 5 个值的中位数 |
+
+三次都不是"实验设计错"，是**观测手段没先验证**。教训写进钩子脚本注释里了。
+
+**这次唯一拿到的一手数据**（对定价是可用的交叉验证）：
+- 无 CPU 负载时 GPU 实跑 **86.17 TH/s**，成本 $0.0676/h —— 与定价表的 `expectedDeliveredTh = 85.8 TH` 差 **0.4%**，说明"单卡交付算力"这个输入在这台机器上是准的；
+- 9 分钟租约内 **1 个 accepted share / 0.0076 PRL**，与 0.0075 PRL 的预期一致。
+
+---
+
+## 4. 冻结决定
+
+1. **CPU 腿不进入计价**：`cpuLeg.pricingEnabled` 保持 `false`；面板上的 `cpuLegUsdHr / shadowExpRoi` 永远按 **upper bound** 展示（`pricingAsof.cpuLegBasis` 已写明口径）。
+2. **P1 不开**：预注册判据里的"credited ≥ $0.0015/线程·h"没有任何一手数据支撑，而在 RAM 门控（2GiB/线程 + 4GiB OS 余量）之后，我们能租到的卡普遍只有 **5–15 个可用线程 ≈ $0.010–0.030/h**，即使全部兑现，也只是把 −19% 拉到 −10% 量级。
+3. **不再为 CPU 腿写产品代码**：这次为做实验加的两个东西（`extraOnstart` 实验钩子、`cpuLeg` 影子列）保留但**不再扩展**；`extraOnstart` 已复位为空字符串，生产开机脚本与冻结前逐字节一致。
+4. **可迁移资产只留一条**：`usableThreads = min(effCores, floor((ram − 4GiB)/2GiB), 27)` 这个"内存门控"结论对**任何** Argon2id / RandomX 类币都成立，将来 M3 扫币时直接复用，不用重测。
+
+---
+
+## 5. 如果将来要重跑（有硬件时 20 分钟能出结果）
+
+1. 先确认矿池有可读的 credited（API 或人工面板），否则测了也判不了；
+2. 先拿到 Blocknet 专用矿工二进制，并在**本地**用 1 线程跑 2 分钟确认能拿到 accepted share；
+3. 观测代码先在本机用假数据跑通（这次三个坑都能被 10 行单测挡住）；
+4. 再用 `extraOnstart` 前置注入 `/data/prl-automine/cpu-ab-burn.py`（已经改成从日志读算力，三段 5 分钟足够）；
+5. 预算按 $0.03/次计，超 $0.08 停。
+
+---
+
+*成本记账：三次租约合计 **$0.0234**（inspect 的 `failBreakdown` 已记入，属实验桶，不是生产损耗）。*

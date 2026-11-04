@@ -1707,7 +1707,9 @@ export class Engine {
     // 没有这个数，"密度够了却只租到 1 台"会被误读成策略失败，实际是供给只有 1-2 条。
     {
       const hourKey = Math.floor(now / 3600e3);
-      if (this._supplyHour !== hourKey) {
+      // 只在小规模扫描之外的记录（2026-11-04 修复）：按需腿或极窄的扫描会给出空 counts，
+      // 被当成"本小时无可租整卡"写进历史，污染供给序列。少于 5 条评估结果就跳过这一小时。
+      if (this._supplyHour !== hourKey && out.length >= 5) {
         const counts = {};
         for (const o of out) {
           if (this.isRentable(o)) continue;

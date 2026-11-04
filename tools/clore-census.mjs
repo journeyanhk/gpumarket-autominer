@@ -118,10 +118,17 @@ try {
   // 每型号参考算力（TH/s）：优先用控制台的型号表（含实测校准值），报价里的 thRaw 只作兜底。
   // 为什么改：0 台在跑、缓存报价里又刚好没有某个型号时，只从 offers 反推会让该型号的盈亏线变成 null，
   // 报告里就出现"有 Clore 报价但没有盈亏线"的空洞（2026-10-30 首跑后修正）。
+  // 用**交付算力**（pricingTable 的 th = expectedDeliveredTh），不是规格算力。
+  // 2026-11-04 发现：这里原来取 g.effective（规格），3080 会被高估约一倍，
+  // 于是"盈亏线"算出来 $0.0596 而按交付算只有 $0.0357——Clore 那边直接对比会得出相反结论。
   const refTh = {};
+  for (const r of st?.pricingTable || []) {
+    const k = modelKey(r.model);
+    if (k && Number(r.th) > 0) refTh[k] = +Number(r.th).toFixed(1);
+  }
   for (const g of st?.table || []) {
     const k = modelKey(g.name || g.key);
-    if (k && g.effective > 0) refTh[k] = +Number(g.effective).toFixed(1);
+    if (k && g.effective > 0 && !refTh[k]) refTh[k] = +Number(g.effective).toFixed(1);
   }
   for (const o of st?.offers || []) {
     const k = modelKey(o.gpuName);

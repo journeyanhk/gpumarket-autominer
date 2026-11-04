@@ -1598,6 +1598,14 @@ export class Engine {
     for (const o of this.offers) {
       this.priceOffer(o, usd);
       o.thPer01 = o.th / (o.dph / 0.1);
+      // 缓存重算出来的报价没有 CPU 字段（缓存存的是原始行），补上才能出影子列
+      if (o.effThreads == null) {
+        o.cpuCores = Number(o.cpu_cores) || 0;
+        o.effThreads = Number(o.cpu_cores_effective) || 0;
+        o.cpuRam = Number(o.cpu_ram) || 0;
+      }
+      o.cpuLegUsdHr = this.cpuLegUsdHr(o.effThreads);
+      o.cpuThreadsNeeded = this.threadsNeeded(o);
       const bl = this.st.blacklist[o.machineId];
       o.blacklisted = bl && bl.until > now ? bl.reason : null;
       // 重算价格后必须重新过门槛，否则会清掉 spotSkip

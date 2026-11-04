@@ -73,7 +73,20 @@ Blocknet 的共识是 **Argon2id**，所以 BNT 腿需要**另一个专用矿工
 1. **CPU 腿不进入计价**：`cpuLeg.pricingEnabled` 保持 `false`；面板上的 `cpuLegUsdHr / shadowExpRoi` 永远按 **upper bound** 展示（`pricingAsof.cpuLegBasis` 已写明口径）。
 2. **P1 不开**：预注册判据里的"credited ≥ $0.0015/线程·h"没有任何一手数据支撑，而在 RAM 门控（2GiB/线程 + 4GiB OS 余量）之后，我们能租到的卡普遍只有 **5–15 个可用线程 ≈ $0.010–0.030/h**，即使全部兑现，也只是把 −19% 拉到 −10% 量级。
 3. **不再为 CPU 腿写产品代码**：这次为做实验加的两个东西（`extraOnstart` 实验钩子、`cpuLeg` 影子列）保留但**不再扩展**；`extraOnstart` 已复位为空字符串，生产开机脚本与冻结前逐字节一致。
-4. **可迁移资产只留一条**：`usableThreads = min(effCores, floor((ram − 4GiB)/2GiB), 27)` 这个"内存门控"结论对**任何** Argon2id / RandomX 类币都成立，将来 M3 扫币时直接复用，不用重测。
+4. **可迁移资产只留一条**：内存门控本身，但**必须按算法配置**（2026-11-04 用户修正，见 §6）。
+
+---
+
+## 4.1 唯一的一手数据该记成什么（2026-11-04 复核后的说法）
+
+`expectedDeliveredTh(2080 Ti, 便宜带) = 85.8 TH` vs 真机 **86.17 TH/s**，差 **+0.4%**。这条要写进 `deliveredTh` 文档，但**口径必须写准**：
+
+- 86.17 是矿工的 **self-report（localHs）**，不是份额反算；
+- 85.8 来自历史两条**份额反算**样本（93.2 / 108.8 TH）的带内中位；
+- 所以这条证据说明的是：**"份额反算出来的交付值"与"这台机器自报的算力"对得上**（该机 fidelity ≈ 1.00，即老实机器），**以及定价输入在真机上不虚**；
+- 它**不能**证明"份额反算链在长期上无偏"——9 分钟里只有 1 个 accepted share，样本量不足以做这个判断。
+
+记法：`validated by direct measurement 2026-11-04: +0.4% vs miner self-report (fidelity≈1.00, n=1 lease, 9 min)`。
 
 ---
 
@@ -88,3 +101,36 @@ Blocknet 的共识是 **Argon2id**，所以 BNT 腿需要**另一个专用矿工
 ---
 
 *成本记账：三次租约合计 **$0.0234**（inspect 的 `failBreakdown` 已记入，属实验桶，不是生产损耗）。*
+---
+
+## 6. 两条升格为通用规则（2026-11-04 用户判定）
+
+### 6.1 内存门控必须按算法配置，不能是全局常量
+
+`cpuLeg.memModel`：
+
+```js
+memModel: {
+  argon2id: { perThreadGb: 2 },              // Blocknet：每线程独占 2GiB
+  randomx:  { perNodeGb: 2, perThreadMb: 2 }, // Monero 类：2GiB/NUMA 节点 + 2MiB/线程缓存
+}
+```
+
+- `argon2id`：`threads = min(effCores, ⌊(ram − 4GiB)/2GiB⌋, 27)`
+- `randomx`：数据集按 **NUMA 节点**各一份（2GiB），线程只额外吃 ~2MiB → 只要"ram − 4GiB ≥ 2GiB"就**不受内存限制**，只看核心数
+- 同一个 16 核/32GiB 盒子：Argon2id **14 线程**，RandomX **16 线程**。按 2GiB/线程 套 RandomX 会低估算力 12–50%，M3 扫到 XMR 类币时整张表都要重算。
+- 未配置的算法退回 `ramPerThreadGb` 缺省（不会静默算成 0），新增算法只加一条配置、不改判断逻辑。
+
+### 6.2 新矿工二进制 = 新供应链，必须过 sha256 pin
+
+Blocknet 需要专用矿工，它不在 SRBMiner 的支持列表里。按既有规矩（WildRig 0.51.8 / SRBMiner 3.8.0 都是 pin 过的），它**必须**进 `miners/manifest.json` 并 pin sha256——**不允许"从矿池页面下个压缩包直接跑"**。
+
+这条写进 M3 的 Coin 插件验收条件：**任何新币的矿工，先过哈希 pin，才允许出现在镜像里。**
+
+### 6.3 付费实验前，先离线把观测链跑通
+
+这次三次失败（钩子后置 / 假想 JSON / `shares.total` 当算力）是同一个根因：**先在真机上调观测代码**。规则：
+
+> 任何要花钱的实验，观测代码必须先在本地用**假数据**跑通（含失败分支），并有单测覆盖；否则不允许启动付费 run。
+
+这三条已落进 M3 的测试规范（见 `docs/contracts.md` 的「实验与矿工」一节）。

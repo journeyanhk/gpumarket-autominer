@@ -2403,34 +2403,44 @@ export class Engine {
   // 影子模式下它只出现在面板与报价字段里，**不进 bid / roi / expRoi**。
   // Argon2id 每线程约 2GB（Blocknet 官方公告）→ CPU 腿是**内存门控**，不是核心门控。
   // 24 线程 + 16GB 的机器实际只能跑 8 线程；按核数建模会把这种"看着肥其实瘦"的机器当金矿。
-  usableThreads(effCores, ramMB) {
+  // 内存门控**按算法**配置（2026-11-04 用户指出：把它当全局常量会在 RandomX 上系统性低估）：
+  //   argon2id（Blocknet）：每线程独占 2GiB → threads = min(eff, ⌊(ram−4)/2⌋, 27)
+  //   randomx（Monero 类）：数据集 2GiB 是**按 NUMA 节点**算的，每线程只额外吃 ~2MiB 缓存
+  //     → 16 核/32GB 能跑满 16 线程，按 2GiB/线程 会算成 14（低估 12~50%）
+  // 参数放 cpuLeg.memModel，新增算法只加一条配置，不改判断逻辑。
+  usableThreads(effCores, ramMB, algo = null) {
     const cfg = this.cfg.cpuLeg || {};
+    const model = (cfg.memModel || {})[algo || cfg.algo || 'argon2id'] || { perThreadGb: Number(cfg.ramPerThreadGb ?? 2) };
     const byCore = Number(effCores) || 0;
-    const per = Number(cfg.ramPerThreadGb ?? 2);
-    const reserve = Number(cfg.osReserveGb ?? 4);   // OS/驱动/Pearl 矿工/守护进程都要吃内存
+    const reserve = Number(cfg.osReserveGb ?? 4);
     const ramGb = Number(ramMB) ? Number(ramMB) / 1024 : null;
-    // 16GB 的机器：floor((15.6−4)/2) = 5 线程（不是 6）。差一档在 $0.002 尺度上无所谓，
-    // 但这是"会不会 OOM 被宿主杀掉"的边界，宁可保守。
-    const byRam = ramGb != null ? Math.max(0, Math.floor((ramGb - reserve) / per)) : Infinity;
+    let byRam = Infinity;
+    if (ramGb != null) {
+      if (model.perThreadGb != null) {
+        byRam = Math.max(0, Math.floor((ramGb - reserve) / Number(model.perThreadGb)));
+      } else {
+        // 按节点吃数据集：数据集装不下就一个线程都别想跑；装得下就只看核心数
+        const need = Number(model.perNodeGb ?? 2);
+        byRam = ramGb - reserve >= need ? Infinity : 0;
+      }
+    }
     return {
       threads: Math.max(0, Math.min(byCore, byRam, Number(cfg.maxThreads ?? 27))),
       byCore, byRam: Number.isFinite(byRam) ? byRam : null,
       ramLimited: Number.isFinite(byRam) && byRam < byCore,
+      algo: algo || cfg.algo || 'argon2id',
     };
   }
 
-  // 争抢不该是闸门（2026-11-04 用户判定）：GPU 收入 $0.058、CPU 腿 $0.054 时，
-  // GPU 掉 15% 仍是净赚。正确判据是「含争抢后仍过 20%」，thDrop 只做记录。
-  // 这里返回的是**盈亏平衡掉幅**：掉到这个百分比时正好卡在门槛上，超过就不划算。
+  // 争抢不该是闸门（2026-11-04 用户判定）：GPU $0.058 + CPU $0.054 时 GPU 掉 15% 仍净赚。
+  // 返回**盈亏平衡掉幅**：掉到这个百分比正好卡在 20% 门槛上，超过就不划算。只记录，不参与判断。
   thDropBreakevenPct(offer) {
-    const cfg = this.cfg.cpuLeg || {};
     const cost = Number(offer?.dph) || 0;
     const gpuRev = Number(offer?.revenueHr) || 0;
     const cpuRev = Number(offer?.cpuLegUsdHr) || 0;
     if (!(cost > 0) || !(gpuRev > 0)) return null;
     const p = Number(offer?.pSurvive ?? this.cfg.pSurviveDefault ?? 0.5);
     const dpct = (Number(this.cfg.deployCostMin) || 2) / 60 * 100;
-    // 期望口径：expRoi = (total/cost − 1) × P − deploy ≥ target
     const needTotal = cost * (1 + ((Number(this.cfg.targetProfitPct ?? 20) + dpct) / (p > 0 ? p : 1)) / 100);
     const maxDrop = 1 - (needTotal - cpuRev) / gpuRev;
     return +(maxDrop * 100).toFixed(1);

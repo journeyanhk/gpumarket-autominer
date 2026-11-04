@@ -83,7 +83,14 @@ export const DEFAULT_CONFIG = {
   // 一次性实验钩子：追加到开机脚本末尾的 shell 片段（默认空）。
   // 只给 A/B 这类"跑完就删"的实验用，不进产品逻辑；空字符串时开机脚本逐字节不变。
   extraOnstart: '',
-  cpuLeg: { enabled: true, pricingEnabled: false, ratePerThreadHr: 0.002, maxThreads: 27, contentionFactor: 1.0, ramPerThreadGb: 2, osReserveGb: 4 },
+  cpuLeg: {
+    enabled: true, pricingEnabled: false, ratePerThreadHr: 0.002, maxThreads: 27, contentionFactor: 1.0,
+    osReserveGb: 4, algo: 'argon2id', ramPerThreadGb: 2,   // ramPerThreadGb 仅作缺省值，真正口径看 memModel
+    memModel: {
+      argon2id: { perThreadGb: 2 },            // Blocknet：每线程独占 2GiB
+      randomx: { perNodeGb: 2, perThreadMb: 2 }, // Monero 类：2GiB/NUMA 节点 + 2MiB/线程缓存
+    },
+  },
   l1Default: 0.8,           // 上表没有的型号的兜底
   l1ModelCap: 1.5,          // 型号口径封顶（2026-11-03 从 1.0 放宽）：realized 是相对经验基线的偏差，>1 合法
   maxSaneRoiPct: 500,       // 名义 ROI 超过它的报价视为错标（正常 0~200%）

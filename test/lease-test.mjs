@@ -526,6 +526,24 @@ console.log('— 争抢判据（2026-11-04）：不是「TH 下降 ≤5%」，�
   ok(e.thDropBreakevenPct({ ...o, dph: 0.2 }) < 0, '成本过高时盈亏平衡掉幅为负（明确不可行）');
 }
 
+console.log('— 内存门控按算法配置（2026-11-04）：RandomX 是 2GiB/节点，不是 2GiB/线程');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.cfg.cpuLeg = { enabled: true, ratePerThreadHr: 0.002, maxThreads: 27, contentionFactor: 1, osReserveGb: 4,
+    algo: 'argon2id', memModel: { argon2id: { perThreadGb: 2 }, randomx: { perNodeGb: 2, perThreadMb: 2 } } };
+  // 同一个 16 核 / 32GiB 的盒子，两种算法给出完全不同的可用线程数
+  const argo = e.usableThreads(16, 32 * 1024, 'argon2id');
+  const rx = e.usableThreads(16, 32 * 1024, 'randomx');
+  ok(argo.threads === 14, `Argon2id：16 核/32GiB → ${argo.threads} 线程（2GiB/线程）`);
+  ok(rx.threads === 16, `RandomX：同样盒子 → ${rx.threads} 线程（2GiB 数据集按节点算，每线程只吃 2MiB）`);
+  ok(rx.threads > argo.threads, '把 RandomX 套成 2GiB/线程会系统性低估（这正是改配置的原因）');
+  // 数据集装不下就一个线程都跑不了
+  ok(e.usableThreads(16, 4 * 1024, 'randomx').threads === 0, 'RandomX：4GiB 连数据集都放不下 → 0 线程');
+  // 未配置的算法退回 ramPerThreadGb 缺省，不静默归零
+  ok(e.usableThreads(8, 32 * 1024, 'yescrypt').threads === 8, '未配置的算法退回缺省口径（不会算成 0）');
+}
+
 console.log('— 不变量：定价不得超过该型号历史最大交付（2026-11-03 最后一条）');
 {
   const e = new Engine();

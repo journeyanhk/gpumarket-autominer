@@ -9,7 +9,14 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 // 冒烟测试要能在临时目录里跑一遍真进程（2026-11-04：不加这个开关，
 // test/smoke.mjs 会把临时种子写进生产 data/）。PRL_HOME 只影响「数据目录」，
 // 静态资源仍然从 ROOT 取。
-process.chdir(process.env.PRL_HOME ? path.resolve(process.env.PRL_HOME) : ROOT);
+const HOME_DIR = process.env.PRL_HOME ? path.resolve(process.env.PRL_HOME) : ROOT;
+// 硬隔离：测试模式绝不允许落在仓库目录里（临时目录之外的目录一律拒绝启动）。
+// 这类"测试污染生产"的 bug 一旦发生，比定价错一位严重得多。
+if (process.env.PRL_TEST === '1' && (HOME_DIR === ROOT || HOME_DIR.startsWith(ROOT + path.sep))) {
+  console.error(`[fatal] PRL_TEST=1 但 PRL_HOME 指向生产目录 ${HOME_DIR}：拒绝启动`);
+  process.exit(2);
+}
+process.chdir(HOME_DIR);
 
 // 崩溃归因：把未捕获异常/未处理拒绝/退出码写进独立日志。
 // 目的（用户 2026-10-30）：控制台宕机期间等于错过窗口；不能只靠巡检发现，

@@ -1611,6 +1611,7 @@ export class Engine {
       o.usableThreads = this.usableThreads(o.effThreads, o.cpuRam);
       o.cpuLegUsdHr = this.cpuLegUsdHr(o.effThreads, o.cpuRam);
       o.cpuThreadsNeeded = this.threadsNeeded(o);
+      o.thDropBreakevenPct = this.thDropBreakevenPct(o);
       const bl = this.st.blacklist[o.machineId];
       o.blacklisted = bl && bl.until > now ? bl.reason : null;
       // 重算价格后必须重新过门槛，否则会清掉 spotSkip
@@ -1674,6 +1675,7 @@ export class Engine {
       offer.ramLimited = offer.usableThreads.ramLimited;
       offer.cpuLegUsdHr = this.cpuLegUsdHr(offer.effThreads, offer.cpuRam);
       offer.cpuThreadsNeeded = this.threadsNeeded(offer);
+      offer.thDropBreakevenPct = this.thDropBreakevenPct(offer);
       if (offer.dph > 0) {
         offer.shadowRoi = +(((offer.revenueHr + offer.cpuLegUsdHr) - offer.dph) / offer.dph * 100).toFixed(1);
         const psv = Number(offer.pSurvive ?? this.cfg.pSurviveDefault ?? 0.5);
@@ -2404,13 +2406,34 @@ export class Engine {
   usableThreads(effCores, ramMB) {
     const cfg = this.cfg.cpuLeg || {};
     const byCore = Number(effCores) || 0;
+    const per = Number(cfg.ramPerThreadGb ?? 2);
+    const reserve = Number(cfg.osReserveGb ?? 4);   // OS/驱动/Pearl 矿工/守护进程都要吃内存
     const ramGb = Number(ramMB) ? Number(ramMB) / 1024 : null;
-    const byRam = ramGb != null ? Math.floor(ramGb / Number(cfg.ramPerThreadGb ?? 2)) : Infinity;
+    // 16GB 的机器：floor((15.6−4)/2) = 5 线程（不是 6）。差一档在 $0.002 尺度上无所谓，
+    // 但这是"会不会 OOM 被宿主杀掉"的边界，宁可保守。
+    const byRam = ramGb != null ? Math.max(0, Math.floor((ramGb - reserve) / per)) : Infinity;
     return {
       threads: Math.max(0, Math.min(byCore, byRam, Number(cfg.maxThreads ?? 27))),
       byCore, byRam: Number.isFinite(byRam) ? byRam : null,
       ramLimited: Number.isFinite(byRam) && byRam < byCore,
     };
+  }
+
+  // 争抢不该是闸门（2026-11-04 用户判定）：GPU 收入 $0.058、CPU 腿 $0.054 时，
+  // GPU 掉 15% 仍是净赚。正确判据是「含争抢后仍过 20%」，thDrop 只做记录。
+  // 这里返回的是**盈亏平衡掉幅**：掉到这个百分比时正好卡在门槛上，超过就不划算。
+  thDropBreakevenPct(offer) {
+    const cfg = this.cfg.cpuLeg || {};
+    const cost = Number(offer?.dph) || 0;
+    const gpuRev = Number(offer?.revenueHr) || 0;
+    const cpuRev = Number(offer?.cpuLegUsdHr) || 0;
+    if (!(cost > 0) || !(gpuRev > 0)) return null;
+    const p = Number(offer?.pSurvive ?? this.cfg.pSurviveDefault ?? 0.5);
+    const dpct = (Number(this.cfg.deployCostMin) || 2) / 60 * 100;
+    // 期望口径：expRoi = (total/cost − 1) × P − deploy ≥ target
+    const needTotal = cost * (1 + ((Number(this.cfg.targetProfitPct ?? 20) + dpct) / (p > 0 ? p : 1)) / 100);
+    const maxDrop = 1 - (needTotal - cpuRev) / gpuRev;
+    return +(maxDrop * 100).toFixed(1);
   }
 
   cpuLegUsdHr(effThreads, ramMB) {
@@ -3506,7 +3529,7 @@ export class Engine {
         const out = { ...(next.cpuLeg || {}) };
         if (v.enabled !== undefined) out.enabled = !!v.enabled;
         if (v.pricingEnabled !== undefined) out.pricingEnabled = !!v.pricingEnabled;
-        for (const [k, lo, hi] of [['ratePerThreadHr', 0, 0.1], ['maxThreads', 1, 128], ['contentionFactor', 0, 1], ['ramPerThreadGb', 0.5, 16]]) {
+        for (const [k, lo, hi] of [['ratePerThreadHr', 0, 0.1], ['maxThreads', 1, 128], ['contentionFactor', 0, 1], ['ramPerThreadGb', 0.5, 16], ['osReserveGb', 0, 32]]) {
           if (v[k] === undefined) continue;
           const n = Number(v[k]);
           if (!Number.isFinite(n) || n < lo || n > hi) throw new Error(`「cpuLeg.${k}」应在 ${lo}~${hi} 之间`);
@@ -3796,6 +3819,7 @@ export class Engine {
             wholeCardOnly: wholeCount, excluded: all.length - list.length, offers: all.length,
             effThreads: effMed, ramMb: ramMed, usableThreads: usable ? usable.threads : null,
             ramLimited, cpuLegUsdHr: cpuLeg,
+            thDropBreakevenPct: cheapOffer.thDropBreakevenPct ?? null,
             threadsNeeded: this.threadsNeeded({ ...cheapOffer, dph: per, revenueHr: band.th * dens6 / 24 }),
             shadowExpRoi: cheapOffer.shadowExpRoi ?? null,
             th: band.th, confidence: band.confidence || '—', n: band.n ?? 0, band: band.src,

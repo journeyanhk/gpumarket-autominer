@@ -14,7 +14,8 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.dirname(fileURLToPath(new URL('.', import.meta.url)));
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prl-smoke-'));
-const port = 8300 + Math.floor(Math.random() * 90);
+// 端口随机（不落在 8290 附近），撞车就在外层重试，绝不回落到生产端口
+const port = 20000 + Math.floor(Math.random() * 30000);
 
 let failed = 0;
 const ok = (cond, msg) => { if (cond) console.log(`  ✓ ${msg}`); else { failed++; console.log(`  ✗ ${msg}`); } };
@@ -33,7 +34,14 @@ fs.writeFileSync(path.join(dir, 'data', 'state.json'), JSON.stringify({
 }, null, 2));
 
 console.log(`线上冒烟：临时目录 ${dir}，端口 ${port}`);
-const child = spawn(process.execPath, [path.join(root, 'server.js')], { cwd: dir, env: { ...process.env, PRL_HOME: dir, PRL_NO_BROWSER: '1', PORT: String(port) }, stdio: ['ignore', 'pipe', 'pipe'] });
+// PRL_HOME 是硬要求：没设就直接失败，不给"默认落到生产目录"的机会
+const prodState = path.join(root, 'data', 'state.json');
+const before = (() => { try { const s = fs.statSync(prodState); return `${s.size}:${s.mtimeMs}`; } catch { return 'absent'; } })();
+const child = spawn(process.execPath, [path.join(root, 'server.js')], {
+  cwd: dir,
+  env: { ...process.env, PRL_HOME: dir, PRL_TEST: '1', PRL_NO_BROWSER: '1', PORT: String(port) },
+  stdio: ['ignore', 'pipe', 'pipe'],
+});
 let stderr = '';
 child.stderr.on('data', d => { stderr += d.toString(); });
 
@@ -65,12 +73,18 @@ if (state) {
   const rammed = offers.find(o => o.machineId === 91002);
   // 16000MB 是 vast 的十进制标称（≈15.6GiB）→ 15.6÷2 取整 7 线程；不是 8，
   // 因为按 2GiB/线程算 8 线程要 16.0GiB，那台机器并不够。宁可少算一档。
-  if (rammed) ok(Number(rammed.usableThreads?.threads) === 7, `24 核/16000MB 的机器算出 ${rammed.usableThreads?.threads} 线程（应为 7）`);
+  // 16000MB ≈15.6GiB，扣 4GiB 余量 → 11.6GiB ÷ 2GiB = 5 线程（不是 7、更不是 8）
+  if (rammed) ok(Number(rammed.usableThreads?.threads) === 5, `24 核/16000MB 的机器算出 ${rammed.usableThreads?.threads} 线程（应为 5）`);
   else ok(true, '（该机器这轮没进报价池，跳过 RAM 门控断言）');
 }
 
 child.kill('SIGKILL');
 await wait(300);
+// 反污染断言：生产 state.json 里绝不能出现冒烟种子（机器号 91001/91002/91003）。
+// 不比对 mtime——生产引擎每 20 秒自己会写一次，那样必然误报。
+const prodText = (() => { try { return fs.readFileSync(prodState, 'utf8'); } catch { return ''; } })();
+// 只认 JSON 字段，别用裸数字——0.019100251022872418 里也含 "91001"（踩过）
+ok(!/"machineId":?\s*9100[123]/.test(prodText), `生产 state.json 里没有冒烟种子机器号（${before}）`);
 fs.rmSync(dir, { recursive: true, force: true });
 if (stderr.trim()) console.log('  · server stderr:', stderr.trim().split('\n').slice(0, 3).join(' | '));
 console.log(failed ? `\n冒烟失败：${failed} 项` : '\n冒烟通过');

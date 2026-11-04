@@ -493,10 +493,12 @@ console.log('— CPU 腿 RAM 门控（2026-11-04）：Argon2id 每线程 2GB，�
   const e = new Engine();
   e.log = () => {};
   e.cfg.cpuLeg = { enabled: true, pricingEnabled: false, ratePerThreadHr: 0.002, maxThreads: 27, contentionFactor: 1, ramPerThreadGb: 2 };
-  // 24 线程 + 16GB → 只能 8 线程（RAM 先掐死）
+  // 24 线程 + 16GiB，扣掉 4GiB OS 余量 → 只能 6 线程（RAM 先掐死）
   const a = e.usableThreads(24, 16 * 1024);
-  ok(a.threads === 8 && a.ramLimited === true, `24 核/16GB → ${a.threads} 线程（RAM 门控）`);
-  ok(e.cpuLegUsdHr(24, 16 * 1024) === 0.016, `CPU 腿 $${e.cpuLegUsdHr(24, 16 * 1024)}/h（不是 $0.048）`);
+  ok(a.threads === 6 && a.ramLimited === true, `24 核/16GiB → ${a.threads} 线程（RAM 门控 + 4GiB 余量）`);
+  ok(e.cpuLegUsdHr(24, 16 * 1024) === 0.012, `CPU 腿 $${e.cpuLegUsdHr(24, 16 * 1024)}/h（不是 $0.048）`);
+  // 余量是硬扣的：16GiB 标称机器剩 12GiB 可用，5 线程 × 2GiB 之外不留余量
+  ok(e.usableThreads(64, 16000).threads === 5, `64 核/16000MB（十进制标称）→ ${e.usableThreads(64, 16000).threads} 线程`);
   // 同 24 线程 + 64GB → 满 24
   const b = e.usableThreads(24, 64 * 1024);
   ok(b.threads === 24 && b.ramLimited === false, `24 核/64GB → ${b.threads} 线程（内存够）`);
@@ -505,6 +507,23 @@ console.log('— CPU 腿 RAM 门控（2026-11-04）：Argon2id 每线程 2GB，�
   // 无 RAM 数据时不臆造：只按核数
   ok(e.usableThreads(20, null).threads === 20, '缺 RAM 字段时只按核数（宁可高估也不静默归零）');
   ok(e.usableThreads(0, 0).threads === 0, '核数为 0 → 0 线程');
+}
+
+console.log('— 争抢判据（2026-11-04）：不是「TH 下降 ≤5%」，而是「含争抢后仍过 20%」');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.cfg.cpuLeg = { enabled: true, ratePerThreadHr: 0.002, maxThreads: 27, contentionFactor: 1, ramPerThreadGb: 2, osReserveGb: 4 };
+  e.cfg.targetProfitPct = 20; e.cfg.pSurviveDefault = 0.5; e.cfg.deployCostMin = 2;
+  // 2080 Ti：GPU $0.058/h + 27 线程 CPU $0.054/h，成本 $0.0667
+  const o = { dph: 0.0667, revenueHr: 0.058, cpuLegUsdHr: 0.054, pSurvive: 0.5 };
+  const be = e.thDropBreakevenPct(o);
+  ok(be > 20 && be < 30, `盈亏平衡掉幅 ${be}%：GPU 掉两成多仍过 20%（用 5% 当红线会误杀）`);
+  // 没有 CPU 腿时，掉幅容忍度显著更低
+  const be2 = e.thDropBreakevenPct({ ...o, cpuLegUsdHr: 0 });
+  ok(be2 < be, `无 CPU 腿时容忍度 ${be2}% < 有 CPU 腿 ${be}%`);
+  // 成本高到不可能过线 → 负数（"满血 CPU 腿也救不回来"）
+  ok(e.thDropBreakevenPct({ ...o, dph: 0.2 }) < 0, '成本过高时盈亏平衡掉幅为负（明确不可行）');
 }
 
 console.log('— 不变量：定价不得超过该型号历史最大交付（2026-11-03 最后一条）');

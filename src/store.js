@@ -74,6 +74,12 @@ export const DEFAULT_CONFIG = {
   l1RealizedDefaults: { RTX2080TI: 0.72, RTX3080: 0.5, RTX4070S: 0.5 },
   // 没有交付样本的型号：按规格 × 这个系数保守定价（2026-11-03 用户定 0.6），并标 uncalibrated
   uncalibratedFactor: 0.6,
+  // CPU 腿（P0 影子模式，2026-11-04）：只做只读计算，**不参与出价**。
+  // 连续计价而不是硬闸门（7 线程不能是 $0、8 线程不能是 $0.016）；上限截断 27 线程，
+  // 因为那台机器在 27 线程时已接近满负荷，再线性外推没有依据。
+  // ratePerThreadHr 目前是外部观测值，未经我们实测校准；contentionFactor 待 A/B 标定。
+  // enabled 只控制「是否计算影子列」；pricingEnabled 才是「是否计入出价」，P1 之后才能打开。
+  cpuLeg: { enabled: true, pricingEnabled: false, ratePerThreadHr: 0.002, maxThreads: 27, contentionFactor: 1.0 },
   l1Default: 0.8,           // 上表没有的型号的兜底
   l1ModelCap: 1.5,          // 型号口径封顶（2026-11-03 从 1.0 放宽）：realized 是相对经验基线的偏差，>1 合法
   maxSaneRoiPct: 500,       // 名义 ROI 超过它的报价视为错标（正常 0~200%）

@@ -1653,6 +1653,18 @@ export class Engine {
       const wlHost = this.isWhitelisted(hostId);
       const stablePct = wlHost ? Number(this.cfg.hostWhitelist?.stablePct ?? 50) : null;
       offer.minBidTrend = this.recordMinBid(o.machine_id, offer.minBid, now, stablePct);
+      // CPU 字段（P0：只记录 + 影子计算，不参与判断）
+      offer.cpuCores = Number(o.cpu_cores) || 0;
+      offer.effThreads = Number(o.cpu_cores_effective) || 0;
+      offer.cpuRam = Number(o.cpu_ram) || 0;
+      offer.cpuLegUsdHr = this.cpuLegUsdHr(offer.effThreads);
+      offer.cpuThreadsNeeded = this.threadsNeeded(offer);
+      if (offer.dph > 0) {
+        offer.shadowRoi = +(((offer.revenueHr + offer.cpuLegUsdHr) - offer.dph) / offer.dph * 100).toFixed(1);
+        const psv = Number(offer.pSurvive ?? this.cfg.pSurviveDefault ?? 0.5);
+        const dpct = (Number(this.cfg.deployCostMin) || 2) / 60 * 100;
+        offer.shadowExpRoi = +(offer.shadowRoi * psv - dpct).toFixed(1);
+      }
       // 房东口径 L1 > 1.1 = 这台机器比别人更值钱（"假 2080 Ti"那种），
       // 对它的 min_bid 波动放宽，否则会因为它被抢得凶反而先被过滤掉。
       const trustedHost = l1Src === 'host' && l1 > 1.1;
@@ -2369,6 +2381,29 @@ export class Engine {
     };
   }
 
+  // ---------- CPU 腿（P0 影子，只读） ----------
+  // vast 的 cpu_cores 是名义核数，cpu_cores_effective 才是实际能用的（实测样例 64 vs 8，差 8 倍）。
+  // 影子模式下它只出现在面板与报价字段里，**不进 bid / roi / expRoi**。
+  cpuLegUsdHr(effThreads) {
+    const cfg = this.cfg.cpuLeg || {};
+    if (cfg.enabled === false) return 0;
+    const t = Math.min(Math.max(0, Number(effThreads) || 0), Number(cfg.maxThreads ?? 27));
+    return +(t * Number(cfg.ratePerThreadHr ?? 0) * Number(cfg.contentionFactor ?? 1)).toFixed(4);
+  }
+
+  // 这张卡「差多少线程」才能过 20% 期望门槛：缺口 ÷ 每线程时薪
+  threadsNeeded(offer) {
+    const cfg = this.cfg.cpuLeg || {};
+    const rate = Number(cfg.ratePerThreadHr ?? 0);
+    if (!(rate > 0) || !(offer?.dph > 0) || offer.revenueHr == null) return null;
+    const p = Number(this.cfg.pSurviveDefault ?? 0.5);
+    const deployPct = (Number(this.cfg.deployCostMin) || 2) / 60 * 100;
+    const roiReq = p > 0 ? (Number(this.cfg.targetProfitPct ?? 20) + deployPct) / p : Number(this.cfg.targetProfitPct ?? 20);
+    const need = offer.dph * (1 + roiReq / 100) - offer.revenueHr;   // 还差多少 $/h
+    if (need <= 0) return 0;
+    return Math.ceil(need / (rate * Number(cfg.contentionFactor ?? 1)));
+  }
+
   // ---------- 份额反推 L1（按型号） ----------
   // L1 = 份额反推算力 ÷ 矿工自报。出价评估用的是"参考算力"，而参考算力来自矿工自报，
   // 所以必须乘 L1 才是真实可卖的算力；样本不足 3 的型号用全局保守值 0.8。
@@ -2936,6 +2971,8 @@ export class Engine {
       const l = this.leaseOf(id, this.st.managed[id], { geolocation: offer.geolocation, host_id: offer.hostId ?? null });
       l.geo ||= offer.geolocation || '';
       l.pool = def;
+      // 报价会过期：租下这一刻把 CPU 三件套落进台账，事后才复盘得了"这台为什么亏"（2026-11-04）
+      l.cpu = { cores: offer.cpuCores ?? null, effective: offer.effThreads ?? null, ram: offer.cpuRam ?? null };
       const ep = (this.st.windowEpisodes || []).find(e => !e.endedAt);
       if (ep && !ep.rents.includes(id)) ep.rents.push(id);
     }
@@ -3431,7 +3468,24 @@ export class Engine {
     // 这些是后加的键：不注册校验就会被 patch 静默忽略（2026-10-29 实测 anonCruiseIntervalMin 改了没生效）
     num('anonCruiseIntervalMin', 1, 120); num('anonCruiseRows', 20, 200); num('anonBackoffMin', 1, 120);
     num('windowScanIntervalSec', 30, 600); num('netDrop72hPct', 5, 90);
-    num('survivalMinLifeMin', 5, 240); num('noShareKillMin', 10, 120); num('deployCostMin', 0, 30); num('pSurviveDefault', 0, 1); num('l1ModelCap', 0.5, 2);
+    num('survivalMinLifeMin', 5, 240); num('noShareKillMin', 10, 120);
+    if (patch.cpuLeg !== undefined) {
+      const v = patch.cpuLeg;
+      if (v === null) next.cpuLeg = null;
+      else if (typeof v !== 'object') throw new Error('「cpuLeg」必须是对象或 null');
+      else {
+        const out = { ...(next.cpuLeg || {}) };
+        if (v.enabled !== undefined) out.enabled = !!v.enabled;
+        if (v.pricingEnabled !== undefined) out.pricingEnabled = !!v.pricingEnabled;
+        for (const [k, lo, hi] of [['ratePerThreadHr', 0, 0.1], ['maxThreads', 1, 128], ['contentionFactor', 0, 1]]) {
+          if (v[k] === undefined) continue;
+          const n = Number(v[k]);
+          if (!Number.isFinite(n) || n < lo || n > hi) throw new Error(`「cpuLeg.${k}」应在 ${lo}~${hi} 之间`);
+          out[k] = n;
+        }
+        next.cpuLeg = out;
+      }
+    } num('deployCostMin', 0, 30); num('pSurviveDefault', 0, 1); num('l1ModelCap', 0.5, 2);
     if (patch.venueGuard !== undefined) {
       const v = patch.venueGuard;
       if (v === null) next.venueGuard = null;
@@ -3439,6 +3493,7 @@ export class Engine {
       else {
         const out = { ...(next.venueGuard || {}) };
         if (v.enabled !== undefined) out.enabled = !!v.enabled;
+        if (v.pricingEnabled !== undefined) out.pricingEnabled = !!v.pricingEnabled;
         if (v.inventoryCapPrl !== undefined) {
           const n = Number(v.inventoryCapPrl);
           if (!Number.isFinite(n) || n < 0 || n > 100000) throw new Error('「venueGuard.inventoryCapPrl」应在 0~100000 之间');
@@ -3456,6 +3511,7 @@ export class Engine {
       else {
         const out = { ...(next.hostWhitelist || {}) };
         if (v.enabled !== undefined) out.enabled = !!v.enabled;
+        if (v.pricingEnabled !== undefined) out.pricingEnabled = !!v.pricingEnabled;
         for (const [k, lo, hi] of [['minLeases', 1, 50], ['minNetPerHour', -10, 10], ['minMedianLifeMin', 5, 1440], ['perHostMachines', 1, 5], ['stablePct', 0, 200]]) {
           if (v[k] === undefined) continue;
           const n = Number(v[k]);
@@ -3696,9 +3752,17 @@ export class Engine {
           const band = this.expectedDeliveredTh(g.name, per);
           const need = band.th > 0 ? +(per * (1 + roiReq / 100) * 24 / band.th).toFixed(4) : null;
           const wholeCount = list.filter(o => frac(o) >= 0.99).length;   // 过滤后仍可租的整卡数
+          // CPU 腿影子列（P0）：同型号可租整卡的 effective 线程中位 + 该价位的影子 ROI
+          const effs = list.filter(o => frac(o) >= 0.99).map(o => Number(o.effThreads) || 0).filter(x => x > 0);
+          const effMed = effs.length ? +med(effs.map(x => ({ v: x }))).toFixed(0) : null;
+          const cpuLeg = effMed != null ? this.cpuLegUsdHr(effMed) : 0;
+          const cheapOffer = list.reduce((a, o) => (Number(o.minBid) / nGpu(o) < Number(a.minBid) / nGpu(a) ? o : a), list[0]);
           rows.push({
             model: g.name, minBid, medianBid: medBid, suspect, pricePerGpu: per,
             wholeCardOnly: wholeCount, excluded: all.length - list.length, offers: all.length,
+            effThreads: effMed, cpuLegUsdHr: cpuLeg,
+            threadsNeeded: this.threadsNeeded({ ...cheapOffer, dph: per, revenueHr: band.th * dens6 / 24 }),
+            shadowExpRoi: cheapOffer.shadowExpRoi ?? null,
             th: band.th, confidence: band.confidence || '—', n: band.n ?? 0, band: band.src,
             needDensity: need, nowDensity: +dens6.toFixed(4),
             gapPct: need && dens6 > 0 ? +((need / dens6 - 1) * 100).toFixed(0) : null,

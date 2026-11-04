@@ -457,6 +457,37 @@ console.log('— 从台账回填 l1Realized + 白名单老化（2026-11-03）');
   ok(e2.hostBehavior7d(300).n === 0, '7 天窗口之外的租约不参与行为判定');
 }
 
+console.log('— CPU 腿影子模式（P0，2026-11-04）：连续计价 + 27 线程截断 + 不影响出价');
+{
+  const e = new Engine();
+  e.log = () => {};
+  e.cfg.cpuLeg = { enabled: true, ratePerThreadHr: 0.002, maxThreads: 27, contentionFactor: 1 };
+  // 连续计价，不是硬闸门：7 线程不能是 $0
+  ok(e.cpuLegUsdHr(7) === 0.014, `7 线程 → $${e.cpuLegUsdHr(7)}/h（连续计价，不是闸门）`);
+  ok(e.cpuLegUsdHr(8) === 0.016, `8 线程 → $${e.cpuLegUsdHr(8)}/h`);
+  ok(e.cpuLegUsdHr(64) === 0.054, `64 线程被截断到 27 → $${e.cpuLegUsdHr(64)}/h（不线性外推）`);
+  ok(e.cpuLegUsdHr(0) === 0, '0 线程不计 CPU 腿');
+  // 关掉开关就归零（影子模式的默认状态）
+  e.cfg.cpuLeg.enabled = false;
+  ok(e.cpuLegUsdHr(27) === 0, '影子开关关闭时 CPU 腿恒为 0');
+  e.cfg.cpuLeg.enabled = true;
+
+  // threadsNeeded：2080 Ti @ $0.0667、85.8 TH、密度 0.0167 → 约 19 线程
+  const dens = 0.0167;
+  const offer = { dph: 0.0667, revenueHr: 85.8 * dens / 24 };
+  e.cfg.targetProfitPct = 20; e.cfg.pSurviveDefault = 0.5; e.cfg.deployCostMin = 2;
+  const need = e.threadsNeeded(offer);
+  ok(need >= 17 && need <= 22, `2080 Ti 差 ${need} 线程才过 20%（复算 ≈19）`);
+
+  // 不变量：开/关 CPU 腿，出价与 th 完全不变（影子不得影响定价）
+  e.st.deliveredTh = { RTX3080: { samples: [90, 88, 92, 89, 91], prices: [0.12, 0.12, 0.12, 0.12, 0.12],
+    qual: Array.from({ length: 5 }, () => ({ fid: 1, mins: 90, host: 1, frac: 1 })) } };
+  const mk = () => { const o = { id: 1, machineId: 1, gpuName: 'RTX 3080', numGpus: 1, dph: 0.12, listDph: 0.12, bid: null, spotSkip: false, spot: true, minBid: 0.12 }; e.priceOffer(o, 1e-12); return o; };
+  e.cfg.cpuLeg.enabled = false; const off1 = mk();
+  e.cfg.cpuLeg.enabled = true; const off2 = mk();
+  ok(off1.th === off2.th && off1.bid === off2.bid && off1.roi === off2.roi, `CPU 腿开关不改变 th/bid/roi（${off1.th} TH）`);
+}
+
 console.log('— 不变量：定价不得超过该型号历史最大交付（2026-11-03 最后一条）');
 {
   const e = new Engine();

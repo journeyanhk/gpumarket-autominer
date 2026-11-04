@@ -15,6 +15,12 @@ const st = await (await fetch(CTRL, { signal: AbortSignal.timeout(10000) })).jso
 const price = Number(st?.market?.price) || null;
 const density = Number(st?.market?.usdPerThDay) || null;
 const target = Number(st?.config?.targetProfitPct) || 20;
+// 闸门同源（2026-11-04 用户指出）：真正的门槛是 expRoi = roi×P − deploy ≥ target，
+// 等价于 收入 ≥ 成本 × (1 + (target+deployPct)/P)。P=0.5、deploy=3.33% 时是 ×1.467，
+// 不是 ×1.2——差 22%，和 0.6 那个魔法数是同一类错误（阈值与闸门不同源）。
+const deployPct = (Number(st?.config?.deployCostMin ?? 2)) / 60 * 100;
+const pSurvive = Number(st?.config?.pSurviveDefault ?? 0.5);
+const roiReqPct = +(((target + deployPct) / (pSurvive > 0 ? pSurvive : 1))).toFixed(1);
 
 const rows = st?.pricingTable || [];
 const pick = (re) => rows.find(r => re.test(r.model));
@@ -25,10 +31,10 @@ const r3080 = pick(/3080(?!\s*Ti)/i) || pick(/3080/i);
 let t4 = null;
 if (r3080 && density > 0) {
   const th = Number(r3080.th) || 0;
-  const ceiling = +(th * density / 24 / (1 + target / 100)).toFixed(4);
+  const ceiling = +(th * density / 24 / (1 + roiReqPct / 100)).toFixed(4);
   t4 = {
     id: 'T4', hit: false, threshold: ceiling,
-    derivedFrom: `3080 th=${th} (thSource=${r3080.thSource}, thCalibrated=${r3080.thCalibrated}) × 密度 ${density} ÷24 ÷(1+${target}%)`,
+    derivedFrom: `3080 th=${th} (thSource=${r3080.thSource}) × 密度 ${density} ÷24 ÷(1+${roiReqPct}%)｜roiReq=(target ${target}% + deploy ${deployPct.toFixed(2)}%)÷P ${pSurvive}`,
     note: r3080.thCalibrated === false ? '⚠ th 未校准（pooled/spec），阈值本身是上界，命中也要人工复核' : null,
   };
   t4.rule = `Clore mrl≤24h 且 3080 Spot ≤ $${ceiling}`;
@@ -60,7 +66,7 @@ const t5 = { id: 'T5', hit: Number.isFinite(pearlChg) && pearlChg >= 3, value: N
 const board = [t1, t2, t3, t4, t5].filter(Boolean);
 const hits = board.filter(t => t.hit);
 
-const out = { at: new Date().toISOString(), price, density, targetProfitPct: target, board, hits: hits.map(h => h.id), window: st?.window?.info?.ratioPass ?? null, windowActive: !!st?.window?.active };
+const out = { at: new Date().toISOString(), price, density, targetProfitPct: target, roiReqPct, pSurvive, deployPct: +deployPct.toFixed(2), board, hits: hits.map(h => h.id), window: st?.window?.info?.ratioPass ?? null, windowActive: !!st?.window?.active };
 
 if (process.argv.includes('--json')) { console.log(JSON.stringify(out, null, 2)); process.exit(0); }
 

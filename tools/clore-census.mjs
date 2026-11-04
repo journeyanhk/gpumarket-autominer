@@ -154,11 +154,17 @@ try {
   // 两个数必须分开（2026-11-04 用户判定：混用会让所有"差几个百分点"的判断错位）：
   //   breakeven = 交付算力 × 密度 ÷ 24           → ROI = 0 的租金上限（"不亏"线）
   //   ceiling   = breakeven ÷ (1 + 目标ROI%)      → 期望 ROI 达标的租金上限（"值得租"线）
+  // 除数必须与闸门同源（2026-11-04 用户指出）：expRoi = roi×P − deploy ≥ target
+  //   ⇒ 收入 ≥ 成本 × (1 + (target + deployPct)/P)，默认 ×1.467，不是 ×1.2（差 22%）
+  const deployPct = (Number(st?.config?.deployCostMin ?? 2)) / 60 * 100;
+  const pSurvive = Number(st?.config?.pSurviveDefault ?? 0.5) || 1;
+  const roiReqPct = +(((target + deployPct) / pSurvive)).toFixed(1);
+  out.roiReqPct = roiReqPct;
   out.breakeven = {}; out.ceiling = {};
   for (const [k, th] of Object.entries(refTh)) {
     const be = th * density / 24;
     out.breakeven[k] = +be.toFixed(4);
-    out.ceiling[k] = +(be / (1 + target / 100)).toFixed(4);
+    out.ceiling[k] = +(be / (1 + roiReqPct / 100)).toFixed(4);
   }
   out.targetPct = Number(st?.config?.targetProfitPct) || 20;
   out.thSourceMap = thSource;
@@ -236,7 +242,7 @@ else {
   // 只有"交付算力有台账支撑"的型号才允许进"便宜"名单（spec 回退的一律不算）
   const win = rows.filter(([, v]) => v.thCalibrated !== false && ((v.spotVsCeiling != null && v.spotVsCeiling < 1) || (v.onDemandVsBreakeven != null && v.onDemandVsBreakeven < 1)));
   const specOnly = rows.filter(([, v]) => v.thCalibrated === false).map(([k]) => k);
-  console.log(`口径：不亏线 = 交付算力×密度÷24（ROI=0）；达标线 = 不亏线÷(1+${out.targetPct ?? '—'}%)。mrl > ${MRL_MAX}h 已排除。`);
+  console.log(`口径：不亏线 = 交付算力×密度÷24（ROI=0）；达标线 = 不亏线÷(1+${out.roiReqPct ?? '—'}%)（闸门口径，与 isRentable 同源）。mrl > ${MRL_MAX}h 已排除。`);
   if (specOnly.length) console.log(`⚠ 规格回退（台账 0 条，不参与"便宜"判定）：${specOnly.join('、')}`);
   console.log(win.length ? `✅ 低于达标线：${win.map(([k]) => k).join('、')}` : '没有型号的 Spot / 按需低于达标线');
 }

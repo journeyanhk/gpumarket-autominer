@@ -86,7 +86,16 @@ Blocknet 的共识是 **Argon2id**，所以 BNT 腿需要**另一个专用矿工
 - 所以这条证据说明的是：**"份额反算出来的交付值"与"这台机器自报的算力"对得上**（该机 fidelity ≈ 1.00，即老实机器），**以及定价输入在真机上不虚**；
 - 它**不能**证明"份额反算链在长期上无偏"——9 分钟里只有 1 个 accepted share，样本量不足以做这个判断。
 
-记法：`validated by direct measurement 2026-11-04: +0.4% vs miner self-report (fidelity≈1.00, n=1 lease, 9 min)`。
+记法（2026-11-04 二次收口，按用户意见再降一档）：
+
+```
+cross-check passed within Poisson noise (n=1 accepted share, 9 min);
+does NOT tighten the confidence label.
+```
+
+理由：9 分钟、1 个 accepted share 时，份额反算量的泊松标准误约 **±100%**。所以 "+0.4%" 证明的不是精度，
+而是**没有系统性错乘 2 或 0.5 这类量级错误**。要提升 `expectedDeliveredTh` 的置信度标签，
+需要同一型号 **≥5 条租约、≥2 个 host**——这是既有规则，本条证据不改变它。
 
 ---
 

@@ -4,6 +4,8 @@
 // 注意：必须先 chdir 到临时目录再 import 引擎——store.js 的 DATA_DIR 是在 import 时
 // 用 process.cwd() 算出来的，先 import 再 chdir 就会写到生产 data/state.json 上
 // （2026-10-27 踩过一次：引擎重启时报「实例 501 已不在 vast 列表中」）。
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 const dir = process.argv[2];
@@ -542,6 +544,31 @@ console.log('— 内存门控按算法配置（2026-11-04）：RandomX 是 2GiB/
   ok(e.usableThreads(16, 4 * 1024, 'randomx').threads === 0, 'RandomX：4GiB 连数据集都放不下 → 0 线程');
   // 未配置的算法退回 ramPerThreadGb 缺省，不静默归零
   ok(e.usableThreads(8, 32 * 1024, 'yescrypt').threads === 8, '未配置的算法退回缺省口径（不会算成 0）');
+}
+
+console.log('— 有效配置完整性（2026-11-04）：保存的 config.json 覆盖默认值 → 缺键必须拦下来');
+{
+  const { missingConfigKeys, DEFAULT_CONFIG } = await import(pathToFileURL(path.join(process.cwd(), 'src/store.js')).href);
+  const miss = missingConfigKeys({ ...DEFAULT_CONFIG, hostWhitelist: { minLeases: 3 } });
+  ok(miss.includes('hostWhitelist.minLifeMin') || miss.some(x => x.startsWith('hostWhitelist.')),
+    `嵌套对象被覆盖时能列出缺失键（${miss.slice(0, 2).join('、')}）`);
+  ok(missingConfigKeys(DEFAULT_CONFIG).length === 0, '完整配置不报缺键');
+  ok(missingConfigKeys({ ...DEFAULT_CONFIG, cpuLeg: null }).length === 0, '显式 null 视为"已关闭"，不算缺键');
+
+  // 引擎级：缺键直接拒绝启动。必须用**子进程**——engine.js 已被本进程 import 过，
+  // loadConfig 的 cfgFile 在 import 时就按当时的 cwd 定死了，进程内 chdir 影响不到它。
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'prl-cfg-'));
+  fs.mkdirSync(path.join(dir2, 'data'), { recursive: true });
+  fs.writeFileSync(path.join(dir2, 'data', 'config.json'), JSON.stringify({ hostWhitelist: { minLeases: 3 } }));
+  const engineUrl = pathToFileURL(path.join(process.cwd(), 'src/engine.js')).href;
+  const { execFileSync } = await import('node:child_process');
+  let out = 'NO_THROW';
+  try {
+    out = execFileSync(process.execPath, ['-e', `import(${JSON.stringify(engineUrl)}).then(m => { new m.Engine(); console.log('NO_THROW'); })`],
+      { cwd: dir2, encoding: 'utf8', stdio: 'pipe', timeout: 20000 });
+  } catch (e) { out = String(e.stderr || e.stdout || e.message); }
+  fs.rmSync(dir2, { recursive: true, force: true });
+  ok(/配置缺 \d+ 个键/.test(out), `缺键时拒绝启动：${out.replace(/\s+/g, ' ').slice(0, 46)}`);
 }
 
 console.log('— 不变量：定价不得超过该型号历史最大交付（2026-11-03 最后一条）');

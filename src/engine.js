@@ -4,7 +4,7 @@ import * as P from './pearl.js';
 import { gpuKey, hashrateTable } from './gpus.js';
 import { buildOnstart, workerName, SCRIPT_VERSION } from './onstart.js';
 import { POOLS, POOL_IDS, poolName, minerTarget, fetchKryptexInfo, fetchKryptexWorkers, fetchKryptexEarned } from './pools.js';
-import { loadConfig, saveConfig, loadState, saveState, appendLog, DEFAULT_CONFIG } from './store.js';
+import { loadConfig, saveConfig, loadState, saveState, appendLog, DEFAULT_CONFIG, missingConfigKeys } from './store.js';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { loadManifest } from './miners.js';
@@ -33,6 +33,12 @@ const labelPool = label => (String(label || '').match(/\bpool=([a-z]+)/) || [])[
 export class Engine {
   constructor() {
     this.cfg = loadConfig();
+    // 启动即校验：缺键 = 护栏可能没生效，宁可拒绝启动也不带着半套配置跑
+    const missing = missingConfigKeys(this.cfg);
+    this.configCheck = { at: new Date().toISOString(), ok: missing.length === 0, missing: missing.slice(0, 40) };
+    if (missing.length && process.env.PRL_ALLOW_CONFIG_DRIFT !== '1') {
+      throw new Error(`配置缺 ${missing.length} 个键（保存的 config.json 覆盖了默认值）：${missing.slice(0, 8).join('、')}${missing.length > 8 ? ' …' : ''}。可运行 node tools/fix-config.mjs 补齐，或设 PRL_ALLOW_CONFIG_DRIFT=1 临时放行`);
+    }
     this.st = loadState();
     this.st.aliases ||= {};
     if (this.st.quotaEstSource !== 'learned') { this.st.quotaEst = null; }
@@ -350,6 +356,8 @@ export class Engine {
   // ---------- 启动 ----------
   start() {
     this.log('info', `程序启动（脚本版本 v${SCRIPT_VERSION}；若与 src/onstart.js 不一致说明进程未重载）`);
+    // 有效配置快照：事后排查"护栏有没有生效"必须有据可查（不只依赖当时的 config.json）
+    this.st.effectiveConfig = { at: new Date().toISOString(), ok: this.configCheck?.ok !== false, missing: this.configCheck?.missing || [], keys: Object.keys(this.cfg).length };
     // 一次性：把历史租约反算成「房东口径 L1」（幂等，跑过一次就写 l1HostBackfilledAt）
     this.migrateL1Split();   // 先拆口径，再把历史租约回填成房东口径 L1
     this.backfillRealizedFromLeases();  // 用台账里的份额/难度/自报回填 l1Realized

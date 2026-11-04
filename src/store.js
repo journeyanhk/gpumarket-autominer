@@ -196,6 +196,23 @@ export function loadConfig() {
 }
 export function saveConfig(c) { writeJson(cfgFile, c); }
 
+// 有效配置完整性检查（2026-11-04）：保存过的配置会整体覆盖默认值，
+// 新加的键在老 config.json 里不存在 -> 静默退回 undefined，而面板一切正常。
+// 这条挡的是**一整类**"看起来在跑、其实护栏没生效"的 bug（不只是影子列）。
+export function missingConfigKeys(cfg, defaults = DEFAULT_CONFIG, prefix = '') {
+  const miss = [];
+  for (const [k, dv] of Object.entries(defaults)) {
+    const path = prefix ? `${prefix}.${k}` : k;
+    const has = cfg != null && Object.prototype.hasOwnProperty.call(cfg, k);
+    if (!has) { miss.push(path); continue; }
+    // null 是"显式关闭"，视为存在；对象继续往里比
+    if (dv && typeof dv === 'object' && !Array.isArray(dv) && cfg[k] && typeof cfg[k] === 'object') {
+      miss.push(...missingConfigKeys(cfg[k], dv, path));
+    }
+  }
+  return miss;
+}
+
 export function loadState() {
   return {
     managed: {},     // instanceId -> { offerId, machineId, gpuName, numGpus, expectedTh, rentedAt, belowSince }

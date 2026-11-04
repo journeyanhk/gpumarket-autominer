@@ -31,6 +31,10 @@ const TARGETS = (() => {
 const med = a => { const v = [...a].sort((x, y) => x - y); if (!v.length) return null; const m = Math.floor(v.length / 2); return +(v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2).toFixed(4); };
 const num = v => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : null; };
 
+// Clore 的 mrl（最低租期，小时）：便宜档里常见 72/240/300/720 小时的长约。
+// 不带过滤的"最低价"等于把 30 天锁定期当现货，而密度一个月能漂 ±50% → 默认只统计 mrl ≤ 24h。
+const MRL_MAX = (() => { const i = process.argv.indexOf('--mrl'); return i > 0 ? Number(process.argv[i + 1]) : 24; })();
+
 const readKey = () => {
   try {
     const raw = fs.readFileSync(path.join(SEC, 'clore_key'), 'utf8').trim();
@@ -141,12 +145,17 @@ try {
     if (per > 0) (out.vastMinBid[k] ||= []).push(per);
   }
   for (const k of Object.keys(out.vastMinBid)) out.vastMinBid[k] = med(out.vastMinBid[k]);
-  // 盈亏线 = 算力 × 密度 ÷ 24 ÷ (1+目标ROI)
-  out.breakeven = {};
+  // 两个数必须分开（2026-11-04 用户判定：混用会让所有"差几个百分点"的判断错位）：
+  //   breakeven = 交付算力 × 密度 ÷ 24           → ROI = 0 的租金上限（"不亏"线）
+  //   ceiling   = breakeven ÷ (1 + 目标ROI%)      → 期望 ROI 达标的租金上限（"值得租"线）
+  out.breakeven = {}; out.ceiling = {};
   for (const [k, th] of Object.entries(refTh)) {
-    out.breakeven[k] = +(th * density / 24 / (1 + target / 100)).toFixed(4);
+    const be = th * density / 24;
+    out.breakeven[k] = +be.toFixed(4);
+    out.ceiling[k] = +(be / (1 + target / 100)).toFixed(4);
   }
-  out.refTh = refTh;
+  out.targetPct = Number(st?.config?.targetProfitPct) || 20;
+  out.refTh = refTh; out.targetPct = target; out.densitySrc = 'market.usdPerThDay（Kryptex 保守口径）';
 } catch (e) { out.error = `本地口径失败：${e.message.slice(0, 80)}`; }
 
 // 2) 汇率 + Clore 报价
@@ -158,13 +167,16 @@ try {
   const r = await fetch('https://api.clore.ai/v1/marketplace', { headers: { auth: key }, signal: AbortSignal.timeout(30000) });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const d = await r.json();
-  const spot = {}, ond = {}, srcMix = {};
+  const spot = {}, ond = {}, srcMix = {}, mrls = {}, skippedMrl = {};
   for (const s of d.servers || []) {
     const m = /^\s*(\d+)\s*x\s*(.+)$/.exec(s?.specs?.gpu || '');
     if (!m) continue;
     const cnt = +m[1];
     const k = modelKey(m[2]); if (!k || !TARGETS.includes(k.toLowerCase())) continue;
     if (s.rented) continue;
+    const mrl = Number(s.mrl);
+    if (Number.isFinite(mrl)) (mrls[k] ||= []).push(mrl);
+    if (Number.isFinite(mrl) && mrl > MRL_MAX) { skippedMrl[k] = (skippedMrl[k] || 0) + 1; continue; }
     const p = s?.price || {};
     const sp = usdPerDayOf(p, 'spot', fx);
     const od = usdPerDayOf(p, 'on_demand', fx);
@@ -174,15 +186,21 @@ try {
   }
   for (const k of new Set([...Object.keys(spot), ...Object.keys(ond)])) {
     const sP = med(spot[k] || []), oP = med(ond[k] || []);
+    const mrlArr = (mrls[k] || []).slice().sort((a, b) => a - b);
+    const mrlMed = mrlArr.length ? mrlArr[Math.floor(mrlArr.length / 2)] : null;
+    const mrlMin = mrlArr.length ? mrlArr[0] : null;
     const be = out.breakeven?.[k] ?? null;
+    const ce = out.ceiling?.[k] ?? null;
     const mix = srcMix[k] || { spot: {}, ond: {} };
     // 需要我们自己换算的样本占比：>0 就说明这一列的价格里含汇率成分，趋势解读要拆开
     const fxShare = (m) => { const t = Object.values(m).reduce((a, b) => a + b, 0); return t ? +(((m.btc || 0) + (m.clore || 0)) / t * 100).toFixed(0) : null; };
     out.models[k] = {
       nSpot: (spot[k] || []).length, spotMed: sP, spotMin: spot[k]?.length ? +Math.min(...spot[k]).toFixed(4) : null,
       nOnDemand: (ond[k] || []).length, onDemandMed: oP,
-      breakeven: be,
-      spotVsBreakeven: sP && be ? +(sP / be).toFixed(3) : null,        // <1 表示 Spot 比盈亏线便宜（有机会）
+      breakeven: be, ceiling: ce, targetPct: out.targetPct ?? null,
+      mrlMin, mrlMed, nSkippedMrl: skippedMrl[k] || 0, mrlMax: MRL_MAX,
+      spotVsBreakeven: sP && be ? +(sP / be).toFixed(3) : null,        // <1 表示 Spot 比"不亏线"便宜
+      spotVsCeiling: sP && ce ? +(sP / ce).toFixed(3) : null,          // <1 才是"值得租"（期望 ROI 达标）
       spotVsVast: sP && out.vastMinBid?.[k] ? +(sP / out.vastMinBid[k]).toFixed(3) : null,
       onDemandVsBreakeven: oP && be ? +(oP / be).toFixed(3) : null,
       onDemandVsVast: oP && out.vastMinBid?.[k] ? +(oP / out.vastMinBid[k]).toFixed(3) : null,
@@ -202,10 +220,11 @@ if (out.error) console.log(`⚠ ${out.error}`);
 const rows = Object.entries(out.models);
 if (!rows.length) console.log('（本次没有目标型号的 Clore 报价）');
 else {
-  console.log('型号       Spot样本 Spot中位 Spot/盈亏线 Spot/vast  按需中位 按需/盈亏线 按需/vast  汇率依赖');
+  console.log('型号       Spot样本 Spot中位 不亏线 达标线 Spot/达标 Spot/vast 按需中位 按需/达标 mrl中位 长租跳过 汇率依赖');
   for (const [k, v] of rows) {
-    console.log(`${k.padEnd(10)} ${String(v.nSpot).padStart(6)}  ${String(v.spotMed ?? '—').padStart(8)}  ${String(v.spotVsBreakeven ?? '—').padStart(10)}  ${String(v.spotVsVast ?? '—').padStart(8)}  ${String(v.onDemandMed ?? '—').padStart(8)}  ${String(v.onDemandVsBreakeven ?? '—').padStart(10)}  ${String(v.onDemandVsVast ?? '—').padStart(8)}  ${String(v.spotFxShare ?? '—').padStart(4)}%`);
+    console.log(`${k.padEnd(10)} ${String(v.nSpot).padStart(6)}  ${String(v.spotMed ?? '—').padStart(8)}  ${String(v.breakeven ?? '—').padStart(6)}  ${String(v.ceiling ?? '—').padStart(6)}  ${String(v.spotVsCeiling ?? '—').padStart(8)}  ${String(v.spotVsVast ?? '—').padStart(8)}  ${String(v.onDemandMed ?? '—').padStart(8)}  ${String(v.onDemandVsBreakeven ?? '—').padStart(8)}  ${String(v.mrlMed ?? '—').padStart(7)}  ${String(v.nSkippedMrl ?? 0).padStart(8)}  ${String(v.spotFxShare ?? '—').padStart(4)}%`);
   }
-  const win = rows.filter(([, v]) => (v.spotVsBreakeven != null && v.spotVsBreakeven < 1) || (v.onDemandVsBreakeven != null && v.onDemandVsBreakeven < 1));
-  console.log(win.length ? `✅ 低于盈亏线：${win.map(([k]) => k).join('、')}` : '没有型号的 Spot / 按需低于盈亏线');
+  const win = rows.filter(([, v]) => (v.spotVsCeiling != null && v.spotVsCeiling < 1) || (v.onDemandVsBreakeven != null && v.onDemandVsBreakeven < 1));
+  console.log(`口径：不亏线 = 交付算力×密度÷24（ROI=0）；达标线 = 不亏线÷(1+${out.targetPct ?? '—'}%)。mrl > ${MRL_MAX}h 已排除。`);
+  console.log(win.length ? `✅ 低于达标线：${win.map(([k]) => k).join('、')}` : '没有型号的 Spot / 按需低于达标线');
 }

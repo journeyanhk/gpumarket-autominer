@@ -3066,7 +3066,12 @@ export class Engine {
       cnFirst: /(^|[\s,])(CN|China)\s*$/i.test(offer.geolocation || ''),
       extraArgs: this.minerArgsFor(offer.gpuName),
       foreground: this.cfg.launchMode === 'args',
-    }) + (this.cfg.extraOnstart ? `\n# --- extra onstart（实验钩子）---\n${this.cfg.extraOnstart}\n` : '');
+    });
+    // 实验钩子必须放在**开头**：args 模式下开机脚本以矿工前台运行结尾，接在后面的命令永远不会执行
+    // （2026-11-04 第一次 A/B 就是这么白跑了 13 分钟）。
+    const onstartFinal = this.cfg.extraOnstart
+      ? `# --- extra onstart（实验钩子，前台矿工之前）---\n${this.cfg.extraOnstart}\n${onstart}`
+      : onstart;
     // 下单前按最新行情重算出价：扫描结果可能是几分钟前的，行情一动就会出价偏低、刚租到就被顶
     if (offer.spot) {
       const fresh = this.bidPrice(offer.revenueHr, offer.minBid || 0);
@@ -3096,7 +3101,7 @@ export class Engine {
     const t0 = Date.now();
     try {
       const r = await this.vast.rent(offer.id, {
-        image: this.cfg.image, disk: this.cfg.disk, label: this.rigLabel(offer.gpuName, def), onstart,
+        image: this.cfg.image, disk: this.cfg.disk, label: this.rigLabel(offer.gpuName, def), onstart: onstartFinal,
         mode: this.cfg.launchMode === 'args' ? 'args' : 'ssh',
         price: offer.spot ? offer.bid : null,
       });

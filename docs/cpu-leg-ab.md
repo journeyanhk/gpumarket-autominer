@@ -89,9 +89,13 @@ Blocknet 的共识是 **Argon2id**，所以 BNT 腿需要**另一个专用矿工
 记法（2026-11-04 二次收口，按用户意见再降一档）：
 
 ```
-cross-check passed within Poisson noise (n=1 accepted share, 9 min);
-does NOT tighten the confidence label.
+86.17 TH self-report vs spec×0.6 fallback 85.8 — numerically coincident.
+The fallback is a heuristic constant, not a derived delivery estimate.
+This observation validates neither the heuristic nor the share-derivation chain.
 ```
+
+（2026-11-04 第二轮回退：原先写成"within Poisson noise"，仍暗含"验证"；实际上 85.8 就是 `规格 143 × 0.6`，与真机自报相等纯属巧合。
+同一型号的 3080 真实比值约 0.39，说明 0.6 这个常数在坏机器上高估 53%。）
 
 理由：9 分钟、1 个 accepted share 时，份额反算量的泊松标准误约 **±100%**。所以 "+0.4%" 证明的不是精度，
 而是**没有系统性错乘 2 或 0.5 这类量级错误**。要提升 `expectedDeliveredTh` 的置信度标签，

@@ -571,6 +571,27 @@ console.log('— 有效配置完整性（2026-11-04）：保存的 config.json �
   ok(/配置缺 \d+ 个键/.test(out), `缺键时拒绝启动：${out.replace(/\s+/g, ' ').slice(0, 46)}`);
 }
 
+console.log('— frac=null 样本进下限池 + pooled 回退（2026-11-04 用户第二刀）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  const spec = e.thFor('RTX 3080').effective;                 // 114.8 左右
+  // 五条 frac 未知的交付（45 TH 级别）——历史实现会把它们全部丢掉，再回退到 spec×0.6
+  e.st.deliveredTh = { RTX3080: {
+    samples: [26.3, 19.6, 71.4, 57.6, 45], prices: [0.1161, 0.085, 0.1133, 0.0984, 0.1117],
+    qual: [{ frac: null }, { frac: null }, { frac: null }, { frac: null }, { frac: null }],
+  } };
+  const pool = e.poolRatio('RTX 3080');
+  ok(pool.n === 5 && pool.ratio > 0.3 && pool.ratio < 0.55, `台账实测比 ${pool.ratio}（5 条全含，不再被"整卡过滤"清空）`);
+  const b = e.expectedDeliveredTh('RTX 3080', 0.1117);
+  ok(b.src === 'pooled', `无整卡样本 → thSource=${b.src}`);
+  const expectTh = Math.min(spec * 0.6, spec * pool.ratio);
+  ok(Math.abs(b.th - expectTh) < 0.6, `回退值 ${b.th} = min(规格×0.6=${(spec * 0.6).toFixed(1)}, 台账比×规格=${(spec * pool.ratio).toFixed(1)})`);
+  ok(b.th < spec * 0.5, `比旧的 spec×0.6=${(spec * 0.6).toFixed(1)} 更低（旧的把 45 TH 洗成了 68.9）`);
+  // frac=null 不参与点估计：整卡中位仍然是 0 条
+  ok(b.n === 0, 'frac=null 只做上界约束，不进点估计（n 仍为 0）');
+}
+
 console.log('— 不变量：定价不得超过该型号历史最大交付（2026-11-03 最后一条）');
 {
   const e = new Engine();

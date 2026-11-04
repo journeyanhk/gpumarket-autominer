@@ -261,6 +261,27 @@ export class Engine {
   // 该型号「历史上实际交付过的整卡归一化算力」的最大值（2026-11-03 最后一条不变量）。
   // 用途：给定价加一个天花板，防止"把脏样本全排除后反而变乐观"以及"规格基线偏高"。
   // 归一化：半卡样本除以 frac，换算成整卡口径（45 TH 的半卡 = 90 TH 的整卡）。
+  // 台账里"实际交付 ÷ 规格"的中位（**含 frac=null 与 fracSuspect 样本**）。
+  // 2026-11-04 用户判定：frac=null 不等于"数据不可用"——frac 只回答"是不是整卡"，
+  // 不改变"它交付了多少 TH"这个观测事实。把 5 条 45 TH 的坏样本丢掉、再用常数 0.6 顶上去，
+  // 等于用数据清洗洗掉坏消息。这里让它们只做**上界约束**，不做点估计。
+  poolRatio(gpuName) {
+    const rec = (this.st.deliveredTh || {})[gpuKey(gpuName)];
+    const spec = this.thFor(gpuName)?.effective || 0;
+    if (!(spec > 0)) return { ratio: null, n: 0 };
+    const ratios = [];
+    (rec?.samples || []).forEach((v, i) => {
+      const f = Number((rec.qual || [])[i]?.frac);
+      const whole = v / (f > 0 ? f : 1);
+      if (Number.isFinite(whole) && whole > 5) ratios.push(whole / spec);
+    });
+    if (!ratios.length) return { ratio: null, n: 0 };
+    ratios.sort((a, b) => a - b);
+    const m = Math.floor(ratios.length / 2);
+    const ratio = ratios.length % 2 ? ratios[m] : (ratios[m - 1] + ratios[m]) / 2;
+    return { ratio: +ratio.toFixed(3), n: ratios.length, medianTh: +(ratio * spec).toFixed(1) };
+  }
+
   maxDeliveredTh(gpuName) {
     const rec = (this.st.deliveredTh || {})[gpuKey(gpuName)];
     let max = 0;
@@ -337,15 +358,37 @@ export class Engine {
         return { th: this._capTh(gpuName, th), raw, src: 'cheap-carryover', confidence: high ? 'high' : 'low', n: cheapArr.length, unknownFrac: stat.unknownFrac, spec, sane: sane(th) };
       }
     }
-    const th = +(spec * Number(this.cfg.uncalibratedFactor ?? 0.6)).toFixed(1);
-    return { th: this._capTh(gpuName, th), raw: th, src: 'spec', confidence: 'uncalibrated', n: 0, unknownFrac: stat.unknownFrac, spec, sane: null };
+    // 无样本回退（2026-11-04 用户判定）：不再是"规格 × 魔法常数"，
+    // 而是 min(规格 × 常数, 台账实测比 × 规格)。有台账就按台账，哪怕台账里只有 frac=null 的坏样本。
+    const heuristic = +(spec * Number(this.cfg.uncalibratedFactor ?? 0.6)).toFixed(1);
+    const pool = this.poolRatio(gpuName);
+    const pooled = pool.ratio != null ? +(spec * pool.ratio).toFixed(1) : null;
+    const th = pooled != null ? Math.min(heuristic, pooled) : heuristic;
+    return {
+      th: this._capTh(gpuName, th), raw: th,
+      src: pooled != null ? 'pooled' : 'spec', confidence: 'uncalibrated', n: 0,
+      unknownFrac: stat.unknownFrac, spec, sane: null, pool,
+      why: pooled != null ? `min(规格×${this.cfg.uncalibratedFactor ?? 0.6}=${heuristic}, 台账比${pool.ratio}×规格=${pooled})` : '仅规格常数（无任何台账样本）',
+    };
   }
 
   // 不变量：定价不得超过该型号历史最大交付（整卡归一化）
   _capTh(gpuName, th) {
-    const cap = this.maxDeliveredTh(gpuName);
-    if (cap == null || !(cap > 0)) return +Number(th).toFixed(1);
-    return +Math.min(Number(th), cap).toFixed(1);
+    const caps = [];
+    const maxSeen = this.maxDeliveredTh(gpuName);
+    if (maxSeen > 0) caps.push(maxSeen);
+    // 补充不变量（2026-11-04）：没有整卡样本的型号，估值不得超过「台账实测比 × 规格」。
+    // 有整卡样本时由 maxDeliveredTh（历史最大交付）兜底——那本来就是更紧的界，
+    // 再叠一层中位数会把已经校准好的型号压扁。
+    const rec = (this.st.deliveredTh || {})[gpuKey(gpuName)];
+    const wholeN = (rec?.qual || []).filter(q => Number(q?.frac) >= 0.99).length;
+    const spec = this.thFor(gpuName)?.effective || 0;
+    if (wholeN === 0 && spec > 0) {
+      const pool = this.poolRatio(gpuName);
+      if (pool.ratio != null) caps.push(+(spec * pool.ratio).toFixed(1));
+    }
+    if (!caps.length) return +Number(th).toFixed(1);
+    return +Math.min(Number(th), Math.min(...caps)).toFixed(1);
   }
 
   thFor(name) {
@@ -3855,7 +3898,7 @@ export class Engine {
             th: band.th, confidence: band.confidence || '—', n: band.n ?? 0, band: band.src,
             // thSource：th 到底是"台账样本"还是"规格回退"（2026-11-04 用户指出：
             // 3090 台账 0 条，th=135 是规格值，不标出来就会把"便宜一半"再读成一次假信号）
-            thSource: band.src, thCalibrated: band.src !== 'spec',
+            thSource: band.src, thCalibrated: band.src !== 'spec' && band.src !== 'pooled',
             needDensity: need, nowDensity: +dens6.toFixed(4),
             gapPct: need && dens6 > 0 ? +((need / dens6 - 1) * 100).toFixed(0) : null,
           });

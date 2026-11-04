@@ -3787,6 +3787,7 @@ export class Engine {
       preflight: this.preflight(),
       instances: list,
       offers: this.offers.slice(0, 80),
+      effectiveConfig: this.st.effectiveConfig || null,
       offerStats: { ...this.offerStats, pausedUntil: this.scanPausedUntil > now ? this.scanPausedUntil : 0, pauseReason: this.scanPausedUntil > now ? this.pauseReason : null,
         usage: this.usageToday(), quota: this.st.searchQuota || null, quotaEst: this.st.quotaEst || null,
         // 额度分桶：巡航 40% / 窗口 60%；巡检要报这两个余量，而不是只说"额度用完了"

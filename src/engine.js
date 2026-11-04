@@ -1393,6 +1393,10 @@ export class Engine {
       id: o.id, machineId: o.machineId, gpuName: o.gpuName, numGpus: o.numGpus, dph: o.dph, listDph: o.listDph,
       minBid: o.minBid, spot: o.spot, reliability: o.reliability, geolocation: o.geolocation, inetDown: o.inetDown,
       cuda: o.cuda, source: o.source, autoOk: o.autoOk, l1: o.l1, hostId: o.hostId,
+      // CPU 三件套要跟着缓存走，否则重启后影子列全空（2026-11-04）
+      cpu_cores: o.cpuCores ?? o.cpu_cores ?? null,
+      cpu_cores_effective: o.effThreads ?? o.cpu_cores_effective ?? null,
+      cpu_ram: o.cpuRam ?? o.cpu_ram ?? null,
     }));
     if (!rows.length) return;
     this.st.offersCache = { at: Date.now(), rows };

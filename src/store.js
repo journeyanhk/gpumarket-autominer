@@ -80,6 +80,9 @@ export const DEFAULT_CONFIG = {
   // ratePerThreadHr 目前是外部观测值，未经我们实测校准；contentionFactor 待 A/B 标定。
   // enabled 只控制「是否计算影子列」；pricingEnabled 才是「是否计入出价」，P1 之后才能打开。
   // ramPerThreadGb=2 来自 Blocknet 官方公告（Argon2id 每线程约 2GB）→ usableThreads = min(effCores, ram/2, 27)
+  // 一次性实验钩子：追加到开机脚本末尾的 shell 片段（默认空）。
+  // 只给 A/B 这类"跑完就删"的实验用，不进产品逻辑；空字符串时开机脚本逐字节不变。
+  extraOnstart: '',
   cpuLeg: { enabled: true, pricingEnabled: false, ratePerThreadHr: 0.002, maxThreads: 27, contentionFactor: 1.0, ramPerThreadGb: 2, osReserveGb: 4 },
   l1Default: 0.8,           // 上表没有的型号的兜底
   l1ModelCap: 1.5,          // 型号口径封顶（2026-11-03 从 1.0 放宽）：realized 是相对经验基线的偏差，>1 合法

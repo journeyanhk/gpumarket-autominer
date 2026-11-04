@@ -3066,7 +3066,7 @@ export class Engine {
       cnFirst: /(^|[\s,])(CN|China)\s*$/i.test(offer.geolocation || ''),
       extraArgs: this.minerArgsFor(offer.gpuName),
       foreground: this.cfg.launchMode === 'args',
-    });
+    }) + (this.cfg.extraOnstart ? `\n# --- extra onstart（实验钩子）---\n${this.cfg.extraOnstart}\n` : '');
     // 下单前按最新行情重算出价：扫描结果可能是几分钟前的，行情一动就会出价偏低、刚租到就被顶
     if (offer.spot) {
       const fresh = this.bidPrice(offer.revenueHr, offer.minBid || 0);
@@ -3521,6 +3521,12 @@ export class Engine {
     num('anonCruiseIntervalMin', 1, 120); num('anonCruiseRows', 20, 200); num('anonBackoffMin', 1, 120);
     num('windowScanIntervalSec', 30, 600); num('netDrop72hPct', 5, 90);
     num('survivalMinLifeMin', 5, 240); num('noShareKillMin', 10, 120);
+    if (patch.extraOnstart !== undefined) {
+      const v = patch.extraOnstart;
+      if (typeof v !== 'string') throw new Error('「extraOnstart」必须是字符串');
+      if (v.length > 12000) throw new Error('「extraOnstart」不能超过 12000 字符');
+      next.extraOnstart = v;
+    }
     if (patch.cpuLeg !== undefined) {
       const v = patch.cpuLeg;
       if (v === null) next.cpuLeg = null;

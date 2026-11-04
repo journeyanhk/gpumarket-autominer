@@ -180,6 +180,12 @@ const CONFIG_VERSION = 2;
 export function loadConfig() {
   const saved = readJson(cfgFile, {});
   const cfg = { ...DEFAULT_CONFIG, ...saved };
+  // 嵌套配置必须深合并：保存过的 cpuLeg 会整体覆盖默认值，导致新加的 memModel 静默消失
+  // （2026-11-04 上线后实测：接口里 cpuLeg.memModel 是 undefined）。
+  if (cfg.cpuLeg && DEFAULT_CONFIG.cpuLeg) {
+    cfg.cpuLeg = { ...DEFAULT_CONFIG.cpuLeg, ...(saved.cpuLeg || {}) };
+    cfg.cpuLeg.memModel = { ...DEFAULT_CONFIG.cpuLeg.memModel, ...((saved.cpuLeg || {}).memModel || {}) };
+  }
   const ver = saved.configVersion || 1;
   if (ver < CONFIG_VERSION) {
     for (const u of UPGRADES) if (ver < u.v && saved[u.key] === u.from) cfg[u.key] = u.to;

@@ -395,18 +395,18 @@ console.log('— 房东三层制：白名单（黑名单让你少亏，白名单
   ok(r1.unstable && !r2.unstable, `稳定性放宽生效（+${r1.changePct}%：10% 阈值判不稳、50% 阈值判稳）`);
 
   // 第二项：P 用房东口径（applyGates 走 host），并打上白名单标记
-  const off = e.applyGates({ hostId: '97161', gpuName: 'RTX 3080', spot: true, roi: 60 }, now);
+  const off = e.applyGates({ hostId: '97161', gpuName: 'RTX 3080', spot: true, gpuFrac: 1, roi: 60 }, now);
   ok(off.hostWhitelist === true && off.pSrc === 'host', '白名单报价：存活概率走房东口径并打标记');
   // 三层制的优先级：白名单压过 24h 观察期（软封），压不过 7 天硬封
   e.st.hostBans = { 97161: { until: now + 24 * 60 * MIN, why: '累计收回 2 次', at: now, kind: 'soft' } };
   const white2 = e.refreshHostWhitelist(now);
   ok(white2.includes('97161'), '24 小时观察期不取消白名单（软封可以压过）');
-  const offSoft = e.applyGates({ hostId: '97161', gpuName: 'RTX 3080', spot: true, roi: 60 }, now);
+  const offSoft = e.applyGates({ hostId: '97161', gpuName: 'RTX 3080', spot: true, gpuFrac: 1, roi: 60 }, now);
   ok(offSoft.hostBanLifted === true && !offSoft.spotSkip, '软封房东在白名单里照常出价（标记 hostBanLifted）');
   e.st.hostBans = { 97161: { until: now + 7 * 24 * 60 * MIN, why: '收回率 80% 且中位 10 分钟', at: now, kind: 'hard' } };
   const white3 = e.refreshHostWhitelist(now);
   ok(!white3.includes('97161'), '7 天硬封直接取消白名单（硬封优先）');
-  const offHard = e.applyGates({ hostId: '97161', gpuName: 'RTX 3080', spot: true, roi: 60 }, now);
+  const offHard = e.applyGates({ hostId: '97161', gpuName: 'RTX 3080', spot: true, gpuFrac: 1, roi: 60 }, now);
   ok(offHard.spotSkip === true && !!offHard.hostBanned, '硬封房东即使有正收益样本也不出价');
 }
 
@@ -592,6 +592,41 @@ console.log('— frac=null 样本进下限池 + pooled 回退（2026-11-04 用�
   ok(b.n === 0, 'frac=null 只做上界约束，不进点估计（n 仍为 0）');
 }
 
+console.log('— 逐轮报价快照（2026-11-04）：只写不读、multi-member gzip 可追加');
+{
+  const e = new Engine();
+  let snapErr = null;
+  e.log = (lvl, msg) => { if (lvl === 'warn' && /快照/.test(String(msg))) snapErr = msg; };
+  const rows = [{ id: 1, machineId: 11, dph: 0.1, minBid: 0.1, gpuFrac: 1, effThreads: 8, cpuRam: 16000, th: 45 }];
+  e.logOfferSnapshot(rows, Date.now());
+  e.logOfferSnapshot(rows, Date.now());
+  const { DATA_DIR: DD } = await import(pathToFileURL(path.join(process.cwd(), 'src', 'store.js')).href);
+  const dir = path.join(DD, 'offerLog');
+  if (snapErr) console.log('   快照错误:', snapErr);
+  const files = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+  ok(!snapErr, `快照写入无错误${snapErr ? '：' + snapErr : ''}`);
+  ok(files.length === 1, `写出一份 ${files[0]}（按天归档）`);
+  const raw = fs.readFileSync(path.join(dir, files[0]));
+  const text = (await import('node:zlib')).gunzipSync(raw).toString();
+  ok(text.trim().split('\n').length === 2, '两条记录可被单次 gunzip 读出（multi-member 追加成立）');
+  const rec = JSON.parse(text.trim().split('\n')[0]);
+  ok(rec.rows[0].th === 45 && rec.rows[0].frac === 1, '每行带 th 与 frac（覆盖率/半卡分析要用）');
+  // 不读：决策路径里不应出现对 offerLog 的读取
+  const src = fs.readFileSync(path.join(process.cwd(), 'src', 'engine.js'), 'utf8');
+  ok(!/readFileSync\([^)]*offerLog|gunzipSync/.test(src), '决策路径不读快照（只写不读）');
+}
+
+console.log('— 未知 frac 不得默认整卡（2026-11-04）：半卡价混进整卡口径已经发生过一次');
+{
+  const e = new Engine();
+  e.log = () => {};
+  ok(e.isRentable({ minBid: 0.1, gpuFrac: null }) === 'frac_unknown', 'gpuFrac 缺失 → frac_unknown（旧逻辑会当整卡放过）');
+  ok(e.isRentable({ minBid: 0.1, gpuFrac: 0.5 }) === 'frac', '半卡 → frac');
+  ok(e.isRentable({ minBid: 0.1, gpuFrac: 1 }) === null, '整卡 → 可租');
+  e.cfg.allowUnknownFrac = true;
+  ok(e.isRentable({ minBid: 0.1, gpuFrac: null }) === null, '显式放行时未知 frac 才可租（allowUnknownFrac）');
+}
+
 console.log('— 不变量：定价不得超过该型号历史最大交付（2026-11-03 最后一条）');
 {
   const e = new Engine();
@@ -756,9 +791,9 @@ console.log('— L1 样本按租约去重 + 分数卡不按整卡估价（2026-1
   ok(Math.abs(e.l1For('RTX 3080') - 0.95) < 1e-9, `三样本中位数 ${e.l1For('RTX 3080')}（0.36/0.95/1.02 → 0.95）`);
 
   // 分数卡：gpu_frac < 1 直接跳过（vast 卖半张卡，但算力参考值是整卡的）
-  const f1 = e.applyGates({ hostId: null, gpuName: 'RTX 3080', spot: true, roi: 80, gpuFrac: 0.5 }, Date.now());
+  const f1 = e.applyGates({ hostId: null, gpuName: 'RTX 3080', spot: true, gpuFrac: 1, roi: 80, gpuFrac: 0.5 }, Date.now());
   ok(f1.spotSkip === true && f1.fracSkip === true, '英伟达分数卡 gpu_frac=0.5 → 跳过（不按整卡估价）');
-  const f2 = e.applyGates({ hostId: null, gpuName: 'RTX 3080', spot: true, roi: 80, gpuFrac: 1 }, Date.now());
+  const f2 = e.applyGates({ hostId: null, gpuName: 'RTX 3080', spot: true, gpuFrac: 1, roi: 80, gpuFrac: 1 }, Date.now());
   ok(!f2.fracSkip, 'gpu_frac=1 不受影响');
 }
 

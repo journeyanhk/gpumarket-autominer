@@ -225,6 +225,31 @@ allocate({
 `pricingTable` 每条带 `thSource`（`cheap-band` / `premium-band` / `model-median` / `cheap-carryover` / `spec`）与 `thCalibrated`（`spec` 时为 false）。
 **任何跨场所比较（Clore 普查、触发板 T4）都必须先看这个标记**：台账 0 条的型号其"不亏线"是规格算力撑起来的，拿它去比会把"便宜一半"再读成一次假信号（3090 就是这么差点被读成"有戏"）。
 
+## 6.6 达标线必须钉到「整卡报价」（2026-11-04）
+
+`needDensity` / 达标线只能建立在**能真正租到的整卡**上，并显式输出出处：
+
+```js
+bidFrom: { offerId, machineId, frac, fracKnown, minBid, thSource, thCalibrated }
+```
+
+- 选择规则：`list.filter(frac >= 0.99)` 里取 `minBid/numGpus` 最小的一条；没有整卡 → `needDensity = null`、`bidFrom.noWholeCard = true`。
+- `tools/triggers.mjs` 打印 `bid 出处：offer/<id> frac=… minBid=…`，**若 frac < 0.99 直接拒绝计算**（退出码 3）。
+- **未知 frac 一律拦**：`isRentable` 对 `gpuFrac == null` 返回 `frac_unknown`（`allowUnknownFrac=true` 才放行）。旧逻辑把缺失当整卡，缓存里就踩过——`saveOffers` 当时没存 `gpuFrac`，重算时全部"变成整卡"。
+- 实证：2026-11-04 面板上的 `$0.0533` 是**折整卡价**（半卡 $0.0267 ÷ 0.5）或缓存失真；同日最便宜的可租**整卡**是 `$0.0933`（offer 53447819），`needDensity` 从 0.0417 变成 **0.0730**，gap 从 160% 变成 **≈383%**。
+
+## 6.7 逐轮报价快照（2026-11-04 起，只写不读）
+
+```
+data/offerLog/YYYYMMDD.jsonl.gz   # 每轮一行，multi-member gzip 追加
+{t, n, window, rows:[{id,m,dph,mb,frac,eff,ram,gate,th}]}
+```
+
+- **只写不读**：任何决策路径都不读这个文件（`test/lease-test.mjs` 有断言：源码里不得出现对它的 read）。
+- 30 天滚动，约 0.7KB/轮 → **≈350KB/天**。
+- 三个用途：①覆盖率分析（"30 行就是市场"是当前无法反驳的假设）；②房东回收率的免费先验（连续两轮"有→无→有"= 高频收回型，不用花钱试）；③区分"真没机会"与"没被采样到"。
+- 它不违反 R3：R3 禁的是**加功能**，这是**加观测**。
+
 ## 7. 平台条款
 
 `capabilities.miningAllowed` 默认 `false`，必须在设置页手工勾选"我已确认该平台条款允许在其资源上挖矿"才解锁自动租用。

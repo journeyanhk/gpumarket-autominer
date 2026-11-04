@@ -2,10 +2,12 @@
 import { Vast } from './vast.js';
 import * as P from './pearl.js';
 import { gpuKey, hashrateTable } from './gpus.js';
+import zlib from 'node:zlib';
 import { buildOnstart, workerName, SCRIPT_VERSION } from './onstart.js';
 import { POOLS, POOL_IDS, poolName, minerTarget, fetchKryptexInfo, fetchKryptexWorkers, fetchKryptexEarned } from './pools.js';
-import { loadConfig, saveConfig, loadState, saveState, appendLog, DEFAULT_CONFIG, missingConfigKeys } from './store.js';
+import { loadConfig, saveConfig, loadState, saveState, appendLog, DEFAULT_CONFIG, missingConfigKeys, DATA_DIR } from './store.js';
 import fs from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadManifest } from './miners.js';
 import { pickDensity } from './sources.js';
@@ -1444,6 +1446,7 @@ export class Engine {
       id: o.id, machineId: o.machineId, gpuName: o.gpuName, numGpus: o.numGpus, dph: o.dph, listDph: o.listDph,
       minBid: o.minBid, spot: o.spot, reliability: o.reliability, geolocation: o.geolocation, inetDown: o.inetDown,
       cuda: o.cuda, source: o.source, autoOk: o.autoOk, l1: o.l1, hostId: o.hostId,
+      gpuFrac: o.gpuFrac ?? null,   // 不存就会在缓存重算时变成"未知 → 默认整卡"（2026-11-04 修）
       // CPU 三件套要跟着缓存走，否则重启后影子列全空（2026-11-04）
       cpu_cores: o.cpuCores ?? o.cpu_cores ?? null,
       cpu_cores_effective: o.effThreads ?? o.cpu_cores_effective ?? null,
@@ -1586,7 +1589,10 @@ export class Engine {
   // 参照表把半张卡 $0.0533 当成了整卡最低价）。
   isRentable(o) {
     if (o.minBid != null && !(Number(o.minBid) > 0)) return 'no_min_bid';   // 只有显式给了非法价才拦
-    if (o.gpuFrac != null && Number(o.gpuFrac) > 0 && Number(o.gpuFrac) < 0.99) return 'frac';
+    // 未知 frac 必须拦（2026-11-04）：gpuFrac 缺失时旧逻辑默认 1，等于把半卡当整卡。
+    // 缓存里的旧行就踩过这个洞（saveOffers 当时没存 gpuFrac）。
+    if (o.gpuFrac == null) { if (this.cfg.allowUnknownFrac !== true) return 'frac_unknown'; }
+    else if (Number(o.gpuFrac) > 0 && Number(o.gpuFrac) < 0.99) return 'frac';
     if (o.floorSkip) return 'floor';
     if (o.insaneSkip) return 'insane';
     if (o.blacklisted) return 'blacklist';
@@ -1783,6 +1789,8 @@ export class Engine {
       total: raw.length, known, profitable: out.filter(x => x.roi !== null && x.roi >= this.cfg.targetProfitPct).length,
       scannedAt: now, error: null,
     };
+    // 逐轮快照：只写不读（覆盖率分析 / 房东回收先验 / "没机会 vs 没采到"）
+    this.logOfferSnapshot(out, now);
     // 供给厚度（2026-11-03 用户要求，为 D14 服务）：每小时记一次「可租整卡数」。
     // 没有这个数，"密度够了却只租到 1 台"会被误读成策略失败，实际是供给只有 1-2 条。
     {
@@ -2447,6 +2455,40 @@ export class Engine {
       maxHourlySpend: Number(w.maxHourlySpend ?? base.maxHourlySpend),
       window: true,
     };
+  }
+
+  // 逐轮报价快照：每轮一行（multi-member gzip 追加，gunzip 可直接读），30 天滚动。
+  // 只写不读：任何决策路径都不读这个文件（R3 禁的是加功能，不是加观测）。
+  logOfferSnapshot(rows, now) {
+    const cfg = this.cfg.offerLog || {};
+    if (cfg.enabled === false || !rows?.length) return;
+    try {
+      const dir = path.join(DATA_DIR, 'offerLog');
+      fs.mkdirSync(dir, { recursive: true });
+      const day = new Date(now).toISOString().slice(0, 10).replace(/-/g, '');
+      const file = path.join(dir, `${day}.jsonl.gz`);
+      const line = JSON.stringify({
+        t: now, n: rows.length, window: !!this.st.windowState?.active,
+        rows: rows.map(o => ({
+          id: o.id, m: o.machineId, dph: +(Number(o.dph) || 0).toFixed(5),
+          mb: +(Number(o.minBid) || 0).toFixed(5), frac: Number(o.gpuFrac ?? 1),
+          eff: Number(o.effThreads) || 0, ram: Number(o.cpuRam) || 0,
+          gate: this.isRentable(o) || null, th: o.th ?? null,
+        })),
+      }) + '\n';
+      fs.appendFileSync(file, zlib.gzipSync(Buffer.from(line)));
+      // 滚动清理：只在换天时跑一次
+      if (this._offerLogDay !== day) {
+        this._offerLogDay = day;
+        const keep = Number(cfg.keepDays ?? 30);
+        for (const f of fs.readdirSync(dir)) {
+          const m = /^(\d{8})\.jsonl\.gz$/.exec(f);
+          if (!m) continue;
+          const ageDays = (now - Date.parse(`${m[1].slice(0, 4)}-${m[1].slice(4, 6)}-${m[1].slice(6, 8)}`)) / 864e5;
+          if (ageDays > keep) { try { fs.unlinkSync(path.join(dir, f)); } catch { /* 清不掉不影响写 */ } }
+        }
+      }
+    } catch (e) { this.log('warn', `报价快照写入失败（不影响决策）：${e.message}`); }
   }
 
   // ---------- CPU 腿（P0 影子，只读） ----------
@@ -3869,13 +3911,26 @@ export class Engine {
           if (!list.length) continue;
           const nGpu = o => Math.max(1, Number(o.numGpus) || 1);
           const frac = o => (Number(o.gpuFrac) > 0 ? Number(o.gpuFrac) : 1);
-          const full = list.map(o => Number(o.minBid) / nGpu(o) / frac(o));   // 折整卡价
+          const full = list.map(o => Number(o.minBid) / nGpu(o) / frac(o));   // 折整卡价（仅用于展示）
           const minBid = +Math.min(...full).toFixed(4);
           const medBid = +med(full).toFixed(4);
           const suspect = medBid > 0 && minBid < medBid * 0.5;
-          const per = suspect ? medBid : minBid;
-          const band = this.expectedDeliveredTh(g.name, per);
-          const need = band.th > 0 ? +(per * (1 + roiReq / 100) * 24 / band.th).toFixed(4) : null;
+          // 达标线/所需密度只能建立在**我们能真正租的整卡**上（2026-11-04 用户要求钉出处）：
+          // 折整卡价会把半卡价（$0.0267 × frac 0.5 → $0.0533）当成"最近可达的线"，
+          // 而 isRentable 根本不让我们租 frac<0.99 —— 那条线是够不着的。
+          const wholeOffers = list.filter(o => frac(o) >= 0.99);
+          const cheapOffer = wholeOffers.length
+            ? wholeOffers.reduce((a, o) => (Number(o.minBid) / nGpu(o) < Number(a.minBid) / nGpu(a) ? o : a))
+            : null;
+          const fracKnown = cheapOffer ? Number.isFinite(Number(cheapOffer.gpuFrac)) : false;
+          const per = cheapOffer ? Number(cheapOffer.minBid) / nGpu(cheapOffer) : null;
+          const band = this.expectedDeliveredTh(g.name, per ?? 0);
+          const need = per && band.th > 0 ? +(per * (1 + roiReq / 100) * 24 / band.th).toFixed(4) : null;
+          // 出处：bid 到底是哪条报价、它的 frac 是不是 1（半卡混进整卡口径已经发生过一次）
+          const bidFrom = cheapOffer
+            ? { offerId: cheapOffer.id, machineId: cheapOffer.machineId, frac: frac(cheapOffer), fracKnown,
+                minBid: +Number(cheapOffer.minBid).toFixed(4), nGpu: nGpu(cheapOffer), thSource: band.src, thCalibrated: band.src !== 'spec' && band.src !== 'pooled' }
+            : { offerId: null, machineId: null, frac: null, fracKnown: false, minBid: null, nGpu: null, noWholeCard: true };
           const wholeCount = list.filter(o => frac(o) >= 0.99).length;   // 过滤后仍可租的整卡数
           // CPU 腿影子列（P0）：同型号可租整卡的 effective 线程中位 + 该价位的影子 ROI
           const whole = list.filter(o => frac(o) >= 0.99);
@@ -3886,15 +3941,16 @@ export class Engine {
           const usable = effMed != null ? this.usableThreads(effMed, ramMed) : null;
           const cpuLeg = usable ? this.cpuLegUsdHr(effMed, ramMed) : 0;
           const ramLimited = whole.filter(o => Number(o.ramLimited) === true || (o.usableThreads && o.usableThreads.ramLimited)).length;
-          const cheapOffer = list.reduce((a, o) => (Number(o.minBid) / nGpu(o) < Number(a.minBid) / nGpu(a) ? o : a), list[0]);
+          const cpuRef = cheapOffer || wholeOffers[0] || null;   // 影子列参照的报价（可能为 null：没有整卡）
           rows.push({
             model: g.name, minBid, medianBid: medBid, suspect, pricePerGpu: per,
+            bidFrom, bidPerGpu: per, wholeCardCount: wholeOffers.length,
             wholeCardOnly: wholeCount, excluded: all.length - list.length, offers: all.length,
             effThreads: effMed, ramMb: ramMed, usableThreads: usable ? usable.threads : null,
             ramLimited, cpuLegUsdHr: cpuLeg,
-            thDropBreakevenPct: cheapOffer.thDropBreakevenPct ?? null,
-            threadsNeeded: this.threadsNeeded({ ...cheapOffer, dph: per, revenueHr: band.th * dens6 / 24 }),
-            shadowExpRoi: cheapOffer.shadowExpRoi ?? null,
+            thDropBreakevenPct: cpuRef?.thDropBreakevenPct ?? null,
+            threadsNeeded: cpuRef && per ? this.threadsNeeded({ ...cpuRef, dph: per, revenueHr: band.th * dens6 / 24 }) : null,
+            shadowExpRoi: cpuRef?.shadowExpRoi ?? null,
             th: band.th, confidence: band.confidence || '—', n: band.n ?? 0, band: band.src,
             // thSource：th 到底是"台账样本"还是"规格回退"（2026-11-04 用户指出：
             // 3090 台账 0 条，th=135 是规格值，不标出来就会把"便宜一半"再读成一次假信号）

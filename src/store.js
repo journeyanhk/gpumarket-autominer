@@ -82,6 +82,11 @@ export const DEFAULT_CONFIG = {
   // ramPerThreadGb=2 来自 Blocknet 官方公告（Argon2id 每线程约 2GB）→ usableThreads = min(effCores, ram/2, 27)
   // 一次性实验钩子：追加到开机脚本末尾的 shell 片段（默认空）。
   // 只给 A/B 这类"跑完就删"的实验用，不进产品逻辑；空字符串时开机脚本逐字节不变。
+  // 逐轮报价快照（2026-11-04 用户要求今天开）：只写不读、不进任何决策路径。
+  // 用途：①覆盖率分析的唯一前提（现在"30 行就是市场"是无法反驳的假设）
+  //      ②房东回收率的免费先验（同一台机器在连续两轮里"有→无→有"= 高频收回型房东，不用花钱试）
+  //      ③区分"真没机会" vs "没被采样到"。
+  offerLog: { enabled: true, keepDays: 30 },
   extraOnstart: '',
   cpuLeg: {
     enabled: true, pricingEnabled: false, ratePerThreadHr: 0.002, maxThreads: 27, contentionFactor: 1.0,

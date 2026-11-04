@@ -21,9 +21,9 @@ let failed = 0;
 const ok = (cond, msg) => { if (cond) console.log(`  ✓ ${msg}`); else { failed++; console.log(`  ✗ ${msg}`); } };
 
 const rows = [
-  { id: 1, machineId: 91001, gpuName: 'RTX 2080 Ti', numGpus: 1, dph: 0.0561, listDph: 0.0561, minBid: 0.0561, spot: true, reliability: 0.99, geolocation: 'Norway, NO', inetDown: 900, cuda: 12.4, source: 'spot', autoOk: true, l1: 0.72, hostId: 91001, cpu_cores: 24, cpu_cores_effective: 12, cpu_ram: 16006 },
-  { id: 2, machineId: 91002, gpuName: 'RTX 4070 Ti Super', numGpus: 1, dph: 0.089, listDph: 0.089, minBid: 0.089, spot: true, reliability: 0.99, geolocation: 'Poland, PL', inetDown: 800, cuda: 12.4, source: 'spot', autoOk: true, l1: 0.8, hostId: 91002, cpu_cores: 64, cpu_cores_effective: 24, cpu_ram: 16000 },
-  { id: 3, machineId: 91003, gpuName: 'RTX 3080', numGpus: 1, dph: 0.0933, listDph: 0.0933, minBid: 0.0933, spot: true, reliability: 0.98, geolocation: 'Japan, JP', inetDown: 700, cuda: 12.4, source: 'spot', autoOk: true, l1: 0.5, hostId: 91003, cpu_cores: 56, cpu_cores_effective: 28, cpu_ram: 64000 },
+  { id: 1, machineId: 91001, gpuName: 'RTX 2080 Ti', numGpus: 1, dph: 0.0561, listDph: 0.0561, minBid: 0.0561, spot: true, reliability: 0.99, geolocation: 'Norway, NO', inetDown: 900, cuda: 12.4, source: 'spot', autoOk: true, l1: 0.72, hostId: 91001, cpu_cores: 24, cpu_cores_effective: 12, cpu_ram: 16006, gpuFrac: 1 },
+  { id: 2, machineId: 91002, gpuName: 'RTX 4070 Ti Super', numGpus: 1, dph: 0.089, listDph: 0.089, minBid: 0.089, spot: true, reliability: 0.99, geolocation: 'Poland, PL', inetDown: 800, cuda: 12.4, source: 'spot', autoOk: true, l1: 0.8, hostId: 91002, cpu_cores: 64, cpu_cores_effective: 24, cpu_ram: 16000, gpuFrac: 1 },
+  { id: 3, machineId: 91003, gpuName: 'RTX 3080', numGpus: 1, dph: 0.0933, listDph: 0.0933, minBid: 0.0933, spot: true, reliability: 0.98, geolocation: 'Japan, JP', inetDown: 700, cuda: 12.4, source: 'spot', autoOk: true, l1: 0.5, hostId: 91003, cpu_cores: 56, cpu_cores_effective: 28, cpu_ram: 64000, gpuFrac: 1 },
 ];
 
 fs.mkdirSync(path.join(dir, 'data'), { recursive: true });

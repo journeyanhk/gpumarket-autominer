@@ -13,7 +13,12 @@ import { REASONS } from './contract.js';
  */
 export function decide(offer, ctx) {
   const cost = Number(offer?.pricePerHour) / Math.max(1, Number(offer?.numGpus) || 1);
-  const skip = (reasonCode, note = null) => ({ action: 'skip', reasonCode, expRoi: null, note, cost });
+  // verdict 三态（2026-11-05 用户判定）：pass / watch / skip。
+  // watch = 我们缺一项数据，不是市场没机会；**必须带 whatWouldMakeItViable**，
+  // 否则 M3 会重演 PRL 那个"0 单到底是市场还是规则"的诊断困境。
+  const skip = (reasonCode, note = null) => ({ action: 'skip', verdict: 'skip', reasonCode, expRoi: null, note, cost });
+  const watch = (reasonCode, note, need) => ({ action: 'skip', verdict: 'watch', reasonCode, expRoi: null, note, whatWouldMakeItViable: need, cost });
+  const roiReq = 1 + ((Number(ctx?.targetProfitPct ?? 20) + Number(ctx?.deployPct ?? 3.33)) / Math.max(1e-9, Number(ctx?.pSurvive ?? 0.5))) / 100;
 
   if (ctx?.rentEnabled === false) return skip(REASONS.rentDisabled);
 
@@ -32,13 +37,28 @@ export function decide(offer, ctx) {
 
   // ④ 口径：未校准的交付算力不得参与租用决策（免疫记忆 #2）
   if (offer.thSource === 'spec' || offer.thSource === 'pooled' || offer.thCalibrated === false) {
-    return skip(REASONS.thUncalibrated, `thSource=${offer.thSource}`);
+    const revPerTh = Number(ctx?.revenuePerThHour) || 0;
+    const thNow = Number(offer.deliveredTh) || 0;
+    const needTh = revPerTh > 0 ? +(cost * roiReq / revPerTh).toFixed(1) : null;
+    const specTh = Number(ctx?.specTh) || null;
+    // 关键区分（2026-11-05）：需要的交付算力已经超过规格算力 → **价格是主因，校准救不回来**。
+    // 不区分的话，漏斗会把人引向"再补几条实测样本"，而补多少都没用。
+    const priceIsTheProblem = !!(needTh && specTh && needTh > specTh);
+    return watch(REASONS.thUncalibrated, `thSource=${offer.thSource}（th=${thNow} 是回退值）`, {
+      minDeliveredTh: needTh,
+      maxUsdPerGpuHour: thNow > 0 ? +(thNow * revPerTh / roiReq).toFixed(4) : null,
+      specTh,
+      priceIsTheProblem,
+      note: priceIsTheProblem
+        ? `价格是主因：要过线需 ${needTh} TH > 规格 ${specTh} TH，补样本无解`
+        : '需要 1 条该型号的整卡实测交付（≥5 条、≥2 host 才能升 high）',
+    });
   }
 
   // ⑤ 期限：mrl 不是现货就不能按现货密度算（免疫记忆 #3）
   const maxLease = Number(ctx?.maxLeaseHours ?? 24);
   // mrl 未知不等于现货：默认成现货会把 30 天长约当日内机（免疫记忆 #3 的边界情况）
-  if (offer.mrlHours == null) return skip(REASONS.mrlUnknown, 'mrl 缺失');
+  if (offer.mrlHours == null) return watch(REASONS.mrlUnknown, 'mrl 缺失（不知道是不是长约）', { maxMrlHours: maxLease, note: '需要场所提供最短租期；缺失时不能按现货定价' });
   if (Number(offer.mrlHours) > maxLease) return skip(REASONS.leaseTooLong, `mrl=${offer.mrlHours}h > ${maxLease}h`);
 
   if (offer.hostBanned) return skip(REASONS.hostBanned, String(offer.hostBanned).slice(0, 40));
@@ -52,7 +72,7 @@ export function decide(offer, ctx) {
 
 
   if (expRoi < Number(ctx?.targetProfitPct ?? 20)) {
-    return { action: 'skip', reasonCode: REASONS.expRoiLow, expRoi: +expRoi.toFixed(1), note: `名义 ${roi.toFixed(1)}%`, cost };
+    return { action: 'skip', verdict: 'skip', reasonCode: REASONS.expRoiLow, expRoi: +expRoi.toFixed(1), note: `名义 ${roi.toFixed(1)}%`, cost };
   }
-  return { action: 'rent', reasonCode: REASONS.rent, expRoi: +expRoi.toFixed(1), note: null, cost };
+  return { action: 'rent', verdict: 'pass', reasonCode: REASONS.rent, expRoi: +expRoi.toFixed(1), note: null, cost };
 }

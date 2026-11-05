@@ -79,13 +79,16 @@ console.log('— 免疫记忆：删掉 fixture，测试必须变红');
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
-console.log('— 两个 adapter 同一 allocator（vast vs clore 同价同算力 → 同决策）');
+console.log('— allocator 不读场所字段（这是定义，不是证明；真正的等价性在 units-test）');
 {
+  // 这条测试只证明"allocator 里没有 if (offer.market)"——任何一个没写分支的实现都会通过，
+  // 所以它是**同义反复**（2026-11-05 用户指出）。跨场所语义等价由 test/units-test.mjs 的
+  // 单位断言（每卡每天 vs 整机每小时、MB vs GB、mrl、nGpu 字符串）负责。
   const fx = JSON.parse(fs.readFileSync(path.join(FIX, '16-clore-3090-rent.json'), 'utf8'));
   const asVast = { ...fx.offer, market: 'vast' };
   const a = decide(fx.offer, fx.ctx), b = decide(asVast, fx.ctx);
   ok(a.action === b.action && a.reasonCode === b.reasonCode && a.expRoi === b.expRoi,
-    `同一报价换场所不改结论（${a.action}/${a.reasonCode} expRoi ${a.expRoi}）`);
+    `换 market 字段不改结论（${a.action}/${a.reasonCode}）——仅说明无场所分支`);
 }
 
 console.log(fail ? `\nM3 测试失败：${fail} 项` : `\nM3 测试通过（${pass} 项）`);

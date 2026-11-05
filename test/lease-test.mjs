@@ -616,6 +616,21 @@ console.log('— 逐轮报价快照（2026-11-04）：只写不读、multi-membe
   ok(!/readFileSync\([^)]*offerLog|gunzipSync/.test(src), '决策路径不读快照（只写不读）');
 }
 
+console.log('— gz 追加回环（2026-11-05）：写 3 轮必须能读回 3 轮（存储层静默损坏只有回读能发现）');
+{
+  const e = new Engine();
+  e.log = () => {};
+  for (let i = 1; i <= 3; i++) e.logCloreSnapshot({ at: `2026-11-05T0${i}:00:00Z`, servers: 100 * i, models: { '3080': { n: i, min: 0.05, med: 0.16 } }, fracDist: { '1.0': i, partial: 0, null: 0 }, filter: { mrlMaxHours: 24 } });
+  const dir = path.join(process.cwd(), 'data', 'offerLog');
+  const f = fs.readdirSync(dir).find(x => /^clore-\d{8}\.jsonl\.gz$/.test(x));
+  ok(!!f, `clore 快照文件存在：${f}`);
+  const { gunzipSync } = await import('node:zlib');
+  const lines = gunzipSync(fs.readFileSync(path.join(dir, f))).toString().trim().split('\n');
+  ok(lines.length === 3, `3 次追加读回 ${lines.length} 行（multi-member gzip 未损坏）`);
+  const parsed = lines.map(l => JSON.parse(l));
+  ok(parsed.every(p => p.source === 'clore') && parsed[2].servers === 300, '每行可 JSON 解析且内容完整');
+}
+
 console.log('— 未知 frac 不得默认整卡（2026-11-04）：半卡价混进整卡口径已经发生过一次');
 {
   const e = new Engine();

@@ -228,6 +228,7 @@ export class Engine {
     const k = gpuKey(gpuName);
     const rec = ((this.st.deliveredTh ||= {})[k] ||= { samples: [], prices: [], qual: [] });
     rec.samples.push(+thPerGpu.toFixed(1));
+    rec.updatedAt = new Date().toISOString();   // 派生值的输入版本戳要用（2026-11-05）
     (rec.prices ||= []).push(Number(pricePerGpu) > 0 ? +Number(pricePerGpu).toFixed(4) : null);
     // quality: {fid, mins} —— 只有"机器健康"的样本才能压低贵档估计（2026-11-03 用户要求）
     (rec.qual ||= []).push(quality && Number.isFinite(Number(quality.fid))
@@ -4001,6 +4002,9 @@ export class Engine {
             threadsNeeded: cpuRef && per ? this.threadsNeeded({ ...cpuRef, dph: per, revenueHr: band.th * dens6 / 24 }) : null,
             shadowExpRoi: cpuRef?.shadowExpRoi ?? null,
             th: band.th, confidence: band.confidence || '—', n: band.n ?? 0, band: band.src,
+            // 派生值的输入版本（2026-11-05 用户要求）：达标线是 th × 密度 的函数，
+            // 任何一个输入更新而派生值没更新，就是"输入变了、派生值没跟着变"的第三次复现。
+            inputsAt: { th: (this.st.deliveredTh || {})[g.key]?.updatedAt || null, density: this.market.updatedAt || null, quotes: this.offerStats.scannedAt || null },
             // thSource：th 到底是"台账样本"还是"规格回退"（2026-11-04 用户指出：
             // 3090 台账 0 条，th=135 是规格值，不标出来就会把"便宜一半"再读成一次假信号）
             thSource: band.src, thCalibrated: band.src !== 'spec' && band.src !== 'pooled',

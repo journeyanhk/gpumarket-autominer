@@ -100,7 +100,7 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
   const d = await r.json();
   const fx = await fetchFx();
   const servers = d.servers || [];
-  const spot = {}, mrls = {}, skipped = {}, fracDist = { '1.0': 0, partial: 0, null: 0 };
+  const spot = {}, all = {}, mrls = {}, skipped = {}, fracDist = { '1.0': 0, partial: 0, null: 0 };
   for (const s of servers) {
     const m = /^\s*(\d+)\s*x\s*(.+)$/.exec(s?.specs?.gpu || '');
     if (!m) continue;
@@ -115,8 +115,11 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
     else fracDist.null++;
     const mrl = Number(s.mrl);
     if (Number.isFinite(mrl)) (mrls[k] ||= []).push(mrl);
-    if (Number.isFinite(mrl) && mrl > mrlMaxHours) { skipped[k] = (skipped[k] || 0) + 1; continue; }
     const p = usdPerDayOf(s?.price || {}, 'spot', fx);
+    // 两个口径都算：medAll（不过滤 mrl）与 med（mrl<=N）。
+    // 2026-11-05 用户指出：我报的 $0.1679 与他独立拉到的 $0.25 差 33%，根因就是过滤藏在代码里。
+    if (p) (all[k] ||= []).push(p.usd / cnt / 24);
+    if (Number.isFinite(mrl) && mrl > mrlMaxHours) { skipped[k] = (skipped[k] || 0) + 1; continue; }
     if (p) (spot[k] ||= []).push(p.usd / cnt / 24);
   }
   const models = {};
@@ -124,11 +127,14 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
     const a = spot[k].slice().sort((x, y) => x - y);
     const m = (arr) => (arr.length ? (arr.length % 2 ? arr[(arr.length - 1) / 2] : (arr[arr.length / 2 - 1] + arr[arr.length / 2]) / 2) : null);
     const mr = (mrls[k] || []).slice().sort((x, y) => x - y);
+    const aa = (all[k] || []).slice().sort((x, y) => x - y);
     models[k] = {
       n: a.length, min: +a[0].toFixed(4), med: +m(a).toFixed(4),
+      nAll: aa.length, minAll: aa.length ? +aa[0].toFixed(4) : null, medAll: aa.length ? +m(aa).toFixed(4) : null,
       mrlMin: mr.length ? mr[0] : null, mrlMed: mr.length ? mr[mr.length >> 1] : null,
       skippedLongLease: skipped[k] || 0,
     };
   }
-  return { at: new Date().toISOString(), mrlMaxHours, servers: servers.length, models, fracDist, fx };
+  return { at: new Date().toISOString(), servers: servers.length, models, fracDist, fx,
+    filter: { mrlMaxHours, frac: '>=0.99', nGpu: 'all（整机价 ÷ 卡数）', priceKind: 'spot' } };
 }

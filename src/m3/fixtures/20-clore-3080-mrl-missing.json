@@ -1,0 +1,26 @@
+{
+  "id": "20-clore-3080-mrl-missing",
+  "expect": "mrl_unknown",
+  "offer": {
+    "id": 1,
+    "market": "clore",
+    "gpu": "RTX 3080",
+    "numGpus": 1,
+    "frac": 1,
+    "pricePerHour": 0.06,
+    "mrlHours": null,
+    "deliveredTh": 68.9,
+    "thSource": "cheap-band"
+  },
+  "ctx": {
+    "targetProfitPct": 20,
+    "deployPct": 3.33,
+    "pSurvive": 0.5,
+    "revenuePerThHour": 0.00075,
+    "floorPricePerGpu": 0.02,
+    "maxHourlySpend": 0.2,
+    "budgetLeftUsd": 5,
+    "maxLeaseHours": 24,
+    "rentEnabled": true
+  }
+}

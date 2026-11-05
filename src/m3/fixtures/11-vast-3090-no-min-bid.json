@@ -1,0 +1,26 @@
+{
+  "id": "11-vast-3090-no-min-bid",
+  "expect": "no_min_bid",
+  "offer": {
+    "id": 1,
+    "market": "vast",
+    "gpu": "RTX 3090",
+    "numGpus": 1,
+    "frac": 1,
+    "pricePerHour": 0,
+    "mrlHours": 6,
+    "deliveredTh": 68.9,
+    "thSource": "cheap-band"
+  },
+  "ctx": {
+    "targetProfitPct": 20,
+    "deployPct": 3.33,
+    "pSurvive": 0.5,
+    "revenuePerThHour": 0.00075,
+    "floorPricePerGpu": 0.02,
+    "maxHourlySpend": 0.2,
+    "budgetLeftUsd": 5,
+    "maxLeaseHours": 24,
+    "rentEnabled": true
+  }
+}

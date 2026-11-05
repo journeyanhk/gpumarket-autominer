@@ -1,0 +1,26 @@
+{
+  "id": "16-clore-3090-rent",
+  "expect": "rent",
+  "offer": {
+    "id": 1,
+    "market": "clore",
+    "gpu": "RTX 3090",
+    "numGpus": 1,
+    "frac": 1,
+    "pricePerHour": 0.04,
+    "mrlHours": 12,
+    "deliveredTh": 78,
+    "thSource": "cheap-band"
+  },
+  "ctx": {
+    "targetProfitPct": 20,
+    "deployPct": 3.33,
+    "pSurvive": 0.5,
+    "revenuePerThHour": 0.0008,
+    "floorPricePerGpu": 0.02,
+    "maxHourlySpend": 0.2,
+    "budgetLeftUsd": 5,
+    "maxLeaseHours": 24,
+    "rentEnabled": true
+  }
+}

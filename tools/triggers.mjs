@@ -41,7 +41,14 @@ if (r3080 && density > 0) {
   const ceiling = +(th * density / 24 / (1 + roiReqPct / 100)).toFixed(4);
   t4 = {
     id: 'T4', hit: false, threshold: ceiling,
-    derivedFrom: `3080 th=${th} (thSource=${r3080.thSource}) × 密度 ${density} ÷24 ÷(1+${roiReqPct}%)｜roiReq=(target ${target}% + deploy ${deployPct.toFixed(2)}%)÷P ${pSurvive}`,
+    // 版本戳（2026-11-05）：阈值必须自带输入的时间与口径，且日期不是今天要显式标黄
+    derivedFrom: `3080 th=${th} (${r3080.thSource}@${(r3080.inputsAt?.th || 'n/a').slice(0, 16)}) × 密度 ${density.toFixed(5)}@${(r3080.inputsAt?.density ? new Date(r3080.inputsAt.density).toISOString() : 'n/a').slice(5, 16)} ÷24 ÷(1+${roiReqPct}%)`,
+    inputsAt: r3080.inputsAt || null,
+    staleInputs: (() => {
+      const today = new Date().toISOString().slice(0, 10);
+      const d = r3080.inputsAt?.density ? new Date(r3080.inputsAt.density).toISOString().slice(0, 10) : null;
+      return d && d !== today ? `密度快照来自 ${d}，不是今天` : null;
+    })(),
     bidFrom: bf.offerId ? `offer/${bf.offerId} frac=${bf.frac} minBid=$${bf.minBid}` : '无整卡报价',
     bidPerGpu: bf.minBid ?? null,
     note: r3080.thCalibrated === false ? '⚠ th 未校准（pooled/spec），阈值本身是上界，命中也要人工复核' : null,
@@ -108,6 +115,7 @@ for (const t of board) {
   const v = t.value != null ? `当前 ${typeof t.value === 'number' ? t.value.toFixed(t.value < 10 ? 2 : 1) : t.value}` : '当前 —';
   console.log(`${t.hit ? '✅' : '·'} ${t.id} 阈值 ${t.threshold ?? '—'}｜${v}｜由 ${t.derivedFrom}`);
   if (t.bidFrom) console.log(`   bid 出处：${t.bidFrom}`);
+  if (t.staleInputs) console.log(`   ⚠ ${t.staleInputs}`);
   if (t.note) console.log(`   ${t.note}`);
 }
 console.log(hits.length ? `命中：${hits.map(h => h.id).join('、')}` : '无命中（保持静默）');

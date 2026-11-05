@@ -64,6 +64,8 @@ try {
   if (Number.isFinite(t)) scanAgeH = +((Date.now() - t) / 36e5).toFixed(1);
 } catch { /* 没有采集文件就跳过 */ }
 const scanStale = scanAgeH != null && scanAgeH > 26;   // 每天一跑，>26h 即视为断档
+// 判据降级必须出声（2026-11-05 用户判定）：停用判据 ≠ 无命中，前者是盲飞，必须自己喊。
+const scanDead = scanAgeH != null && scanAgeH > 72;    // 三天没数据 = B 线瘫了
 // gpu-coin-scan 的一行里有：pearl = Pearl 24h 难度变化(%)、kryptex.sharePct = 池占比
 const pearlChg = Number(scan?.pearl ?? NaN);
 const t2 = { id: 'T2', hit: !scanStale && Number.isFinite(pearlChg) && pearlChg <= -1.5, value: Number.isFinite(pearlChg) ? pearlChg : null, threshold: -1.5,
@@ -83,10 +85,24 @@ const t5 = { id: 'T5', hit: Number.isFinite(pearlChg) && pearlChg >= 3, value: N
 const board = [t1, t2, t3, t4, t5].filter(Boolean);
 const hits = board.filter(t => t.hit);
 
-const out = { at: new Date().toISOString(), price, density, targetProfitPct: target, roiReqPct, pSurvive, deployPct: +deployPct.toFixed(2), scanAt: scan?.at || null, scanAgeH, scanStale, board, hits: hits.map(h => h.id), window: st?.window?.info?.ratioPass ?? null, windowActive: !!st?.window?.active };
+// A 类状态告警：不是"命中机会"，而是"我们是否还在正常观测"
+const alarms = [];
+if (scanDead) alarms.push({ id: 'A0', msg: `B 线已瘫：采集断档 ${scanAgeH}h（>72h），触发板 T2/T3/T5 全停` });
+else if (scanStale) alarms.push({ id: 'A1', msg: `T2/T3/T5 已停用：最后采集 ${scanAgeH}h 前（>26h）` });
+// 整卡 0 条持续 24h：可能是市场事实，也可能是过滤/字段漂移——两者外观一样，必须喊
+const zws = st?.offerStats?.zeroWholeSince || null;
+if (zws) {
+  const h = (Date.now() - zws) / 36e5;
+  if (h >= 24) alarms.push({ id: 'A2', msg: `整卡 0 条已 ${h.toFixed(0)}h（总报价 ${st?.offerStats?.total ?? '?'} 条，frac 分布 ${JSON.stringify(st?.offerStats?.fracDist || {})}）——疑似过滤/字段故障` });
+}
+
+const out = { at: new Date().toISOString(), price, density, targetProfitPct: target, roiReqPct, pSurvive, deployPct: +deployPct.toFixed(2), scanAt: scan?.at || null, scanAgeH, scanStale, scanDead, alarms, board, hits: hits.map(h => h.id), window: st?.window?.info?.ratioPass ?? null, windowActive: !!st?.window?.active };
 
 if (process.argv.includes('--json')) { console.log(JSON.stringify(out, null, 2)); process.exit(0); }
 
+// 告警必须排在**第一行**（用户要求：日报第一行就写这个），不能藏在表尾
+if (alarms.length) for (const a of alarms) console.log(`🚨 ${a.id} ${a.msg}`);
+else console.log('✅ 观测正常（采集新鲜、整卡供给未断档）');
 console.log(`触发板 ${out.at}｜PRL $${price ?? '—'}｜密度 $${density ?? '—'}/TH·天｜ratioPass ${out.window ?? 'null'}`);
 for (const t of board) {
   const v = t.value != null ? `当前 ${typeof t.value === 'number' ? t.value.toFixed(t.value < 10 ? 2 : 1) : t.value}` : '当前 —';

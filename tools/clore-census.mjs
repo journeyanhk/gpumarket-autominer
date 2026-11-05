@@ -29,87 +29,12 @@ const TARGETS = (() => {
 })();
 
 const med = a => { const v = [...a].sort((x, y) => x - y); if (!v.length) return null; const m = Math.floor(v.length / 2); return +(v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2).toFixed(4); };
-const num = v => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : null; };
+// 取价/汇率/型号归一只有一份实现（src/clore.js），工具从这里 import——
+// 两个地方各写一遍取价正是本项目 bug 家族的源头。
+import { num, modelKey, fetchFx, usdPerDayOf, readCloreKey } from '../src/clore.js';
 
-// Clore 的 mrl（最低租期，小时）：便宜档里常见 72/240/300/720 小时的长约。
-// 不带过滤的"最低价"等于把 30 天锁定期当现货，而密度一个月能漂 ±50% → 默认只统计 mrl ≤ 24h。
+// mrl（最低租期，小时）过滤：便宜档常见 72/240/300/720 小时的长约，默认只看 ≤24h
 const MRL_MAX = (() => { const i = process.argv.indexOf('--mrl'); return i > 0 ? Number(process.argv[i + 1]) : 24; })();
-
-const readKey = () => {
-  try {
-    const raw = fs.readFileSync(path.join(SEC, 'clore_key'), 'utf8').trim();
-    const m = /CLORE_KEY=(.+)/.exec(raw);
-    return (m ? m[1] : raw).trim();
-  } catch { return null; }
-};
-
-// 型号匹配：Clore 的 specs.gpu 形如 "1x RTX 3080" / "2x RTX 2080 Ti"
-const modelKey = (s) => {
-  const t = String(s || '').toLowerCase();
-  if (/2080\s*ti/.test(t)) return '2080 Ti';
-  if (/3080\s*ti/.test(t)) return '3080 Ti';
-  if (/3080/.test(t)) return '3080';
-  if (/4070\s*ti/.test(t)) return '4070 Ti';
-  if (/4070\s*s|4070s/.test(t)) return '4070S';
-  if (/3090/.test(t)) return '3090';
-  if (/4060\s*ti/.test(t)) return '4060 Ti';
-  return null;
-};
-
-// ---------- 汇率：只用公开行情，带时间戳 ----------
-// Clore 自己也在换算（`usd.on_demand_btc` 就是它按内部价算的美元），所以"我们的换算"只作兜底，
-// 但一旦用到就必须记下用了哪路、什么价、什么时候取的。
-async function fetchFx() {
-  const fx = { at: new Date().toISOString(), btcUsd: null, cloreUsd: null, src: {} };
-  try {
-    const r = await fetch('https://api.gateio.ws/api/v4/spot/tickers?currency_pair=BTC_USDT', { signal: AbortSignal.timeout(15000) });
-    const d = await r.json();
-    fx.btcUsd = num(d?.[0]?.last); if (fx.btcUsd) fx.src.btc = 'gate';
-  } catch { /* 下面还有 CoinGecko */ }
-  try {
-    const r = await fetch('https://api.gateio.ws/api/v4/spot/tickers?currency_pair=CLORE_USDT', { signal: AbortSignal.timeout(15000) });
-    const d = await r.json();
-    fx.cloreUsd = num(d?.[0]?.last); if (fx.cloreUsd) fx.src.clore = 'gate';
-  } catch { /* 下面还有 CoinGecko */ }
-  if (!fx.btcUsd || !fx.cloreUsd) {
-    try {
-      const r = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,clore-ai&vs_currencies=usd', { signal: AbortSignal.timeout(15000) });
-      const d = await r.json();
-      fx.btcUsd ||= num(d?.bitcoin?.usd);
-      fx.cloreUsd ||= num(d?.['clore-ai']?.usd);
-      if (fx.btcUsd && !fx.src.btc) fx.src.btc = 'coingecko';
-      if (fx.cloreUsd && !fx.src.clore) fx.src.clore = 'coingecko';
-    } catch { /* 汇率拿不到不致命：只影响币本位报价的房源 */ }
-  }
-  return fx;
-}
-
-// 单条房源某一种计价方式（spot / on_demand）的「美元/天」，返回 { usd, src }
-// src: usd=平台美元 | ownerUsd=房东原始美元 | btc=我们按 BTC 汇率换 | clore=我们按 CLORE 汇率换
-function usdPerDayOf(p, kind, fx) {
-  if (!p) return null;
-  const direct = num(p?.[kind]?.['USD-Blockchain']);
-  if (direct) return { usd: direct, src: 'usd' };
-  // 平台已经算好的美元（只有按需有这组字段；spot 的 usd.spot 恒为 0，是坑）
-  if (kind === 'spot') { const v = num(p?.usd?.spot); if (v) return { usd: v, src: 'usd' }; }
-  const pre = num(kind === 'spot' ? p?.usd?.spot_usd : p?.usd?.on_demand_usd);
-  if (pre) return { usd: pre, src: 'usd' };
-  const preBtc = num(kind === 'spot' ? p?.usd?.spot_btc : p?.usd?.on_demand_btc);
-  if (preBtc) return { usd: preBtc, src: 'usd' };
-  const preClore = num(kind === 'spot' ? p?.usd?.spot_clore : p?.usd?.on_demand_clore);
-  if (preClore) return { usd: preClore, src: 'usd' };
-  // 房东自己填的美元价（未换算）
-  for (const cc of ['USD-Blockchain', 'bitcoin', 'CLORE-Blockchain']) {
-    const v = num(p?.original_usd?.[cc]?.[kind]);
-    if (v) return { usd: v, src: 'ownerUsd' };
-  }
-  // 币本位 + 我们自己的汇率（带时间戳）
-  const btc = num(p?.[kind]?.bitcoin);
-  if (btc && fx.btcUsd) return { usd: btc * fx.btcUsd, src: 'btc' };
-  const clore = num(p?.[kind]?.['CLORE-Blockchain']);
-  if (clore && fx.cloreUsd) return { usd: clore * fx.cloreUsd, src: 'clore' };
-  return null;
-}
 
 const out = { at: new Date().toISOString(), models: {}, vastMinBid: {}, breakeven: null, fx: null, error: null };
 
@@ -173,7 +98,7 @@ try {
 
 // 2) 汇率 + Clore 报价
 try {
-  const key = readKey();
+  const key = readCloreKey('/data/prl-automine/.secrets/clore_key');
   if (!key) throw new Error('没有 clore_key');
   const fx = await fetchFx();
   out.fx = fx;

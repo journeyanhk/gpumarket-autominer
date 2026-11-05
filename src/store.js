@@ -86,6 +86,8 @@ export const DEFAULT_CONFIG = {
   // 用途：①覆盖率分析的唯一前提（现在"30 行就是市场"是无法反驳的假设）
   //      ②房东回收率的免费先验（同一台机器在连续两轮里"有→无→有"= 高频收回型房东，不用花钱试）
   //      ③区分"真没机会" vs "没被采样到"。
+  // Clore 市场适配器（M3 Market 第二个实现）：每 2 小时一次，只做供给统计
+  clore: { enabled: true, keyFile: '/data/prl-automine/.secrets/clore_key', intervalMin: 120, mrlMaxHours: 24 },
   offerLog: { enabled: true, keepDays: 30 },
   extraOnstart: '',
   cpuLeg: {

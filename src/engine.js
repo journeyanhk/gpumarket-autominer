@@ -4,6 +4,7 @@ import * as P from './pearl.js';
 import { gpuKey, hashrateTable } from './gpus.js';
 import zlib from 'node:zlib';
 import { buildOnstart, workerName, SCRIPT_VERSION } from './onstart.js';
+import { fetchClore } from './clore.js';
 import { POOLS, POOL_IDS, poolName, minerTarget, fetchKryptexInfo, fetchKryptexWorkers, fetchKryptexEarned } from './pools.js';
 import { loadConfig, saveConfig, loadState, saveState, appendLog, DEFAULT_CONFIG, missingConfigKeys, DATA_DIR } from './store.js';
 import fs from 'node:fs';
@@ -412,6 +413,7 @@ export class Engine {
     this.loop(() => this.refreshKryptex(), 30_000, 3000);
     this.loop(() => this.refreshVast(), 30_000);
     this.loop(() => this.refreshWildrig(), 6 * 60 * MIN);
+    this.loop(() => this.refreshClore(), Number(this.cfg.clore?.intervalMin ?? 120) * MIN, 20_000);
     this.loop(() => this.scanTick(), 20_000, 8000);
     this.loop(() => this.decide(), 20_000, 15000);
   }
@@ -1785,9 +1787,25 @@ export class Engine {
     merged.sort((a, b) => ((b.expRoi ?? -Infinity) - (a.expRoi ?? -Infinity)) || ((b.pSurvive ?? 0) - (a.pSurvive ?? 0)) || ((b.roi ?? -Infinity) - (a.roi ?? -Infinity)));
     this.offers = merged.slice(0, 200);
     if (newHostMap || !this._offersSavedAt || Date.now() - this._offersSavedAt > 2 * MIN) { this._offersSavedAt = Date.now(); this.saveOffers(); this.save(); }
+    // frac 分布（2026-11-05 用户要求）："整卡 0 条"必须是**有分布支撑的事实**，不是一句断言。
+    // frac=null 与 frac=1 在计数上完全不同：前者是字段缺了（我们已被同类问题咬过两次），后者是市场真没有。
+    const fracDist = { '1.0': 0, '0.5': 0, '0.25': 0, other: 0, null: 0 };
+    for (const o of raw) {
+      const f = Number(o.gpu_frac);
+      if (!Number.isFinite(f) || f <= 0) fracDist.null++;
+      else if (f >= 0.99) fracDist['1.0']++;
+      else if (Math.abs(f - 0.5) < 0.01) fracDist['0.5']++;
+      else if (Math.abs(f - 0.25) < 0.01) fracDist['0.25']++;
+      else fracDist.other++;
+    }
+    const wholeNow = fracDist['1.0'];
+    // 断供计时：总报价 > 20 且整卡 0 条，连续 24h → 疑似过滤/字段故障（不是市场事实）
+    if (raw.length > 20 && wholeNow === 0) { if (!this.st.zeroWholeSince) this.st.zeroWholeSince = now; }
+    else this.st.zeroWholeSince = null;
     this.offerStats = {
       total: raw.length, known, profitable: out.filter(x => x.roi !== null && x.roi >= this.cfg.targetProfitPct).length,
       scannedAt: now, error: null,
+      fracDist, wholeCount: wholeNow, zeroWholeSince: this.st.zeroWholeSince || null,
     };
     // 逐轮快照：只写不读（覆盖率分析 / 房东回收先验 / "没机会 vs 没采到"）
     this.logOfferSnapshot(out, now);
@@ -2489,6 +2507,36 @@ export class Engine {
         }
       }
     } catch (e) { this.log('warn', `报价快照写入失败（不影响决策）：${e.message}`); }
+  }
+
+  // Clore 市场（M3 Market 的第二个实现）：每 2 小时一次，只做供给统计，不参与 PRL 决策。
+  // 频率 2 小时就够：Clore 便宜档是分钟级被抢走的，采样再密也抓不到成交过程；
+  // 我们要的是"多久出现一次、出现时 mrl 多少"。
+  async refreshClore() {
+    const cfg = this.cfg.clore || {};
+    if (cfg.enabled === false) return;
+    try {
+      const snap = await fetchClore({ keyFile: cfg.keyFile, mrlMaxHours: Number(cfg.mrlMaxHours ?? 24) });
+      this.clore = snap;
+      this.logCloreSnapshot(snap);
+      const m = snap.models || {};
+      const best = Object.entries(m).map(([k, v]) => `${k} min $${v.min}/h(mrl ${v.mrlMin}h)`).slice(0, 3).join('，');
+      this.log('info', `Clore 市场：${snap.servers} 台，整卡 ${snap.fracDist['1.0']}｜${best || '无可比型号'}`);
+    } catch (e) { this.log('warn', `Clore 市场拉取失败（不影响 PRL）：${e.message}`); }
+  }
+
+  // 与报价快照同一套 append-only 格式（多一个 source 字段），覆盖率/房东先验可跨市场复用
+  logCloreSnapshot(snap) {
+    const cfg = this.cfg.offerLog || {};
+    if (cfg.enabled === false) return;
+    try {
+      const dir = path.join(DATA_DIR, 'offerLog');
+      fs.mkdirSync(dir, { recursive: true });
+      const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const file = path.join(dir, `clore-${day}.jsonl.gz`);
+      const line = JSON.stringify({ source: 'clore', t: Date.now(), ...snap }) + '\n';
+      fs.appendFileSync(file, zlib.gzipSync(Buffer.from(line)));
+    } catch (e) { this.log('warn', `Clore 快照写入失败：${e.message}`); }
   }
 
   // ---------- CPU 腿（P0 影子，只读） ----------
@@ -3873,6 +3921,7 @@ export class Engine {
       instances: list,
       offers: this.offers.slice(0, 80),
       effectiveConfig: this.st.effectiveConfig || null,
+      markets: { vast: { at: this.offerStats?.scannedAt || null, offers: (this.offers || []).length, fracDist: this.offerStats?.fracDist || null, wholeCount: this.offerStats?.wholeCount ?? null, zeroWholeSince: this.offerStats?.zeroWholeSince || null }, clore: this.clore || null },
       offerStats: { ...this.offerStats, pausedUntil: this.scanPausedUntil > now ? this.scanPausedUntil : 0, pauseReason: this.scanPausedUntil > now ? this.pauseReason : null,
         usage: this.usageToday(), quota: this.st.searchQuota || null, quotaEst: this.st.quotaEst || null,
         // 额度分桶：巡航 40% / 窗口 60%；巡检要报这两个余量，而不是只说"额度用完了"

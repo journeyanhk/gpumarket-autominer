@@ -11,6 +11,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { normalizeVast, normalizeClore, toAllocatorOffer } from '../src/m3/normalize.js';
 import { decide } from '../src/m3/allocator.js';
+import { calibrationShoppingList } from '../src/m3/ev.js';
 
 const CTRL = 'http://127.0.0.1:8290/api/state';
 const LOGDIR = '/data/gpumarket-autominer/data/offerLog';
@@ -44,12 +45,17 @@ function readLines(file) {
   } catch { return []; }
 }
 
+// --live：直接用当前扫描结果（offers 自带 gpuName），用于"今天真实的漏斗比例"；
+// 日志模式用于时间序列（历史行可能缺 gpu 字段，会记进 normalizeFailed）
+const LIVE = process.argv.includes('--live');
+const liveRows = LIVE ? (st?.offers || []).map(o => ({ id: o.id, m: o.machineId, gpu: o.gpuName, dph: o.dph, mb: o.minBid, frac: o.gpuFrac, th: o.th })) : null;
 const vastFile = path.join(LOGDIR, `${day}.jsonl.gz`);
 const cloreFile = path.join(LOGDIR, `clore-${day}.jsonl.gz`);
-const vastRounds = readLines(vastFile);
+const vastRounds = LIVE ? [{ rows: liveRows }] : readLines(vastFile);
 const cloreRounds = readLines(cloreFile);
 
-const funnel = { at: new Date().toISOString(), day, density, price, revenuePerThHour: +revenuePerThHour.toFixed(6), rounds: { vast: vastRounds.length, clore: cloreRounds.length }, total: 0, normalized: 0, normalizeFailed: 0, byReason: {}, byVerdict: {}, byMarket: {}, watchHints: [] };
+const funnel = { at: new Date().toISOString(), day, density, price, revenuePerThHour: +revenuePerThHour.toFixed(6), rounds: { vast: vastRounds.length, clore: cloreRounds.length }, total: 0, normalized: 0, normalizeFailed: 0, byReason: {}, byVerdict: {}, byMarket: {}, watchHints: [], candidates: [], supply: {} };
+const fracCount = { whole: 0, partial: 0, unknown: 0 };
 
 // vast：快照里存的是**已评估过的**精简行（id/m/dph/mb/frac/eff/ram/th），不是原始 vast 字段，
 // 所以这里按行内字段重建，不做 raw 解析——这也说明 offerLog 的字段设计要跟着 adapter 走。
@@ -57,9 +63,13 @@ const seen = new Set();
 for (const round of vastRounds) {
   for (const r of round.rows || []) {
     funnel.total++;
+    if (r.frac == null) fracCount.unknown++;
+    else if (Number(r.frac) >= 0.99) fracCount.whole++;
+    else fracCount.partial++;
     const key = `${r.m}`;
-    const model = Object.keys(thByModel).find(m => String(m).toUpperCase().includes(String(r.g ?? '').toUpperCase())) || null;
-    // 快照行没有型号名时用 th 反查不到，记一次 normalizeFailed（这正是"字段不够"的证据）
+    // 型号名直接取快照行（2026-11-05 修复：早先快照没存型号，模糊匹配会把所有行配到第一个型号，
+    // 于是"价格主因 962 条"那个数是错的——错配的 specTh 会把结论整体带偏）
+    const model = r.gpu && thByModel[r.gpu] ? r.gpu : null;
     if (!model) { funnel.normalizeFailed++; continue; }
     const info = thByModel[model];
     const offer = toAllocatorOffer({
@@ -79,7 +89,11 @@ for (const round of vastRounds) {
         funnel.watchHints.push({ market: 'vast', model, reason: d.reasonCode, need: d.whatWouldMakeItViable });
       }
       if (d.whatWouldMakeItViable.priceIsTheProblem) funnel.priceLimited = (funnel.priceLimited || 0) + 1;
-      else funnel.dataLimited = (funnel.dataLimited || 0) + 1;
+      else {
+        funnel.dataLimited = (funnel.dataLimited || 0) + 1;
+        // 只有"数据可能改变判断"的才进校准购物单
+        funnel.candidates.push({ model, needTh: d.whatWouldMakeItViable.minDeliveredTh, specTh: d.whatWouldMakeItViable.specTh, samples: [] });
+      }
     }
     seen.add(key);
   }
@@ -102,6 +116,39 @@ for (const round of cloreRounds) {
   }
 }
 
+const fracTotal = fracCount.whole + fracCount.partial + fracCount.unknown;
+funnel.supply.vast = { whole: fracCount.whole, partial: fracCount.partial, unknown: fracCount.unknown, wholeCardShare: fracTotal ? +(fracCount.whole / fracTotal).toFixed(3) : null };
+{
+  const c = cloreRounds[cloreRounds.length - 1];
+  const fd = c?.fracDist;
+  if (fd) {
+    const t = (fd['1.0'] || 0) + (fd.partial || 0) + (fd.null || 0);
+    funnel.supply.clore = { whole: fd['1.0'] || 0, partial: fd.partial || 0, unknown: fd.null || 0, wholeCardShare: t ? +((fd['1.0'] || 0) / t).toFixed(3) : null };
+  }
+}
+// 校准购物单：EV>0 才值得租（PRL 的教训是先租后想）
+{
+  const daysLeft = Math.max(1, Math.round((Date.parse('2026-11-11T00:00:00Z') - Date.now()) / 864e5));
+  funnel.shopping = calibrationShoppingList(funnel.candidates, { revenuePerThHour, daysLeft, rentPerHour: 0.067 });
+  funnel.shopping.daysLeft = daysLeft;
+}
+// 时间序列：D14 需要的是"pass 是否曾经非零 / 价格主因比例有没有下降"，单日快照答不了
+if (process.argv.includes('--append')) {
+  const line = JSON.stringify({
+    at: funnel.at, day, total: funnel.total, normalized: funnel.normalized,
+    pass: funnel.byVerdict.pass || 0, watch: funnel.byVerdict.watch || 0, skip: funnel.byVerdict.skip || 0,
+    priceLimited: funnel.priceLimited || 0, dataLimited: funnel.dataLimited || 0,
+    wholeCardShareVast: funnel.supply.vast?.wholeCardShare ?? null,
+    wholeCardShareClore: funnel.supply.clore?.wholeCardShare ?? null,
+    price, density: +density.toFixed(5),
+  });
+  try {
+    fs.mkdirSync(LOGDIR, { recursive: true });
+    fs.appendFileSync(path.join(LOGDIR, `funnel-${day}.jsonl`), line + '\n');
+    console.log(`已追加漏斗序列 → data/offerLog/funnel-${day}.jsonl`);
+  } catch (e) { console.log(`漏斗序列写入失败：${e.message}`); }
+}
+
 if (process.argv.includes('--json')) { console.log(JSON.stringify(funnel, null, 2)); process.exit(0); }
 
 console.log(`M3 漏斗 ${funnel.at}｜快照 ${day}｜vast ${funnel.rounds.vast} 轮 / clore ${funnel.rounds.clore} 轮`);
@@ -114,4 +161,6 @@ if (funnel.watchHints.length) {
   console.log('watch 的补救条件（差哪一项数据）：');
   for (const h of funnel.watchHints) console.log(`  ${h.model} ${h.reason} → ${JSON.stringify(h.need)}`);
 }
+console.log(`供给形态：vast 整卡 ${funnel.supply.vast?.whole} / 分数 ${funnel.supply.vast?.partial} → wholeCardShare ${funnel.supply.vast?.wholeCardShare}｜clore ${funnel.supply.clore?.wholeCardShare ?? '—'}`);
+console.log(`校准购物单：候选 ${funnel.candidates.length} 条 → EV>0 ${funnel.shopping.viable.length} 条 → ${funnel.shopping.conclusion}`);
 console.log(funnel.byVerdict.pass ? '✅ 有 pass 项' : '⛔ pass: 0（今天没有可租项；上面就是"缺什么"）');

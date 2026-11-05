@@ -23,7 +23,12 @@ export function normalizeVast(raw) {
     // vast 按秒计费 → 最短租期是 **0（已知无限制）**，不是 null（未知）。
     // 这两者必须分开：0 = 现货，null = 不知道是不是长约。
     mrlHours: 0,
+    // ⚠ 单位假设（2026-11-05 用户要求写成假设，不写成"断言通过"）：
+    // vast 的 cpu_ram 官方文档未确认单位。若它是 MB(10^6) → 128000 = 119.2 GiB；
+    // 若是 MiB(2^20) → 125.0 GiB。这里取 **MiB**，即偏乐观一档（多算 3 个线程）。
+    // 之所以暂不修正：下游 RAM 门控还扣了 4GiB OS 余量，能吸收这 5% 的偏差。
     ramGb: raw?.cpu_ram == null ? null : +(Number(raw.cpu_ram) / 1024).toFixed(1),
+    ramUnitAssumed: raw?.cpu_ram == null ? null : 'MiB',
     cpuCores: raw?.cpu_cores_effective == null ? null : Number(raw.cpu_cores_effective),
     reliability: raw?.reliability2 ?? raw?.reliability ?? null,
     hostId: raw?.host_id ?? null,

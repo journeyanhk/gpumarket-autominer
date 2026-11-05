@@ -2489,7 +2489,8 @@ export class Engine {
       const line = JSON.stringify({
         t: now, n: rows.length, window: !!this.st.windowState?.active,
         rows: rows.map(o => ({
-          id: o.id, m: o.machineId, dph: +(Number(o.dph) || 0).toFixed(5),
+          id: o.id, m: o.machineId, gpu: o.gpuName,   // 型号名必须进快照：漏斗要按型号取 th/spec，缺了就全错配
+          dph: +(Number(o.dph) || 0).toFixed(5),
           mb: +(Number(o.minBid) || 0).toFixed(5), frac: Number(o.gpuFrac ?? 1),
           eff: Number(o.effThreads) || 0, ram: Number(o.cpuRam) || 0,
           gate: this.isRentable(o) || null, th: o.th ?? null,

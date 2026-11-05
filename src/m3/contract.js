@@ -4,6 +4,11 @@
 // 为什么先写这个：PRL 那 9 天里最贵的 bug 全是"同一规则写两遍"（isRentable / pricingTable、
 // 取价两处实现、0.6 与 ÷1.2 两处口径）。接口一旦有校验器，第二份实现就藏不住。
 
+// observeSupply() 的返回必须含 wholeCardShare（2026-11-05 用户判定）：
+// 换市场时它是**比价格更早、更硬**的第一个筛子——vast 的 frac_partial 占 74%，
+// 说明它的主流供给是"可切分的卡"，而我们要的是整卡独占。
+export const SUPPLY_FIELDS = ['counts', 'wholeCardShare', 'at'];
+
 /** Market：一个可租算力的场所（vast / clore / …）。四个方法，全部只读。 */
 export const MARKET_METHODS = [
   'listOffers',      // () => Promise<RawOffer[]>           原始报价（各场所自己的字段）
@@ -35,6 +40,13 @@ export const REASONS = {
   hostBanned: 'host_banned',
   insaneRoi: 'insane_roi',
 };
+
+export function assertSupply(supply, name = 'supply') {
+  const missing = SUPPLY_FIELDS.filter(k => !(k in (supply || {})));
+  if (missing.length) throw new Error(`${name} 缺字段：${missing.join('、')}（wholeCardShare 是换市场的第一筛子）`);
+  if (!(supply.wholeCardShare >= 0 && supply.wholeCardShare <= 1)) throw new Error(`${name}.wholeCardShare 应在 0~1`);
+  return true;
+}
 
 export function assertMarket(adapter, name = 'market') {
   const missing = MARKET_METHODS.filter(m => typeof adapter?.[m] !== 'function');

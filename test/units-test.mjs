@@ -11,6 +11,8 @@ const root = process.argv[2] || process.cwd();
 const U = p => pathToFileURL(path.join(root, p)).href;
 const { normalizeVast, normalizeClore, toAllocatorOffer } = await import(U('src/m3/normalize.js'));
 const { decide } = await import(U('src/m3/allocator.js'));
+const { calibrationEv, calibrationShoppingList } = await import(U('src/m3/ev.js'));
+const { assertSupply } = await import(U('src/m3/contract.js'));
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log('  ✓', m); } else { fail++; console.log('  ✗', m); } };
@@ -40,8 +42,10 @@ const v = normalizeVast(vastRaw);
   ok(v.usdPerGpuHour === 0.1, `价格：0.6 整机 ÷ 6 卡 = $${v.usdPerGpuHour}/卡·h`);
   ok(v.numGpus === 6, `卡数：num_gpus=${v.numGpus}`);
   ok(v.mrlHours === 0, '租期：vast 按秒计费 → 0（已知无最短租期；null 只留给"未知"）');
-  // 128000MB 是十进制标称 = 125 GiB；断言 125 而不是 128——这正是不写断言就会错的地方
-  ok(v.ramGb === 125, `内存：128000MB ÷ 1024 = ${v.ramGb}GiB（不是 128）`);
+  // 这不是"验证过的换算"，而是**单位假设**：MB(10^6)→119.2GiB，MiB(2^20)→125.0GiB。
+  // 取 MiB（偏乐观一档，多算 3 个线程），偏差由下游 4GiB OS 余量吸收。
+  ok(v.ramGb === 125 && v.ramUnitAssumed === 'MiB',
+    `内存：cpu_ram_mib_assumed → ${v.ramGb}GiB（假设 MiB；若真 MB 则 119.2，差 3 线程且方向偏激进）`);
   ok(normalizeVast({ ...vastRaw, gpu_frac: null }).frac === null, 'frac：gpu_frac 缺失 → null（不默认整卡）');
 }
 
@@ -67,6 +71,27 @@ console.log('— verdict 三态：缺数据是 watch（带补救条件），不�
   ok(w1.whatWouldMakeItViable?.minDeliveredTh > 0, `给出补救条件：需要 ≥${w1.whatWouldMakeItViable.minDeliveredTh} TH 或 ≤$${w1.whatWouldMakeItViable.maxUsdPerGpuHour}/h`);
   const w2 = decide(toAllocatorOffer({ ...c, mrlHours: null }, { deliveredTh: 68.9, thSource: 'cheap-band' }), ctx);
   ok(w2.verdict === 'watch' && w2.reasonCode === 'mrl_unknown', `mrl 缺失 → ${w2.verdict}/${w2.reasonCode}（maxMrlHours=${w2.whatWouldMakeItViable?.maxMrlHours}）`);
+}
+
+console.log('— 校准 EV：没有样本就不能拍概率（不许再用魔法常数 0.5）');
+{
+  const noSamples = calibrationEv({ needTh: 55, samples: [], revenuePerThHour: 0.0008, daysLeft: 6, rentPerHour: 0.067 });
+  ok(noSamples.viable === false && noSamples.p === null, `无样本 → P 不可估（${noSamples.why}）`);
+  // 5 条样本里 4 条 ≥55 → P=0.8；日收益 55×0.0008×24=$1.056；6 天 × 0.8 = $5.07 > $0.067
+  const withSamples = calibrationEv({ needTh: 55, samples: [60, 58, 70, 55, 40], revenuePerThHour: 0.0008, daysLeft: 6, rentPerHour: 0.067 });
+  ok(withSamples.p === 0.8 && withSamples.viable === true, `有样本 → P=${withSamples.p}，EV=$${withSamples.evUsd} > 0`);
+  // 贴线但样本全达不到 → EV 负
+  const bad = calibrationEv({ needTh: 300, samples: [60, 58, 70], revenuePerThHour: 0.0008, daysLeft: 6, rentPerHour: 0.067 });
+  ok(bad.p === 0 && bad.viable === false, `需要 300 TH 但样本最高 70 → EV=${bad.evUsd}，不租`);
+  const list = calibrationShoppingList([{ model: 'X', needTh: 300, specTh: 119, samples: [60] }], { revenuePerThHour: 0.0008, daysLeft: 6, rentPerHour: 0.067 });
+  ok(/预算 = \$0/.test(list.conclusion), `购物单结论：${list.conclusion}`);
+}
+
+console.log('— 供给契约：observeSupply 必须带 wholeCardShare（换市场的第一筛子）');
+{
+  ok(assertSupply({ counts: {}, wholeCardShare: 0.26, at: Date.now() }), '含 wholeCardShare 即通过');
+  let threw = null; try { assertSupply({ counts: {}, at: Date.now() }); } catch (e) { threw = e.message; }
+  ok(/wholeCardShare/.test(threw || ''), `缺字段会被点名：${(threw || '').slice(0, 30)}`);
 }
 
 console.log(fail ? `\n单位断言失败：${fail} 项` : `\n单位断言通过（${pass} 项）`);

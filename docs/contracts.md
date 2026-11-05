@@ -289,6 +289,45 @@ data/offerLog/YYYYMMDD.jsonl.gz   # 每轮一行，multi-member gzip 追加
 
 "换 `market` 标签 → 同决策"只是**同义反复**（证明 allocator 没写场所分支），真正的等价性靠上面四条。
 
+## 6.11 校准预算 = $0（2026-11-05 用户判定，写进规则防止有人再提"再测几台"）
+
+**规则**：`calibration budget = 0`，除非某条 offer 出现在漏斗的 **data-missing 列表**里且 `EV > 0`。
+
+- 依据：漏斗显示 watch 里绝大多数是**价格主因**（`minDeliveredTh > specTh`）——把交付算力测到小数点后一位也不改变判断；
+- `src/m3/ev.js` 负责算账：`EV = P(交付 ≥ need) × need × 收入 × 剩余天数 − 1 小时租价`，**P 用该型号历史样本里 ≥ need 的比例**，无样本 → `P=null` → 不租（不许拍 0.5）；
+- `tools/m3-funnel.mjs` 每天输出 `候选 N 条 → EV>0 M 条 → 当前校准预算 = $X`；今天实测 **候选 0 → 预算 $0**。
+
+> 这条是"先算账再租"的机器化版本。PRL 那三周是反过来的：先租，再想它证明了什么。
+
+## 6.12 `wholeCardShare`：换市场时比价格更早的筛子
+
+`Market.observeSupply()` 必须返回 `{counts, wholeCardShare, at}`（`assertSupply` 校验）。
+
+- vast 实测：**整卡 17 / 分数 34 → wholeCardShare 0.333**（历史日志口径 0.26）——它的主流供给是"可切分的卡"，而我们要整卡独占；
+- Clore 实测：**806 整卡 / 0 部分 → 1.0**（只整卡出租）——这是它相对 vast 的真实优势，比"便宜 2.6 倍"更硬；
+- 推论：**"整卡只有 1–2 条"不是偶然，是平台供给形态决定的**。M3 选市场先看这个数，再看价格。
+
+## 6.13 漏斗时间序列（D14 的证据）
+
+`tools/m3-funnel.mjs --append` 每天 09:07 追加一行到 `data/offerLog/funnel-YYYYMMDD.jsonl`：
+
+```
+{at, day, total, normalized, pass, watch, skip, priceLimited, dataLimited,
+ wholeCardShareVast, wholeCardShareClore, price, density}
+```
+
+**单日快照回答不了"市场有没有在变好"**；序列能回答两件事：`pass` 是否曾经非零、价格主因比例有没有下降趋势。11-11 判定时这份序列比任何一条租约都更有说服力。
+
+## 6.14 vast `cpu_ram` 单位是**假设**，不是断言（2026-11-05 用户纠正）
+
+```
+128000 —— 若单位 MB(10^6)  → 128.0 GB = 119.2 GiB
+       —— 若单位 MiB(2^20) → 125.0 GiB
+```
+
+归一化里取 **MiB**（`ramUnitAssumed='MiB'`），即偏乐观一档（多算约 3 个线程）；偏差由下游 4GiB OS 余量吸收。
+**官方文档未确认单位，所以文档与测试里一律写"假设"，不得写成"已验证"。**
+
 ## 7. 平台条款
 
 `capabilities.miningAllowed` 默认 `false`，必须在设置页手工勾选"我已确认该平台条款允许在其资源上挖矿"才解锁自动租用。

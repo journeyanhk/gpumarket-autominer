@@ -1,0 +1,58 @@
+{
+  "_comment": "算法 nethash 单位锚点：每个算法一个独立来源，断言 WTM 的 nethash 与该来源的比值落在 [0.8, 1.25]。这是数据录入，不是拟合。2026-11-05 用户判定。",
+  "checkedAt": "2026-11-05T07:07:15.017Z",
+  "anchors": {
+    "pearl": {
+      "coin": "Pearl",
+      "wtmNethash": 87079780694240640000,
+      "anchorHashrate": 79412721361926300000,
+      "ratio": 1.097,
+      "source": "本机引擎扫描（87.6 EH/s，与 Kryptex 池口径一致）",
+      "status": "ok",
+      "checkedAt": "2026-11-05T07:07:11.374Z"
+    },
+    "autolykos": {
+      "coin": "Ergo",
+      "wtmNethash": 591024576190,
+      "anchorHashrate": 589810514536,
+      "ratio": 1.002,
+      "source": "https://api.ergoplatform.com/info → hashRate",
+      "status": "ok",
+      "checkedAt": "2026-11-05T07:07:12.491Z"
+    },
+    "kawpow": {
+      "coin": "Ravencoin",
+      "wtmNethash": 475902072478,
+      "anchorHashrate": 485288819670.8375,
+      "ratio": 0.981,
+      "source": "https://rvn.cryptoscope.io/api/getnetworkhashps → hashrate_raw",
+      "status": "ok",
+      "checkedAt": "2026-11-05T07:07:15.017Z"
+    },
+    "etchash": {
+      "coin": "Ethereum Classic",
+      "status": "pending",
+      "source": "blockscout v2 stats 不含 hashrate；待找节点 RPC"
+    },
+    "firopow": {
+      "coin": "Firo",
+      "status": "pending",
+      "source": "explorer.firo.org 无公开 hashrate 端点"
+    },
+    "fishhash": {
+      "coin": "IronFish",
+      "status": "pending",
+      "source": "待取：IronFish 官方 explorer /api 未确认有 hashrate 端点"
+    },
+    "karlsenhashv2": {
+      "coin": "Karlsen",
+      "status": "pending",
+      "source": "待取：Karlsen explorer 需确认 hashrate 字段"
+    },
+    "cuckatoo32": {
+      "coin": "Grin",
+      "status": "pending",
+      "source": "待取：Grin 全网图率需节点或第三方 API"
+    }
+  }
+}

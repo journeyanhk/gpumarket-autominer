@@ -305,17 +305,21 @@ calibrationBudget = 0, no exceptions
 P 一律用 **Laplace 平滑 (k+1)/(n+2)**：n=5 时"4 台都好"读成 0.714 而不是 0.8——那 4 台很可能同房东。
 另外 `need > spec` 时直接判"价格主因"，不给 EV（用 need 当收入基数会把 EV 算成正的，那是假象）。
 
-## 6.12 `wholeCardShare` 与 `wholeCardUnits`：一个数不能干两件事
+## 6.12 `wholeCardShare` / `wholeCardUnits` / `exhaustive`：一个数不能干三件事
 
-| 字段 | 定义 | 用途 |
-|---|---|---|
-| `wholeCardShare` | 整卡 **GPU 单元** ÷ 同分母总 GPU 单元（仅可比型号） | 看**供给侧演化**（份额在涨还是在掉） |
-| `wholeCardUnits` | 整卡 GPU 单元**绝对数** | **选市场**（跨场所唯一可比的量） |
+| 字段 | 定义 | 用途 | 可比性 |
+|---|---|---|---|
+| `wholeCardShare` | 整卡 **GPU 单元** ÷ 同分母总 GPU 单元 | 看**供给侧演化**（同场所时间序列） | 同场所内 |
+| `wholeCardUnits` | 整卡 GPU 单元**绝对数** | 同场所时间序列 | 同场所内 |
+| `exhaustive` | 这次统计是否全量（vast=false / Clore=true） | **决定前两个数能不能跨场所比** | — |
 
-**Clore 的 `wholeCardShare = 1.00` 是结构性平凡**：它只租整卡，分母里根本不存在"分数卡"这个类别。
-拿它和 vast 的 0.26 并列，会得出"Clore 供给形态好 4 倍"——而真实差异是"Clore 没有切分机制"。
+**2026-11-05 的第五次同类错误**：把 vast 的 10–12 与 Clore 的 2646 摆在一张表里，等于拿**我们自己的配额上限**当市场事实。vast 匿名额度每轮 ~30 行，`exhaustive=false`，`units` 只是**下界**。
 
-实测（2026-11-05）：`wholeCardUnits` vast **10–12** / Clore **2646**；`wholeCardShare` vast **0.33** / Clore **1.00（平凡）**。
+规则：`exhaustive=false` 的场所，`units` **只能用于同场所时间序列，禁止跨场所比较**。跨场所一律走 `countOffers(gpu=…, wholeOnly=true)` 的**按型号确定性计数**，并且两边都要打印 `exhaustive`。
+
+**`806 → 2646` 这个 3.3 倍跳变必须写明**：806 是**房源数**（`fracDist['1.0']` 数的是 server），2646 是**GPU 单元数**（按 `nGpu` 求和）。同一口径换单位，不是供给暴涨。不写清就会变成第二个 `0.0533`。
+
+实测（2026-11-05，按型号对照，**不可相减**）：`3080 vast ≥7 / clore 26`、`3080 Ti vast ≥1 / clore 26`、`4060 Ti vast ≥2 / clore 9`。
 
 ## 6.12.1 匹配口径必须打出来（`matchedOn`）
 
@@ -333,6 +337,19 @@ P 一律用 **Laplace 平滑 (k+1)/(n+2)**：n=5 时"4 台都好"读成 0.714 �
 ```
 
 **单日快照回答不了"市场有没有在变好"**；序列能回答两件事：`pass` 是否曾经非零、价格主因比例有没有下降趋势。11-11 判定时这份序列比任何一条租约都更有说服力。
+
+## 6.12.2 先问有没有货，再问值不值（接口顺序，2026-11-05）
+
+`Market` 契约新增：
+
+```
+countOffers(query) → { count, exhaustive, sampledRows, asOf }   // 有没有货
+observeSupply()    → { counts, wholeCardShare, wholeCardUnits, exhaustive, sampledRows, at }
+decide(offer, ctx) → { verdict, reasonCode, expRoi, whatWouldMakeItViable }  // 值不值
+```
+
+漏斗分两阶段跑：**第一阶段 `countOffers`**（回答"市场上有没有整卡"），**第二阶段 `decide`**（回答"值不值"）。
+这个顺序以前只写在评论里，现在长在接口上——否则第二个币的 `pass=0` 会再次混淆"没有货"和"没采到"。
 
 ## 6.13.1 `offerLog` 历史记录的使用边界（2026-11-05）
 

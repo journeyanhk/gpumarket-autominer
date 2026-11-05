@@ -12,7 +12,7 @@ const U = p => pathToFileURL(path.join(root, p)).href;
 const { normalizeVast, normalizeClore, toAllocatorOffer } = await import(U('src/m3/normalize.js'));
 const { decide } = await import(U('src/m3/allocator.js'));
 const { rentEv, rentEvShoppingList } = await import(U('src/m3/rentEv.js'));
-const { assertSupply } = await import(U('src/m3/contract.js'));
+const { assertSupply, assertCount } = await import(U('src/m3/contract.js'));
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log('  ✓', m); } else { fail++; console.log('  ✗', m); } };
@@ -95,11 +95,17 @@ console.log('— 校准 EV：没有样本就不能拍概率（不许再用魔法
 
 console.log('— 供给契约：observeSupply 必须带 wholeCardShare（换市场的第一筛子）');
 {
-  ok(assertSupply({ counts: {}, wholeCardShare: 0.26, wholeCardUnits: 42, at: Date.now() }), '含 wholeCardShare + wholeCardUnits 即通过');
+  ok(assertSupply({ counts: {}, wholeCardShare: 0.26, wholeCardUnits: 42, exhaustive: false, sampledRows: 30, at: Date.now() }), '含 share/units/exhaustive 即通过');
   let threw = null; try { assertSupply({ counts: {}, at: Date.now() }); } catch (e) { threw = e.message; }
   ok(/wholeCardShare/.test(threw || ''), `缺字段会被点名：${(threw || '').slice(0, 30)}`);
   let threw2 = null; try { assertSupply({ counts: {}, wholeCardShare: 0.5, at: Date.now() }); } catch (e) { threw2 = e.message; }
-  ok(/wholeCardUnits/.test(threw2 || ''), '缺 wholeCardUnits 也会被点名（跨场所只认它）');
+  ok(/wholeCardUnits/.test(threw2 || ''), '缺 wholeCardUnits 也会被点名');
+  // 没有 exhaustive 的 units 会被当成市场事实——这正是第五次同类错误
+  let threw3 = null; try { assertSupply({ counts: {}, wholeCardShare: 0.5, wholeCardUnits: 10, at: Date.now() }); } catch (e) { threw3 = e.message; }
+  ok(/exhaustive/.test(threw3 || ''), '缺 exhaustive 会被点名（采样不能当全量）');
+  ok(assertCount({ count: 7, exhaustive: false, sampledRows: 30, asOf: Date.now() }), 'countOffers 返回形状通过校验');
+  let threw4 = null; try { assertCount({ count: 7, sampledRows: 30, asOf: Date.now() }); } catch (e) { threw4 = e.message; }
+  ok(/exhaustive/.test(threw4 || ''), 'countOffers 缺 exhaustive 也被拦');
 }
 
 console.log(fail ? `\n单位断言失败：${fail} 项` : `\n单位断言通过（${pass} 项）`);

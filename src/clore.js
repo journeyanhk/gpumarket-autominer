@@ -141,7 +141,22 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
   const unitsTotal = fracUnits.whole + fracUnits.partial + fracUnits.unknown;
   return { at: new Date().toISOString(), servers: servers.length, models, fracDist, fx,
     fracUnits: { ...fracUnits, total: unitsTotal },
+    exhaustive: true,          // 全量拉取，没有配额截断
+    sampledRows: servers.length,
     wholeCardUnits: fracUnits.whole,
     wholeCardShare: unitsTotal ? +(fracUnits.whole / unitsTotal).toFixed(3) : null,
     filter: { mrlMaxHours, frac: '>=0.99', nGpu: 'all（整机价 ÷ 卡数）', priceKind: 'spot' } };
+}
+/** Clore 侧 countOffers：基于全量快照，exhaustive=true（唯一能给出确定计数的场所） */
+export function countOffersClore(snapshot, query = {}) {
+  const models = snapshot?.models || {};
+  const key = query.gpu ? modelKey(query.gpu) : null;
+  const rows = key ? (models[key] ? [[key, models[key]]] : []) : Object.entries(models);
+  return {
+    count: rows.reduce((a, [, v]) => a + (Number(v.n) || 0), 0),
+    exhaustive: snapshot?.exhaustive !== false,
+    sampledRows: snapshot?.sampledRows ?? null,
+    asOf: snapshot?.at || null,
+    query, byModel: Object.fromEntries(rows.map(([k, v]) => [k, v.n])),
+  };
 }

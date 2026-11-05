@@ -125,6 +125,8 @@ funnel.supply.vast = {
   whole: fracCount.whole, partial: fracCount.partial, unknown: fracCount.unknown,
   wholeCardUnits: units.whole, totalUnits: units.total,
   wholeCardShare: units.total ? +(units.whole / units.total).toFixed(3) : null,
+  // 采样 vs 全量：没有这个标记，units 会被当成市场事实（2026-11-05 第五次同类错误）
+  exhaustive: false, sampledRows: LIVE ? (liveRows || []).length : vastRounds.reduce((a, r) => a + (r.rows || []).length, 0),
 };
 {
   const c = cloreRounds[cloreRounds.length - 1];
@@ -139,6 +141,7 @@ funnel.supply.vast = {
       // ⚠ Clore 的 share 恒为 1.0 是**结构性平凡**（没有切分机制，分母里不存在分数卡），
       // 跨场所只能比 wholeCardUnits
       wholeCardShare: fu?.total ? +((fu.whole || 0) / fu.total).toFixed(3) : (t ? +((fd['1.0'] || 0) / t).toFixed(3) : null),
+      exhaustive: c.exhaustive !== false, sampledRows: c.sampledRows ?? null,
     };
   }
 }
@@ -178,7 +181,29 @@ if (funnel.watchHints.length) {
   for (const h of funnel.watchHints) console.log(`  ${h.model} ${h.reason} → ${JSON.stringify(h.need)}`);
 }
 const sv = funnel.supply.vast || {}, sc = funnel.supply.clore || {};
-console.log(`供给形态（分母=GPU 单元）：wholeCardUnits vast ${sv.wholeCardUnits ?? '—'} / clore ${sc.wholeCardUnits ?? '—'}｜wholeCardShare vast ${sv.wholeCardShare ?? '—'} / clore ${sc.wholeCardShare ?? '—'}（clore 的 1.0 是结构性平凡，跨场所只比 units）`);
+console.log(`供给形态：wholeCardUnits vast ${sv.wholeCardUnits ?? '—'}${sv.exhaustive ? '' : `（采样 ${sv.sampledRows} 行，下界）`} / clore ${sc.wholeCardUnits ?? '—'}${sc.exhaustive === false ? '（采样）' : '（全量）'} → **不可直接相减**`);
+console.log(`wholeCardShare vast ${sv.wholeCardShare ?? '—'} / clore ${sc.wholeCardShare ?? '—'}（clore 1.0 是结构性平凡）`);
 console.log(`型号匹配：gpu(exact) ${funnel.normalized} 条 / normalizeFailed ${funnel.normalizeFailed} 条`);
+
+// 跨场所对照：只按**同一型号**比，且标明两边是否全量（总数相减没有意义）
+{
+  const cloreModels = (cloreRounds[cloreRounds.length - 1] || {}).models || {};
+  const vastByModel = {};
+  for (const round of vastRounds) for (const r of round.rows || []) {
+    if (!r.gpu || Number(r.frac) < 0.99) continue;
+    vastByModel[r.gpu] = (vastByModel[r.gpu] || 0) + Math.max(1, Number(r.n) || 1);
+  }
+  const rows = [];
+  for (const [model, nV] of Object.entries(vastByModel)) {
+    const ck = Object.keys(cloreModels).find(k => String(model).toUpperCase().includes(String(k).toUpperCase()));
+    if (!ck) continue;
+    rows.push({ model, vast: nV, clore: cloreModels[ck].n, note: 'vast=采样下界 / clore=全量' });
+  }
+  rows.sort((a, b) => b.vast + b.clore - (a.vast + a.clore));
+  if (rows.length) {
+    console.log('按型号对照（**不可相减**：vast 是采样下界，clore 是全量）:');
+    for (const r of rows.slice(0, 5)) console.log(`  ${r.model.padEnd(12)} vast ≥${String(r.vast).padStart(3)}  clore ${String(r.clore).padStart(4)}`);
+  }
+}
 console.log(`校准购物单：候选 ${funnel.candidates.length} 条 → EV>0 ${funnel.shopping.viable.length} 条 → ${funnel.shopping.conclusion}`);
 console.log(funnel.byVerdict.pass ? '✅ 有 pass 项' : '⛔ pass: 0（今天没有可租项；上面就是"缺什么"）');

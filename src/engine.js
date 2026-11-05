@@ -2511,6 +2511,24 @@ export class Engine {
     } catch (e) { this.log('warn', `报价快照写入失败（不影响决策）：${e.message}`); }
   }
 
+  // countOffers(query)：回答"有没有货"，与"值不值"（decide）分开（2026-11-05 用户要求长进接口）。
+  // vast 侧永远 exhaustive=false：匿名额度每轮 ~30 行，这是**配额事实**，不是市场事实。
+  countOffers(query = {}) {
+    const gpu = query.gpu ? String(query.gpu).toUpperCase() : null;
+    const wholeOnly = query.wholeOnly !== false;
+    const rows = (this.offers || []).filter(o => {
+      if (gpu && !String(o.gpuName).toUpperCase().includes(gpu)) return false;
+      if (wholeOnly && !(Number(o.gpuFrac) >= 0.99)) return false;
+      if (query.rentable !== false && this.isRentable(o)) return false;
+      return true;
+    });
+    return {
+      count: rows.reduce((a, o) => a + Math.max(1, Number(o.numGpus) || 1), 0),
+      exhaustive: false, sampledRows: (this.offers || []).length,
+      asOf: this.offerStats?.scannedAt || null, query,
+    };
+  }
+
   // Clore 市场（M3 Market 的第二个实现）：每 2 小时一次，只做供给统计，不参与 PRL 决策。
   // 频率 2 小时就够：Clore 便宜档是分钟级被抢走的，采样再密也抓不到成交过程；
   // 我们要的是"多久出现一次、出现时 mrl 多少"。
@@ -3923,7 +3941,22 @@ export class Engine {
       instances: list,
       offers: this.offers.slice(0, 80),
       effectiveConfig: this.st.effectiveConfig || null,
-      markets: { vast: { at: this.offerStats?.scannedAt || null, offers: (this.offers || []).length, fracDist: this.offerStats?.fracDist || null, wholeCount: this.offerStats?.wholeCount ?? null, zeroWholeSince: this.offerStats?.zeroWholeSince || null }, clore: this.clore || null },
+      markets: {
+        vast: {
+          at: this.offerStats?.scannedAt || null, offers: (this.offers || []).length,
+          fracDist: this.offerStats?.fracDist || null, wholeCount: this.offerStats?.wholeCount ?? null,
+          zeroWholeSince: this.offerStats?.zeroWholeSince || null,
+          // 采样事实必须显式（2026-11-05）：匿名额度每轮 ~30 行，永远不是全量
+          exhaustive: false, sampledRows: (this.offers || []).length,
+          wholeCardUnits: (this.offers || []).filter(o => Number(o.gpuFrac) >= 0.99).reduce((a, o) => a + Math.max(1, Number(o.numGpus) || 1), 0),
+          wholeCardShare: (() => {
+            const all = (this.offers || []).reduce((a, o) => a + Math.max(1, Number(o.numGpus) || 1), 0);
+            const whole = (this.offers || []).filter(o => Number(o.gpuFrac) >= 0.99).reduce((a, o) => a + Math.max(1, Number(o.numGpus) || 1), 0);
+            return all ? +(whole / all).toFixed(3) : null;
+          })(),
+        },
+        clore: this.clore || null,
+      },
       offerStats: { ...this.offerStats, pausedUntil: this.scanPausedUntil > now ? this.scanPausedUntil : 0, pauseReason: this.scanPausedUntil > now ? this.pauseReason : null,
         usage: this.usageToday(), quota: this.st.searchQuota || null, quotaEst: this.st.quotaEst || null,
         // 额度分桶：巡航 40% / 窗口 60%；巡检要报这两个余量，而不是只说"额度用完了"

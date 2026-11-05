@@ -95,17 +95,22 @@ console.log('— 校准 EV：没有样本就不能拍概率（不许再用魔法
 
 console.log('— 供给契约：observeSupply 必须带 wholeCardShare（换市场的第一筛子）');
 {
-  ok(assertSupply({ counts: {}, wholeCardShare: 0.26, wholeCardUnits: 42, exhaustive: false, sampledRows: 30, at: Date.now() }), '含 share/units/exhaustive 即通过');
+  ok(assertSupply({ counts: {}, wholeCardShare: 0.26, wholeCardUnits: 42, exhaustive: false, rentableOnly: true, sampledRows: 30, at: Date.now() }), '含 share/units/exhaustive/rentableOnly 即通过');
   let threw = null; try { assertSupply({ counts: {}, at: Date.now() }); } catch (e) { threw = e.message; }
   ok(/wholeCardShare/.test(threw || ''), `缺字段会被点名：${(threw || '').slice(0, 30)}`);
   let threw2 = null; try { assertSupply({ counts: {}, wholeCardShare: 0.5, at: Date.now() }); } catch (e) { threw2 = e.message; }
   ok(/wholeCardUnits/.test(threw2 || ''), '缺 wholeCardUnits 也会被点名');
   // 没有 exhaustive 的 units 会被当成市场事实——这正是第五次同类错误
-  let threw3 = null; try { assertSupply({ counts: {}, wholeCardShare: 0.5, wholeCardUnits: 10, at: Date.now() }); } catch (e) { threw3 = e.message; }
+  let threw3 = null; try { assertSupply({ counts: {}, wholeCardShare: 0.5, wholeCardUnits: 10, rentableOnly: true, at: Date.now() }); } catch (e) { threw3 = e.message; }
   ok(/exhaustive/.test(threw3 || ''), '缺 exhaustive 会被点名（采样不能当全量）');
-  ok(assertCount({ count: 7, exhaustive: false, sampledRows: 30, asOf: Date.now() }), 'countOffers 返回形状通过校验');
-  let threw4 = null; try { assertCount({ count: 7, sampledRows: 30, asOf: Date.now() }); } catch (e) { threw4 = e.message; }
+  // Clore 41% 已租：没有 rentableOnly，含已租的分母会把供给高估 1.7 倍
+  let threw3b = null; try { assertSupply({ counts: {}, wholeCardShare: 0.5, wholeCardUnits: 10, exhaustive: true, at: Date.now() }); } catch (e) { threw3b = e.message; }
+  ok(/rentableOnly/.test(threw3b || ''), '缺 rentableOnly 会被点名（含已租会高估 1.7 倍）');
+  ok(assertCount({ count: 7, exhaustive: false, rentableOnly: true, sampledRows: 30, asOf: Date.now() }), 'countOffers 返回形状通过校验');
+  let threw4 = null; try { assertCount({ count: 7, rentableOnly: true, sampledRows: 30, asOf: Date.now() }); } catch (e) { threw4 = e.message; }
   ok(/exhaustive/.test(threw4 || ''), 'countOffers 缺 exhaustive 也被拦');
+  let threw5 = null; try { assertCount({ count: 7, exhaustive: true, sampledRows: 30, asOf: Date.now() }); } catch (e) { threw5 = e.message; }
+  ok(/rentableOnly/.test(threw5 || ''), 'countOffers 缺 rentableOnly 也被拦');
 }
 
 console.log(fail ? `\n单位断言失败：${fail} 项` : `\n单位断言通过（${pass} 项）`);

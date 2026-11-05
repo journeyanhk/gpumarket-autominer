@@ -3947,7 +3947,7 @@ export class Engine {
           fracDist: this.offerStats?.fracDist || null, wholeCount: this.offerStats?.wholeCount ?? null,
           zeroWholeSince: this.offerStats?.zeroWholeSince || null,
           // 采样事实必须显式（2026-11-05）：匿名额度每轮 ~30 行，永远不是全量
-          exhaustive: false, sampledRows: (this.offers || []).length,
+          exhaustive: false, rentableOnly: true, sampledRows: (this.offers || []).length,
           wholeCardUnits: (this.offers || []).filter(o => Number(o.gpuFrac) >= 0.99).reduce((a, o) => a + Math.max(1, Number(o.numGpus) || 1), 0),
           wholeCardShare: (() => {
             const all = (this.offers || []).reduce((a, o) => a + Math.max(1, Number(o.numGpus) || 1), 0);

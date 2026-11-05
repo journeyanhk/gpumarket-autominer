@@ -7,12 +7,12 @@
 // observeSupply() 的返回必须含 wholeCardShare（2026-11-05 用户判定）：
 // 换市场时它是**比价格更早、更硬**的第一个筛子——vast 的 frac_partial 占 74%，
 // 说明它的主流供给是"可切分的卡"，而我们要的是整卡独占。
-export const SUPPLY_FIELDS = ['counts', 'wholeCardShare', 'wholeCardUnits', 'exhaustive', 'sampledRows', 'at'];
+export const SUPPLY_FIELDS = ['counts', 'wholeCardShare', 'wholeCardUnits', 'exhaustive', 'rentableOnly', 'sampledRows', 'at'];
 
 // countOffers(query)：按型号的确定性计数。回答"有没有货"，与"值不值"（decide）分开。
 // 关键在 exhaustive：vast 匿名额度每轮 30 行 → 永远 false，只能给下界；
 // Clore 全量拉取 → true。两者不得直接相减（2026-11-05 用户判定）。
-export const COUNT_FIELDS = ['count', 'exhaustive', 'sampledRows', 'asOf'];
+export const COUNT_FIELDS = ['count', 'exhaustive', 'rentableOnly', 'sampledRows', 'asOf'];
 
 /** Market：一个可租算力的场所（vast / clore / …）。四个方法，全部只读。 */
 export const MARKET_METHODS = [
@@ -54,6 +54,8 @@ export function assertSupply(supply, name = 'supply') {
   if (!(supply.wholeCardUnits >= 0)) throw new Error(`${name}.wholeCardUnits 必须是非负数`);
   // 但 units 本身也可能来自采样：没有 exhaustive 标记，它就会被当成市场事实
   if (typeof supply.exhaustive !== 'boolean') throw new Error(`${name}.exhaustive 必须是布尔（false 只能做同场所时间序列）`);
+  // exhaustive 只说"我们拉全了"，不说"都租得到"：Clore 41% 的机器在别人手里（2026-11-05 用户实测）
+  if (typeof supply.rentableOnly !== 'boolean') throw new Error(`${name}.rentableOnly 必须是布尔（含已租会高估供给 1.7 倍）`);
   return true;
 }
 
@@ -61,6 +63,7 @@ export function assertCount(c, name = 'count') {
   const missing = COUNT_FIELDS.filter(k => !(k in (c || {})));
   if (missing.length) throw new Error(`${name} 缺字段：${missing.join('、')}`);
   if (typeof c.exhaustive !== 'boolean') throw new Error(`${name}.exhaustive 必须是布尔`);
+  if (typeof c.rentableOnly !== 'boolean') throw new Error(`${name}.rentableOnly 必须是布尔`);
   if (!(c.count >= 0)) throw new Error(`${name}.count 必须是非负数`);
   return true;
 }

@@ -101,6 +101,8 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
   const fx = await fetchFx();
   const servers = d.servers || [];
   const spot = {}, all = {}, mrls = {}, skipped = {}, fracDist = { '1.0': 0, partial: 0, null: 0 };
+  const units = {}, unitsAll = {};
+  let rented = 0;
   // 同时按 GPU 单元计数：跨场所比较的分母必须是"卡"，不是"房源"（2026-11-05）
   const fracUnits = { whole: 0, partial: 0, unknown: 0 }, totalUnits = {};
   for (const s of servers) {
@@ -109,7 +111,8 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
     const cnt = +m[1];
     const k = modelKey(m[2]);
     if (!k) continue;
-    if (s.rented) continue;
+    // 已租的不算供给（2026-11-05 用户实测：Clore 41% 已租，含已租会把可得供给高估 1.7 倍）
+    if (s.rented) { rented++; continue; }
     // 分数卡统计（Clore 的 partial_gpu_rental 与 gpu_array 都可能缺，缺就是缺，不默认整卡）
     totalUnits[k] = (totalUnits[k] || 0) + cnt;
     const pr = s?.partial_gpu_rental;
@@ -121,9 +124,9 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
     const p = usdPerDayOf(s?.price || {}, 'spot', fx);
     // 两个口径都算：medAll（不过滤 mrl）与 med（mrl<=N）。
     // 2026-11-05 用户指出：我报的 $0.1679 与他独立拉到的 $0.25 差 33%，根因就是过滤藏在代码里。
-    if (p) (all[k] ||= []).push(p.usd / cnt / 24);
+    if (p) { (all[k] ||= []).push(p.usd / cnt / 24); unitsAll[k] = (unitsAll[k] || 0) + cnt; }
     if (Number.isFinite(mrl) && mrl > mrlMaxHours) { skipped[k] = (skipped[k] || 0) + 1; continue; }
-    if (p) (spot[k] ||= []).push(p.usd / cnt / 24);
+    if (p) { (spot[k] ||= []).push(p.usd / cnt / 24); units[k] = (units[k] || 0) + cnt; }
   }
   const models = {};
   for (const k of Object.keys(spot)) {
@@ -134,6 +137,7 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
     models[k] = {
       n: a.length, min: +a[0].toFixed(4), med: +m(a).toFixed(4),
       nAll: aa.length, minAll: aa.length ? +aa[0].toFixed(4) : null, medAll: aa.length ? +m(aa).toFixed(4) : null,
+      units: units[k] || 0, unitsAll: unitsAll[k] || 0,
       mrlMin: mr.length ? mr[0] : null, mrlMed: mr.length ? mr[mr.length >> 1] : null,
       skippedLongLease: skipped[k] || 0,
     };
@@ -142,6 +146,8 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
   return { at: new Date().toISOString(), servers: servers.length, models, fracDist, fx,
     fracUnits: { ...fracUnits, total: unitsTotal },
     exhaustive: true,          // 全量拉取，没有配额截断
+    rentableOnly: true,        // 已租的已剔除（41% 的机器在别人手里）
+    rentedSkipped: rented,
     sampledRows: servers.length,
     wholeCardUnits: fracUnits.whole,
     wholeCardShare: unitsTotal ? +(fracUnits.whole / unitsTotal).toFixed(3) : null,

@@ -12,6 +12,7 @@ import zlib from 'node:zlib';
 import { normalizeVast, normalizeClore, toAllocatorOffer } from '../src/m3/normalize.js';
 import { decide } from '../src/m3/allocator.js';
 import { rentEvShoppingList } from '../src/m3/rentEv.js';
+import { fetchClore } from '../src/clore.js';
 
 const CTRL = 'http://127.0.0.1:8290/api/state';
 const LOGDIR = '/data/gpumarket-autominer/data/offerLog';
@@ -52,7 +53,14 @@ const liveRows = LIVE ? (st?.offers || []).map(o => ({ id: o.id, m: o.machineId,
 const vastFile = path.join(LOGDIR, `${day}.jsonl.gz`);
 const cloreFile = path.join(LOGDIR, `clore-${day}.jsonl.gz`);
 const vastRounds = LIVE ? [{ rows: liveRows }] : readLines(vastFile);
-const cloreRounds = readLines(cloreFile);
+// --live 时直接拉一次 Clore（全量、已剔已租），否则用当天快照（可能缺 units 字段）
+let cloreRounds = readLines(cloreFile);
+if (LIVE) {
+  try {
+    const fresh = await fetchClore({ keyFile: '/data/prl-automine/.secrets/clore_key' });
+    cloreRounds = [fresh];
+  } catch (e) { console.log(`Clore 实时拉取失败，退回快照：${e.message}`); }
+}
 
 const funnel = { at: new Date().toISOString(), day, density, price, revenuePerThHour: +revenuePerThHour.toFixed(6), rounds: { vast: vastRounds.length, clore: cloreRounds.length }, total: 0, normalized: 0, normalizeFailed: 0, byReason: {}, byVerdict: {}, byMarket: {}, watchHints: [], candidates: [], supply: {} };
 const fracCount = { whole: 0, partial: 0, unknown: 0 };
@@ -126,7 +134,7 @@ funnel.supply.vast = {
   wholeCardUnits: units.whole, totalUnits: units.total,
   wholeCardShare: units.total ? +(units.whole / units.total).toFixed(3) : null,
   // 采样 vs 全量：没有这个标记，units 会被当成市场事实（2026-11-05 第五次同类错误）
-  exhaustive: false, sampledRows: LIVE ? (liveRows || []).length : vastRounds.reduce((a, r) => a + (r.rows || []).length, 0),
+  exhaustive: false, rentableOnly: true, sampledRows: LIVE ? (liveRows || []).length : vastRounds.reduce((a, r) => a + (r.rows || []).length, 0),
 };
 {
   const c = cloreRounds[cloreRounds.length - 1];
@@ -141,7 +149,7 @@ funnel.supply.vast = {
       // ⚠ Clore 的 share 恒为 1.0 是**结构性平凡**（没有切分机制，分母里不存在分数卡），
       // 跨场所只能比 wholeCardUnits
       wholeCardShare: fu?.total ? +((fu.whole || 0) / fu.total).toFixed(3) : (t ? +((fd['1.0'] || 0) / t).toFixed(3) : null),
-      exhaustive: c.exhaustive !== false, sampledRows: c.sampledRows ?? null,
+      exhaustive: c.exhaustive !== false, rentableOnly: c.rentableOnly !== false, sampledRows: c.sampledRows ?? null,
     };
   }
 }
@@ -185,9 +193,10 @@ console.log(`供给形态：wholeCardUnits vast ${sv.wholeCardUnits ?? '—'}${s
 console.log(`wholeCardShare vast ${sv.wholeCardShare ?? '—'} / clore ${sc.wholeCardShare ?? '—'}（clore 1.0 是结构性平凡）`);
 console.log(`型号匹配：gpu(exact) ${funnel.normalized} 条 / normalizeFailed ${funnel.normalizeFailed} 条`);
 
-// 跨场所对照：只按**同一型号**比，且标明两边是否全量（总数相减没有意义）
+// 跨场所对照：**滤镜必须变成一列**（2026-11-05 用户判定：脚注是给人看的，列是给机器比的）
 {
-  const cloreModels = (cloreRounds[cloreRounds.length - 1] || {}).models || {};
+  const lastClore = cloreRounds[cloreRounds.length - 1] || {};
+  const cloreModels = lastClore.models || {};
   const vastByModel = {};
   for (const round of vastRounds) for (const r of round.rows || []) {
     if (!r.gpu || Number(r.frac) < 0.99) continue;
@@ -195,15 +204,19 @@ console.log(`型号匹配：gpu(exact) ${funnel.normalized} 条 / normalizeFaile
   }
   const rows = [];
   for (const [model, nV] of Object.entries(vastByModel)) {
-    const ck = Object.keys(cloreModels).find(k => String(model).toUpperCase().includes(String(k).toUpperCase()));
-    if (!ck) continue;
-    rows.push({ model, vast: nV, clore: cloreModels[ck].n, note: 'vast=采样下界 / clore=全量' });
+    rows.push({ model, venue: 'vast', filter: 'whole+rentable,无mrl', count: nV, flag: `≥${nV}（采样 ${funnel.supply.vast?.sampledRows ?? '?'} 行）` });
   }
-  rows.sort((a, b) => b.vast + b.clore - (a.vast + a.clore));
-  if (rows.length) {
-    console.log('按型号对照（**不可相减**：vast 是采样下界，clore 是全量）:');
-    for (const r of rows.slice(0, 5)) console.log(`  ${r.model.padEnd(12)} vast ≥${String(r.vast).padStart(3)}  clore ${String(r.clore).padStart(4)}`);
+  for (const [k, v] of Object.entries(cloreModels)) {
+    const model = `RTX ${k}`;
+    rows.push({ model, venue: 'clore', filter: 'whole+rentable,mrl≤24h', count: v.units ?? v.n, flag: 'exact' });
+    if ((v.unitsAll ?? 0) > (v.units ?? 0)) {
+      rows.push({ model, venue: 'clore', filter: 'whole+rentable,无mrl', count: v.unitsAll, flag: 'exact' });
+    }
   }
+  rows.sort((a, b) => (a.model + a.venue).localeCompare(b.model + b.venue));
+  console.log('对照表（model | venue | filter | count | 口径）:');
+  for (const r of rows.slice(0, 10)) console.log(`  ${r.model.padEnd(13)} | ${r.venue.padEnd(5)} | ${r.filter.padEnd(22)} | ${String(r.count).padStart(4)} | ${r.flag}`);
 }
+
 console.log(`校准购物单：候选 ${funnel.candidates.length} 条 → EV>0 ${funnel.shopping.viable.length} 条 → ${funnel.shopping.conclusion}`);
 console.log(funnel.byVerdict.pass ? '✅ 有 pass 项' : '⛔ pass: 0（今天没有可租项；上面就是"缺什么"）');

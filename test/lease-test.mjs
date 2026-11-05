@@ -723,7 +723,9 @@ console.log('— 定价不变量：唯一真源 + 回填幂等（2026-11-03 用�
   };
   mkL('I1', 20, 10, 2097152, 100);
   const snapshots = [];
-  for (let i = 0; i < 3; i++) { delete e2.st.deliveredThBackfillV; e2.backfillDeliveredTh(); snapshots.push(JSON.stringify(e2.st.deliveredTh)); }
+  // updatedAt 是"输入版本戳"，每次重算都会变，不算幂等性的一部分（2026-11-05）
+  const strip = (o) => JSON.stringify(o, (k, v) => (k === 'updatedAt' ? undefined : v));
+  for (let i = 0; i < 3; i++) { delete e2.st.deliveredThBackfillV; e2.backfillDeliveredTh(); snapshots.push(strip(e2.st.deliveredTh)); }
   ok(snapshots[0] === snapshots[1] && snapshots[1] === snapshots[2], `回填幂等：三次结果一致（${JSON.parse(snapshots[0]).RTX3080.samples.length} 条样本）`);
 }
 

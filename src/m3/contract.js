@@ -44,7 +44,8 @@ export const REASONS = {
   overBudget: 'over_budget',
   hostBanned: 'host_banned',
   insaneRoi: 'insane_roi',
-  uncalibratedAlgo: 'uncalibrated_algo',   // 算法单位系数未标 → 只能 watch，禁止 pass
+  uncalibratedAlgo: 'uncalibrated_algo',
+  densitySpread: 'density_spread',      // 双源密度分歧 >10% → 最高 watch   // 算法单位系数未标 → 只能 watch，禁止 pass
 };
 
 export function assertSupply(supply, name = 'supply') {

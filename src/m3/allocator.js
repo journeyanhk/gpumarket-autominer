@@ -79,6 +79,15 @@ export function decide(offer, ctx) {
   const expRoi = roi * Number(ctx?.pSurvive ?? 0.5) - Number(ctx?.deployPct ?? 3.33);
 
 
+  // 双源分歧（2026-11-05）：收入口径本身不确定时，不许给 pass
+  const spread = Number(ctx?.densitySpreadPct);
+  if (Number.isFinite(spread) && spread > 10) {
+    return watch(REASONS.densitySpread, `密度双源分歧 ${spread}%`, {
+      maxSpreadPct: 10,
+      note: '两个独立源在收入口径上差 >10%：先把分歧降到 10% 以内，再谈值不值',
+    });
+  }
+
   if (expRoi < Number(ctx?.targetProfitPct ?? 20)) {
     return { action: 'skip', verdict: 'skip', reasonCode: REASONS.expRoiLow, expRoi: +expRoi.toFixed(1), note: `名义 ${roi.toFixed(1)}%`, cost };
   }

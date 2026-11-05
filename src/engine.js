@@ -179,6 +179,24 @@ export class Engine {
     if (win.length < 5) return this.usdHsHr;
     return win.reduce((a, s) => a + s.v, 0) / win.length;
   }
+  // 双源密度（2026-11-05 用户判定）：pricing_density = min(我们, WTM)。
+  // 依据：两个源在 Pearl 上差 12.7%（Kryptex 口径 $0.0187 vs WTM $0.0213 /TH·天），
+  // 12.7% 的收入差 = 部署成本的 4 倍、20% 门槛的五分之三——用乐观那个会把 1.9× 说成 1.7×。
+  // spread > 10% 时禁止 pass（见 allocator），并输出 densitySpread 供日报。
+  get densitySources() {
+    const ours = this.usdHsHr6h * 1e12 * 24;              // $/TH·天（6h 均值）
+    const wtm = Number(this.market?.wtmDensityUsdPerThDay) || null;
+    const pricing = wtm ? Math.min(ours, wtm) : ours;
+    const spread = wtm && ours > 0 ? Math.abs(wtm - ours) / Math.min(ours, wtm) * 100 : null;
+    return {
+      ours: +ours.toFixed(5), wtm: wtm ? +wtm.toFixed(5) : null,
+      pricing: +pricing.toFixed(5),
+      spreadPct: spread == null ? null : +spread.toFixed(1),
+      source: wtm ? 'min(kryptex, wtm)' : 'kryptex(单源)',
+      wtmAt: this.market?.wtmAt || null,
+    };
+  }
+
   recordDensity() {
     const v = this.usdHsHr;
     if (!(v > 0)) return;
@@ -415,6 +433,7 @@ export class Engine {
     this.loop(() => this.refreshVast(), 30_000);
     this.loop(() => this.refreshWildrig(), 6 * 60 * MIN);
     this.loop(() => this.refreshClore(), Number(this.cfg.clore?.intervalMin ?? 120) * MIN, 20_000);
+    this.loop(() => this.refreshWtmDensity(), 10 * MIN, 30_000);
     this.loop(() => this.scanTick(), 20_000, 8000);
     this.loop(() => this.decide(), 20_000, 15000);
   }
@@ -2529,6 +2548,31 @@ export class Engine {
     };
   }
 
+  // WTM 密度（每 10 分钟一次，只取 Pearl 一行；失败不影响主链路）
+  async refreshWtmDensity() {
+    try {
+      const r = await fetch('https://whattomine.com/coins.json', { signal: AbortSignal.timeout(20000) });
+      const d = await r.json();
+      const c = (d?.coins || {}).Pearl;
+      if (!c) throw new Error('WTM 无 Pearl');
+      const nh = Number(c.nethash), bt = Number(c.block_time), br = Number(c.block_reward), px = Number(c.exchange_rate);
+      // BTC 价单独取（market 里没有这个字段，别假设有——2026-11-05 踩过）
+      let btc = Number(this.market?.btcUsd) || 0;
+      if (!(btc > 0)) {
+        const t = await (await fetch('https://api.gateio.ws/api/v4/spot/tickers?currency_pair=BTC_USDT', { signal: AbortSignal.timeout(12000) })).json();
+        btc = Number(t?.[0]?.last) || 0;
+        if (btc > 0) this.market.btcUsd = btc;
+      }
+      if (!(nh > 0 && bt > 0 && br > 0 && px > 0 && btc > 0)) throw new Error('字段不全或缺 BTC 价');
+      this.market.wtmDensityUsdPerThDay = +((br * (3600 / bt) * px * btc) / nh * 1e12 * 24).toFixed(5);
+      this.market.wtmAt = new Date().toISOString();
+      const ds = this.densitySources;
+      if (ds.spreadPct != null && ds.spreadPct > 10) {
+        this.log('warn', `密度双源分歧 ${ds.spreadPct}%（我们 $${ds.ours} vs WTM $${ds.wtm}/TH·天）→ 定价取小 $${ds.pricing}，且今日禁止 pass`);
+      }
+    } catch (e) { this.log('warn', `WTM 密度拉取失败（沿用单源）：${e.message}`); }
+  }
+
   // Clore 市场（M3 Market 的第二个实现）：每 2 小时一次，只做供给统计，不参与 PRL 决策。
   // 频率 2 小时就够：Clore 便宜档是分钟级被抢走的，采样再密也抓不到成交过程；
   // 我们要的是"多久出现一次、出现时 mrl 多少"。
@@ -3983,7 +4027,7 @@ export class Engine {
         const byModel = {};
         for (const o of this.offers || []) (byModel[gpuKey(o.gpuName)] ||= []).push(o);
         const med = a => { const v = [...a].sort((x, y) => x - y); if (!v.length) return null; const m = Math.floor(v.length / 2); return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2; };
-        const dens6 = this.usdHsHr6h * 1e12 * 24;
+        const dens6 = this.densitySources.pricing;   // 双源取小（2026-11-05）
         const p = Number(this.cfg.pSurviveDefault ?? 0.5);
         const deployPct = (Number(this.cfg.deployCostMin) || 2) / 60 * 100;
         const roiReq = p > 0 ? (Number(this.cfg.targetProfitPct ?? 20) + deployPct) / p : Number(this.cfg.targetProfitPct ?? 20);
@@ -4043,6 +4087,7 @@ export class Engine {
             // 3090 台账 0 条，th=135 是规格值，不标出来就会把"便宜一半"再读成一次假信号）
             thSource: band.src, thCalibrated: band.src !== 'spec' && band.src !== 'pooled',
             needDensity: need, nowDensity: +dens6.toFixed(4),
+            densitySources: this.densitySources,
             gapPct: need && dens6 > 0 ? +((need / dens6 - 1) * 100).toFixed(0) : null,
           });
         }

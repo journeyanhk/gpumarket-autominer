@@ -93,6 +93,17 @@ console.log('— 校准 EV：没有样本就不能拍概率（不许再用魔法
   ok(/无一条租用 EV>0/.test(list.conclusion), `购物单结论：${list.conclusion}`);
 }
 
+console.log('— 双源密度分歧：>10% 禁止 pass（2026-11-05）');
+{
+  const ctx = { rentEnabled: true, targetProfitPct: 20, deployPct: 3.33, pSurvive: 0.5, revenuePerThHour: 0.0008, floorPricePerGpu: 0.02, maxHourlySpend: 0.2, budgetLeftUsd: 5, maxLeaseHours: 24 };
+  const offer = { id: 1, market: 'vast', gpu: 'RTX 3080', numGpus: 1, frac: 1, pricePerHour: 0.03, mrlHours: 0, deliveredTh: 68.9, thSource: 'cheap-band' };
+  const clean = decide(offer, { ...ctx, densitySpreadPct: 4 });
+  const spread = decide(offer, { ...ctx, densitySpreadPct: 12.7 });
+  ok(clean.verdict === 'pass', `分歧 4% → ${clean.verdict}/${clean.reasonCode}`);
+  ok(spread.verdict === 'watch' && spread.reasonCode === 'density_spread', `分歧 12.7% → ${spread.verdict}/${spread.reasonCode}（收入口径本身不确定）`);
+  ok(spread.whatWouldMakeItViable?.maxSpreadPct === 10, '带补救条件：maxSpreadPct=10');
+}
+
 console.log('— 供给契约：observeSupply 必须带 wholeCardShare（换市场的第一筛子）');
 {
   ok(assertSupply({ counts: {}, wholeCardShare: 0.26, wholeCardUnits: 42, exhaustive: false, rentableOnly: true, sampledRows: 30, at: Date.now() }), '含 share/units/exhaustive/rentableOnly 即通过');

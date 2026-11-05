@@ -36,6 +36,14 @@ export function decide(offer, ctx) {
   if (Number(ctx?.budgetLeftUsd) > 0 && cost > Number(ctx.budgetLeftUsd)) return skip(REASONS.overBudget, `$${cost}/h > 剩余预算 $${ctx.budgetLeftUsd}`);
 
   // ④ 口径：未校准的交付算力不得参与租用决策（免疫记忆 #2）
+  // 算法单位未标 → 连收益都算不准，只能 watch（2026-11-05：WhatToMine 的 nethash 并非都用 H/s）
+  if (offer.algoUnitKnown === false) {
+    return watch(REASONS.uncalibratedAlgo, `算法 ${offer.algo || '?'} 的 nethash 单位未标`, {
+      needUnitFactor: true,
+      note: '需要该算法的一次公开基准（3080 原生算力）来定单位系数；未标前禁止 pass',
+    });
+  }
+
   if (offer.thSource === 'spec' || offer.thSource === 'pooled' || offer.thCalibrated === false) {
     const revPerTh = Number(ctx?.revenuePerThHour) || 0;
     const thNow = Number(offer.deliveredTh) || 0;

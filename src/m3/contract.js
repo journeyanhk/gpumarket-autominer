@@ -7,7 +7,7 @@
 // observeSupply() 的返回必须含 wholeCardShare（2026-11-05 用户判定）：
 // 换市场时它是**比价格更早、更硬**的第一个筛子——vast 的 frac_partial 占 74%，
 // 说明它的主流供给是"可切分的卡"，而我们要的是整卡独占。
-export const SUPPLY_FIELDS = ['counts', 'wholeCardShare', 'at'];
+export const SUPPLY_FIELDS = ['counts', 'wholeCardShare', 'wholeCardUnits', 'at'];
 
 /** Market：一个可租算力的场所（vast / clore / …）。四个方法，全部只读。 */
 export const MARKET_METHODS = [
@@ -45,6 +45,8 @@ export function assertSupply(supply, name = 'supply') {
   const missing = SUPPLY_FIELDS.filter(k => !(k in (supply || {})));
   if (missing.length) throw new Error(`${name} 缺字段：${missing.join('、')}（wholeCardShare 是换市场的第一筛子）`);
   if (!(supply.wholeCardShare >= 0 && supply.wholeCardShare <= 1)) throw new Error(`${name}.wholeCardShare 应在 0~1`);
+  // wholeCardUnits 是跨场所唯一可比的量：share 的分母里，Clore 根本不存在"分数卡"这个类别
+  if (!(supply.wholeCardUnits >= 0)) throw new Error(`${name}.wholeCardUnits 必须是非负数`);
   return true;
 }
 

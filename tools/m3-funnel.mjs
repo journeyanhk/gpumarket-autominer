@@ -11,7 +11,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { normalizeVast, normalizeClore, toAllocatorOffer } from '../src/m3/normalize.js';
 import { decide } from '../src/m3/allocator.js';
-import { calibrationShoppingList } from '../src/m3/ev.js';
+import { rentEvShoppingList } from '../src/m3/rentEv.js';
 
 const CTRL = 'http://127.0.0.1:8290/api/state';
 const LOGDIR = '/data/gpumarket-autominer/data/offerLog';
@@ -56,6 +56,8 @@ const cloreRounds = readLines(cloreFile);
 
 const funnel = { at: new Date().toISOString(), day, density, price, revenuePerThHour: +revenuePerThHour.toFixed(6), rounds: { vast: vastRounds.length, clore: cloreRounds.length }, total: 0, normalized: 0, normalizeFailed: 0, byReason: {}, byVerdict: {}, byMarket: {}, watchHints: [], candidates: [], supply: {} };
 const fracCount = { whole: 0, partial: 0, unknown: 0 };
+// 跨场所可比的分母是 **GPU 单元**，不是房源数（2026-11-05 用户判定）
+const units = { whole: 0, total: 0 };
 
 // vast：快照里存的是**已评估过的**精简行（id/m/dph/mb/frac/eff/ram/th），不是原始 vast 字段，
 // 所以这里按行内字段重建，不做 raw 解析——这也说明 offerLog 的字段设计要跟着 adapter 走。
@@ -63,8 +65,10 @@ const seen = new Set();
 for (const round of vastRounds) {
   for (const r of round.rows || []) {
     funnel.total++;
+    const nU = Math.max(1, Number(r.n) || 1);
+    units.total += nU;
     if (r.frac == null) fracCount.unknown++;
-    else if (Number(r.frac) >= 0.99) fracCount.whole++;
+    else if (Number(r.frac) >= 0.99) { fracCount.whole++; units.whole += nU; }
     else fracCount.partial++;
     const key = `${r.m}`;
     // 型号名直接取快照行（2026-11-05 修复：早先快照没存型号，模糊匹配会把所有行配到第一个型号，
@@ -117,19 +121,31 @@ for (const round of cloreRounds) {
 }
 
 const fracTotal = fracCount.whole + fracCount.partial + fracCount.unknown;
-funnel.supply.vast = { whole: fracCount.whole, partial: fracCount.partial, unknown: fracCount.unknown, wholeCardShare: fracTotal ? +(fracCount.whole / fracTotal).toFixed(3) : null };
+funnel.supply.vast = {
+  whole: fracCount.whole, partial: fracCount.partial, unknown: fracCount.unknown,
+  wholeCardUnits: units.whole, totalUnits: units.total,
+  wholeCardShare: units.total ? +(units.whole / units.total).toFixed(3) : null,
+};
 {
   const c = cloreRounds[cloreRounds.length - 1];
   const fd = c?.fracDist;
   if (fd) {
+    const fu = c.fracUnits || null;
     const t = (fd['1.0'] || 0) + (fd.partial || 0) + (fd.null || 0);
-    funnel.supply.clore = { whole: fd['1.0'] || 0, partial: fd.partial || 0, unknown: fd.null || 0, wholeCardShare: t ? +((fd['1.0'] || 0) / t).toFixed(3) : null };
+    funnel.supply.clore = {
+      whole: fd['1.0'] || 0, partial: fd.partial || 0, unknown: fd.null || 0,
+      wholeCardUnits: fu?.whole ?? c.wholeCardUnits ?? null,
+      totalUnits: fu?.total ?? null,
+      // ⚠ Clore 的 share 恒为 1.0 是**结构性平凡**（没有切分机制，分母里不存在分数卡），
+      // 跨场所只能比 wholeCardUnits
+      wholeCardShare: fu?.total ? +((fu.whole || 0) / fu.total).toFixed(3) : (t ? +((fd['1.0'] || 0) / t).toFixed(3) : null),
+    };
   }
 }
 // 校准购物单：EV>0 才值得租（PRL 的教训是先租后想）
 {
   const daysLeft = Math.max(1, Math.round((Date.parse('2026-11-11T00:00:00Z') - Date.now()) / 864e5));
-  funnel.shopping = calibrationShoppingList(funnel.candidates, { revenuePerThHour, daysLeft, rentPerHour: 0.067 });
+  funnel.shopping = rentEvShoppingList(funnel.candidates, { revenuePerThHour, daysLeft, rentPerHour: 0.067 });
   funnel.shopping.daysLeft = daysLeft;
 }
 // 时间序列：D14 需要的是"pass 是否曾经非零 / 价格主因比例有没有下降"，单日快照答不了
@@ -161,6 +177,8 @@ if (funnel.watchHints.length) {
   console.log('watch 的补救条件（差哪一项数据）：');
   for (const h of funnel.watchHints) console.log(`  ${h.model} ${h.reason} → ${JSON.stringify(h.need)}`);
 }
-console.log(`供给形态：vast 整卡 ${funnel.supply.vast?.whole} / 分数 ${funnel.supply.vast?.partial} → wholeCardShare ${funnel.supply.vast?.wholeCardShare}｜clore ${funnel.supply.clore?.wholeCardShare ?? '—'}`);
+const sv = funnel.supply.vast || {}, sc = funnel.supply.clore || {};
+console.log(`供给形态（分母=GPU 单元）：wholeCardUnits vast ${sv.wholeCardUnits ?? '—'} / clore ${sc.wholeCardUnits ?? '—'}｜wholeCardShare vast ${sv.wholeCardShare ?? '—'} / clore ${sc.wholeCardShare ?? '—'}（clore 的 1.0 是结构性平凡，跨场所只比 units）`);
+console.log(`型号匹配：gpu(exact) ${funnel.normalized} 条 / normalizeFailed ${funnel.normalizeFailed} 条`);
 console.log(`校准购物单：候选 ${funnel.candidates.length} 条 → EV>0 ${funnel.shopping.viable.length} 条 → ${funnel.shopping.conclusion}`);
 console.log(funnel.byVerdict.pass ? '✅ 有 pass 项' : '⛔ pass: 0（今天没有可租项；上面就是"缺什么"）');

@@ -11,7 +11,7 @@ const root = process.argv[2] || process.cwd();
 const U = p => pathToFileURL(path.join(root, p)).href;
 const { normalizeVast, normalizeClore, toAllocatorOffer } = await import(U('src/m3/normalize.js'));
 const { decide } = await import(U('src/m3/allocator.js'));
-const { calibrationEv, calibrationShoppingList } = await import(U('src/m3/ev.js'));
+const { rentEv, rentEvShoppingList } = await import(U('src/m3/rentEv.js'));
 const { assertSupply } = await import(U('src/m3/contract.js'));
 
 let pass = 0, fail = 0;
@@ -75,23 +75,31 @@ console.log('— verdict 三态：缺数据是 watch（带补救条件），不�
 
 console.log('— 校准 EV：没有样本就不能拍概率（不许再用魔法常数 0.5）');
 {
-  const noSamples = calibrationEv({ needTh: 55, samples: [], revenuePerThHour: 0.0008, daysLeft: 6, rentPerHour: 0.067 });
+  const noSamples = rentEv({ needTh: 55, samples: [], revenuePerThHour: 0.0008, daysLeft: 6, rentPerHour: 0.067 });
   ok(noSamples.viable === false && noSamples.p === null, `无样本 → P 不可估（${noSamples.why}）`);
   // 5 条样本里 4 条 ≥55 → P=0.8；日收益 55×0.0008×24=$1.056；6 天 × 0.8 = $5.07 > $0.067
-  const withSamples = calibrationEv({ needTh: 55, samples: [60, 58, 70, 55, 40], revenuePerThHour: 0.0008, daysLeft: 6, rentPerHour: 0.067 });
-  ok(withSamples.p === 0.8 && withSamples.viable === true, `有样本 → P=${withSamples.p}，EV=$${withSamples.evUsd} > 0`);
+  const withSamples = rentEv({ needTh: 55, samples: [60, 58, 70, 55, 40], revenuePerThHour: 0.0008, daysLeft: 6, rentPerHour: 0.067 });
+  // Laplace (k+1)/(n+2)：4/5 → 5/7 = 0.714（不是 0.8；5 条样本不该给 80% 把握）
+  ok(Math.abs(withSamples.p - 0.714) < 0.002 && withSamples.viable === true, `有样本 → P=${withSamples.p}（Laplace 平滑），EV=$${withSamples.evUsd} > 0`);
   // 贴线但样本全达不到 → EV 负
-  const bad = calibrationEv({ needTh: 300, samples: [60, 58, 70], revenuePerThHour: 0.0008, daysLeft: 6, rentPerHour: 0.067 });
-  ok(bad.p === 0 && bad.viable === false, `需要 300 TH 但样本最高 70 → EV=${bad.evUsd}，不租`);
-  const list = calibrationShoppingList([{ model: 'X', needTh: 300, specTh: 119, samples: [60] }], { revenuePerThHour: 0.0008, daysLeft: 6, rentPerHour: 0.067 });
-  ok(/预算 = \$0/.test(list.conclusion), `购物单结论：${list.conclusion}`);
+  // need > spec → 直接判"价格主因"，不给 EV（否则 300 TH × 收入 会把 EV 算成正的，那是假象）
+  const bad = rentEv({ needTh: 300, specTh: 119, samples: [60, 58, 70], revenuePerThHour: 0.0008, daysLeft: 6, rentPerHour: 0.067 });
+  ok(bad.viable === false && /价格主因/.test(bad.why), `需要 300 TH > 规格 119 → ${bad.why}`);
+  // 注意：这是**租用** EV（若真有一台能稳定交付 70 TH，6 天收益足以覆盖 1 小时租价）。
+  // 它不是"校准价值"——单机测量不迁移，所以校准预算与 EV 无关，恒为 $0（§6.11）。
+  const lowP = rentEv({ needTh: 70, specTh: 119, samples: [60, 58, 55], revenuePerThHour: 0.0008, daysLeft: 6, rentPerHour: 0.067 });
+  ok(lowP.p === 0.2, `样本全不达标 → P=${lowP.p}（Laplace 平滑，不是 0）`);
+  const list = rentEvShoppingList([{ model: 'X', needTh: 300, specTh: 119, samples: [60] }], { revenuePerThHour: 0.0008, daysLeft: 6, rentPerHour: 0.067 });
+  ok(/无一条租用 EV>0/.test(list.conclusion), `购物单结论：${list.conclusion}`);
 }
 
 console.log('— 供给契约：observeSupply 必须带 wholeCardShare（换市场的第一筛子）');
 {
-  ok(assertSupply({ counts: {}, wholeCardShare: 0.26, at: Date.now() }), '含 wholeCardShare 即通过');
+  ok(assertSupply({ counts: {}, wholeCardShare: 0.26, wholeCardUnits: 42, at: Date.now() }), '含 wholeCardShare + wholeCardUnits 即通过');
   let threw = null; try { assertSupply({ counts: {}, at: Date.now() }); } catch (e) { threw = e.message; }
   ok(/wholeCardShare/.test(threw || ''), `缺字段会被点名：${(threw || '').slice(0, 30)}`);
+  let threw2 = null; try { assertSupply({ counts: {}, wholeCardShare: 0.5, at: Date.now() }); } catch (e) { threw2 = e.message; }
+  ok(/wholeCardUnits/.test(threw2 || ''), '缺 wholeCardUnits 也会被点名（跨场所只认它）');
 }
 
 console.log(fail ? `\n单位断言失败：${fail} 项` : `\n单位断言通过（${pass} 项）`);

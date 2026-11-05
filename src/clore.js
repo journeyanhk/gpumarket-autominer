@@ -101,6 +101,8 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
   const fx = await fetchFx();
   const servers = d.servers || [];
   const spot = {}, all = {}, mrls = {}, skipped = {}, fracDist = { '1.0': 0, partial: 0, null: 0 };
+  // 同时按 GPU 单元计数：跨场所比较的分母必须是"卡"，不是"房源"（2026-11-05）
+  const fracUnits = { whole: 0, partial: 0, unknown: 0 }, totalUnits = {};
   for (const s of servers) {
     const m = /^\s*(\d+)\s*x\s*(.+)$/.exec(s?.specs?.gpu || '');
     if (!m) continue;
@@ -109,10 +111,11 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
     if (!k) continue;
     if (s.rented) continue;
     // 分数卡统计（Clore 的 partial_gpu_rental 与 gpu_array 都可能缺，缺就是缺，不默认整卡）
+    totalUnits[k] = (totalUnits[k] || 0) + cnt;
     const pr = s?.partial_gpu_rental;
-    if (pr === false || pr === 0) fracDist['1.0']++;
-    else if (pr === true || pr === 1) fracDist.partial++;
-    else fracDist.null++;
+    if (pr === false || pr === 0) { fracDist['1.0']++; fracUnits.whole += cnt; }
+    else if (pr === true || pr === 1) { fracDist.partial++; fracUnits.partial += cnt; }
+    else { fracDist.null++; fracUnits.unknown += cnt; }
     const mrl = Number(s.mrl);
     if (Number.isFinite(mrl)) (mrls[k] ||= []).push(mrl);
     const p = usdPerDayOf(s?.price || {}, 'spot', fx);
@@ -135,6 +138,10 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
       skippedLongLease: skipped[k] || 0,
     };
   }
+  const unitsTotal = fracUnits.whole + fracUnits.partial + fracUnits.unknown;
   return { at: new Date().toISOString(), servers: servers.length, models, fracDist, fx,
+    fracUnits: { ...fracUnits, total: unitsTotal },
+    wholeCardUnits: fracUnits.whole,
+    wholeCardShare: unitsTotal ? +(fracUnits.whole / unitsTotal).toFixed(3) : null,
     filter: { mrlMaxHours, frac: '>=0.99', nGpu: 'all（整机价 ÷ 卡数）', priceKind: 'spot' } };
 }

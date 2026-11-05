@@ -65,7 +65,7 @@ for (const [name, v] of Object.entries(coins)) {
   const anchored = anchor?.status === 'ok';
   const unitSuspect = !anchored;
   rows.push({
-    coin: name, tag: v.tag, algo, nethash: nh, usdPerThDay: +usdPerThDay.toFixed(5),
+    coin: name, tag: v.tag, algo, nethash: nh, densityPerHsDay: +usdPerThDay.toFixed(5),
     th3080: th ?? null, thSource: algo === 'pearl' ? pearlSrc : 'table', revHr: revHr == null ? null : +revHr.toFixed(4),
     anchored, unitSuspect,
     ceiling: revHr == null ? null : +(revHr / ROI_REQ).toFixed(4),
@@ -77,14 +77,18 @@ for (const [name, v] of Object.entries(coins)) {
 const usable = rows.filter(r => r.revHr != null && !r.unitSuspect);
 usable.sort((a, b) => b.revHr - a.revHr);
 
-if (process.argv.includes('--json')) { console.log(JSON.stringify({ at: new Date().toISOString(), btc, cloreMin: CLORE_MIN, roiReq: ROI_REQ, rows }, null, 2)); process.exit(0); }
+if (process.argv.includes('--json')) { console.log(JSON.stringify({ at: new Date().toISOString(), btc, cloreMin: CLORE_MIN, roiReq: ROI_REQ, note: 'densityPerHsDay 只能同算法内比较', rows }, null, 2)); process.exit(0); }
 
 console.log(`成熟币全灭表 ${new Date().toISOString()}｜BTC $${btc}｜基准租价 $${CLORE_MIN}/h（Clore 3080 最低）｜门槛 ×${ROI_REQ}`);
 console.log(`币 ${rows.length} 个；单位可验证且有 3080 算力的 ${usable.length} 个\n`);
-console.log('coin            algo          密度$/TH·天   3080 $/h   达标上限   溢价    thSource   锚点');
+// 跨算法表**只放能横向比的列**（2026-11-05 用户判定）：
+// 密度($/TH·天) 在 KawPow 与 Pearl 之间差 1e6 倍，放一列就是在邀请"Neoxa 比 Pearl 好 45 万倍"这种误读。
+// 密度只留在单算法视图 / JSON 里，并改名为 densityPerHsDay（单位进名字）。
+console.log('coin            algo        3080 $/h   达标上限   溢价    thSource  锚点');
 for (const r of usable.slice(0, 12)) {
-  console.log(`${String(r.coin).padEnd(15)} ${String(r.algo).padEnd(12)} ${String(r.usdPerThDay).padStart(10)} ${String(r.revHr).padStart(9)} ${String(r.ceiling).padStart(10)} ${String(r.gap + '×').padStart(7)} ${String(r.thSource).padStart(9)}   ${r.anchored ? 'ok' : '—'}`);
+  console.log(`${String(r.coin).padEnd(15)} ${String(r.algo).padEnd(10)} ${String(r.revHr).padStart(8)} ${String(r.ceiling).padStart(10)} ${String(r.gap + '×').padStart(6)} ${String(r.thSource).padStart(10)}  ${r.anchored ? 'ok' : '—'}`);
 }
+console.log('（密度列已移出跨算法表：KawPow 与 Pearl 的"每 TH"差 1e6 倍，横向比必错。单算法视图用 --json 的 densityPerHsDay）');
 const suspect = rows.filter(r => r.unitSuspect);
 if (suspect.length) {
   console.log(`\n· 无锚点算法（单位未独立验证，只能 watch）：${[...new Set(suspect.map(r => r.algo))].join('、')}`);

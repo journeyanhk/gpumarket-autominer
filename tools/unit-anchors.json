@@ -1,33 +1,45 @@
 {
   "_comment": "算法 nethash 单位锚点：每个算法一个独立来源，断言 WTM 的 nethash 与该来源的比值落在 [0.8, 1.25]。这是数据录入，不是拟合。2026-11-05 用户判定。",
-  "checkedAt": "2026-11-05T07:07:15.017Z",
+  "checkedAt": "2026-11-05T08:15:46.320Z",
   "anchors": {
     "pearl": {
       "coin": "Pearl",
       "wtmNethash": 87079780694240640000,
-      "anchorHashrate": 79412721361926300000,
-      "ratio": 1.097,
+      "anchorHashrate": 77234409639367840000,
+      "ratio": 1.127,
       "source": "本机引擎扫描（87.6 EH/s，与 Kryptex 池口径一致）",
       "status": "ok",
-      "checkedAt": "2026-11-05T07:07:11.374Z"
+      "checkedAt": "2026-11-05T08:15:43.032Z",
+      "wmtNethash": 87078118035098030000,
+      "wmtAt": "2026-11-05T08:14:39.000Z",
+      "anchorAt": "2026-11-05T08:15:43.009Z",
+      "skewMin": 1.1
     },
     "autolykos": {
       "coin": "Ergo",
       "wtmNethash": 591024576190,
-      "anchorHashrate": 589810514536,
-      "ratio": 1.002,
+      "anchorHashrate": 594295190008,
+      "ratio": 0.994,
       "source": "https://api.ergoplatform.com/info → hashRate",
       "status": "ok",
-      "checkedAt": "2026-11-05T07:07:12.491Z"
+      "checkedAt": "2026-11-05T08:15:44.132Z",
+      "wmtNethash": 591024576190,
+      "wmtAt": "2026-11-05T08:14:18.000Z",
+      "anchorAt": "2026-11-05T08:15:43.032Z",
+      "skewMin": 1.4
     },
     "kawpow": {
       "coin": "Ravencoin",
       "wtmNethash": 475902072478,
-      "anchorHashrate": 485288819670.8375,
-      "ratio": 0.981,
+      "anchorHashrate": 433307720708.9297,
+      "ratio": 1.097,
       "source": "https://rvn.cryptoscope.io/api/getnetworkhashps → hashrate_raw",
       "status": "ok",
-      "checkedAt": "2026-11-05T07:07:15.017Z"
+      "checkedAt": "2026-11-05T08:15:46.320Z",
+      "wmtNethash": 475301425913,
+      "wmtAt": "2026-11-05T08:10:17.000Z",
+      "anchorAt": "2026-11-05T08:15:44.132Z",
+      "skewMin": 5.5
     },
     "etchash": {
       "coin": "Ethereum Classic",

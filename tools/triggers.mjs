@@ -54,13 +54,21 @@ const t1 = { id: 'T1', hit: price != null && price >= 1.9, threshold: 1.9, value
 
 // T2/T5：矿工流向（Pearl 24h 难度）——读最近一行 scan
 let scan = null;
+let scanAgeH = null;
 try {
   const lines = fs.readFileSync(SCAN, 'utf8').trim().split('\n').filter(Boolean);
   scan = JSON.parse(lines[lines.length - 1]);
+  // 采集断档检查（2026-11-05）：T2/T3/T5 全依赖这一行，断档时不能装作有数据。
+  // 实测 11-03 之后两天没写入，而触发板一直用 11-03 的 0.49% 在算——静默的错误比响的错误贵。
+  const t = Date.parse(scan.at);
+  if (Number.isFinite(t)) scanAgeH = +((Date.now() - t) / 36e5).toFixed(1);
 } catch { /* 没有采集文件就跳过 */ }
+const scanStale = scanAgeH != null && scanAgeH > 26;   // 每天一跑，>26h 即视为断档
 // gpu-coin-scan 的一行里有：pearl = Pearl 24h 难度变化(%)、kryptex.sharePct = 池占比
 const pearlChg = Number(scan?.pearl ?? NaN);
-const t2 = { id: 'T2', hit: Number.isFinite(pearlChg) && pearlChg <= -1.5, value: Number.isFinite(pearlChg) ? pearlChg : null, threshold: -1.5, derivedFrom: 'PLAN §8：矿工撤离 Pearl 才可能让密度回升' };
+const t2 = { id: 'T2', hit: !scanStale && Number.isFinite(pearlChg) && pearlChg <= -1.5, value: Number.isFinite(pearlChg) ? pearlChg : null, threshold: -1.5,
+  derivedFrom: 'PLAN §8：矿工撤离 Pearl 才可能让密度回升',
+  note: scanStale ? `⚠ 采集断档 ${scanAgeH}h，T2/T3/T5 的数据是旧的，不作判据` : null };
 
 // T3：Kryptex 池占比（低于 7 日中位 5 个点）
 const share = Number(scan?.kryptex?.sharePct ?? NaN);
@@ -75,7 +83,7 @@ const t5 = { id: 'T5', hit: Number.isFinite(pearlChg) && pearlChg >= 3, value: N
 const board = [t1, t2, t3, t4, t5].filter(Boolean);
 const hits = board.filter(t => t.hit);
 
-const out = { at: new Date().toISOString(), price, density, targetProfitPct: target, roiReqPct, pSurvive, deployPct: +deployPct.toFixed(2), board, hits: hits.map(h => h.id), window: st?.window?.info?.ratioPass ?? null, windowActive: !!st?.window?.active };
+const out = { at: new Date().toISOString(), price, density, targetProfitPct: target, roiReqPct, pSurvive, deployPct: +deployPct.toFixed(2), scanAt: scan?.at || null, scanAgeH, scanStale, board, hits: hits.map(h => h.id), window: st?.window?.info?.ratioPass ?? null, windowActive: !!st?.window?.active };
 
 if (process.argv.includes('--json')) { console.log(JSON.stringify(out, null, 2)); process.exit(0); }
 

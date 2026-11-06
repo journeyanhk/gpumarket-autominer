@@ -183,16 +183,37 @@ export class Engine {
   // 依据：两个源在 Pearl 上差 12.7%（Kryptex 口径 $0.0187 vs WTM $0.0213 /TH·天），
   // 12.7% 的收入差 = 部署成本的 4 倍、20% 门槛的五分之三——用乐观那个会把 1.9× 说成 1.7×。
   // spread > 10% 时禁止 pass（见 allocator），并输出 densitySpread 供日报。
+  get blockTimeSources() {
+    const chain = Number(this.market?.chainBlockTime) || null;
+    const kx = Number(this._srcCache?.kryptex?.nominalBlockTime) || null;
+    const wtm = Number(this._srcCache?.whattomine?.nominalBlockTime) || null;
+    return {
+      chain, kryptex: kx, wtm,
+      kxVsChainPct: chain && kx ? +(((kx - chain) / chain) * 100).toFixed(1) : null,
+      wtmVsChainPct: chain && wtm ? +(((wtm - chain) / chain) * 100).toFixed(1) : null,
+      used: chain ? 'chain' : 'nominal',
+    };
+  }
+
   get densitySources() {
-    const ours = this.usdHsHr6h * 1e12 * 24;              // $/TH·天（6h 均值）
-    const wtm = Number(this.market?.wtmDensityUsdPerThDay) || null;
-    const pricing = wtm ? Math.min(ours, wtm) : ours;
+    const ours = this.usdHsHr6h * 1e12 * 24;              // $/TH·天（6h 均值，链上原语）
+    // 第二源必须**只换一个变量**：用 WTM 的区块奖励，其余输入（链上 nethash/出块时间/币价）与我们相同。
+    // 否则 spread 里混着三种差异（出块时间 10.9%、全网算力 16%、奖励），永远说不清是哪一项。
+    const wtmReward = Number(this._srcCache?.whattomine?.reward) || null;
+    const chainHs = Number(this.market?.networkHs) || 0;
+    const chainBt = Number(this.market?.chainBlockTime) || 0;
+    const price = Number(this.market?.price) || 0;
+    const wtm = wtmReward > 0 && chainHs > 0 && chainBt > 0 && price > 0
+      ? +(wtmReward * (3600 / chainBt) * price / chainHs * 1e12 * 24).toFixed(5)
+      : null;
+    const pricing = ours;
     const spread = wtm && ours > 0 ? Math.abs(wtm - ours) / Math.min(ours, wtm) * 100 : null;
     return {
       ours: +ours.toFixed(5), wtm: wtm ? +wtm.toFixed(5) : null,
       pricing: +pricing.toFixed(5),
       spreadPct: spread == null ? null : +spread.toFixed(1),
-      source: wtm ? 'min(kryptex, wtm)' : 'kryptex(单源)',
+      source: wtm ? 'chain(原语) vs wtm(仅换奖励)' : 'chain(单源)',
+      note: 'spread 现在只反映奖励/价格分歧；出块时间与 nethash 已统一到链上',
       wtmAt: this.market?.wtmAt || null,
     };
   }
@@ -458,6 +479,11 @@ export class Engine {
       try { this.market.reward = (await P.fetchBlockReward()).reward; this._rewardAt = Date.now(); }
       catch (e) { errs.push(`区块奖励：${e.message}`); }
     }
+    // 链上实测出块时间（2026-11-06）：这是密度的唯一正确口径，各源的名义值只作审计
+    if (chain.status === 'fulfilled' && Number(chain.value?.blockTime) > 0) {
+      this.market.chainBlockTime = Number(chain.value.blockTime);
+      this.market.chainBlockTimeAt = Date.now();
+    }
     if (P.validWallet(this.cfg.wallet)) {
       const [acc, nock] = await Promise.allSettled([P.fetchAccount(this.cfg.wallet), P.fetchNock(this.cfg.wallet)]);
       if (acc.status === 'fulfilled') {
@@ -497,12 +523,18 @@ export class Engine {
         request('https://whattomine.com/coins.json', { timeoutMs: 20000 }),
       ]);
       this._srcCache = this._srcCache || {};
+      // 出块时间必须统一到**链上实测**（2026-11-06）：Kryptex 报 194s、WTM 报 171s、链上实测 175s。
+      // 密度 ∝ 1/blockTime，用错名义值就是 10–13% 的系统偏差，而 13.5% 大于 20% 门槛的三分之二。
+      // 规则：有链上值就一律用它算密度，各源自报的名义值只留作审计。
+      const chainBt = Number(this.market?.chainBlockTime) > 0 ? Number(this.market.chainBlockTime) : null;
       if (kx.status === 'fulfilled' && Number(kx.value?.net_hashrate) > 0) {
-        this._srcCache.kryptex = { networkHs: Number(kx.value.net_hashrate), blockTime: Number(kx.value.block_time) || 194, reward: Number(kx.value.block_reward) || 0 };
+        const nominal = Number(kx.value.block_time) || 194;
+        this._srcCache.kryptex = { networkHs: Number(kx.value.net_hashrate), blockTime: chainBt || nominal, nominalBlockTime: nominal, reward: Number(kx.value.block_reward) || 0 };
       }
       if (wtm.status === 'fulfilled' && Number(wtm.value?.coins?.Pearl?.nethash) > 0) {
         const c = wtm.value.coins.Pearl;
-        this._srcCache.whattomine = { networkHs: Number(c.nethash), blockTime: Number(c.block_time) || 154, reward: Number(c.block_reward) || 0 };
+        const nominal = Number(c.block_time) || 154;
+        this._srcCache.whattomine = { networkHs: Number(c.nethash), blockTime: chainBt || nominal, nominalBlockTime: nominal, reward: Number(c.block_reward) || 0 };
       }
       this._srcAt = Date.now();
     }
@@ -2555,7 +2587,9 @@ export class Engine {
       const d = await r.json();
       const c = (d?.coins || {}).Pearl;
       if (!c) throw new Error('WTM 无 Pearl');
-      const nh = Number(c.nethash), bt = Number(c.block_time), br = Number(c.block_reward), px = Number(c.exchange_rate);
+      const nh = Number(c.nethash), br = Number(c.block_reward), px = Number(c.exchange_rate);
+      // 同样统一到链上实测出块时间（WTM 的 171s 是名义值）
+      const bt = Number(this.market?.chainBlockTime) > 0 ? Number(this.market.chainBlockTime) : Number(c.block_time);
       // BTC 价单独取（market 里没有这个字段，别假设有——2026-11-05 踩过）
       let btc = Number(this.market?.btcUsd) || 0;
       if (!(btc > 0)) {
@@ -4088,6 +4122,7 @@ export class Engine {
             thSource: band.src, thCalibrated: band.src !== 'spec' && band.src !== 'pooled',
             needDensity: need, nowDensity: +dens6.toFixed(4),
             densitySources: this.densitySources,
+            blockTimeSources: this.blockTimeSources,
             gapPct: need && dens6 > 0 ? +((need / dens6 - 1) * 100).toFixed(0) : null,
           });
         }

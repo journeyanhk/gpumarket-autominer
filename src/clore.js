@@ -105,6 +105,7 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
   let rented = 0;
   // 同时按 GPU 单元计数：跨场所比较的分母必须是"卡"，不是"房源"（2026-11-05）
   const fracUnits = { whole: 0, partial: 0, unknown: 0 }, totalUnits = {};
+  let fieldMissing = 0;
   for (const s of servers) {
     const m = /^\s*(\d+)\s*x\s*(.+)$/.exec(s?.specs?.gpu || '');
     if (!m) continue;
@@ -115,10 +116,16 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
     if (s.rented) { rented++; continue; }
     // 分数卡统计（Clore 的 partial_gpu_rental 与 gpu_array 都可能缺，缺就是缺，不默认整卡）
     totalUnits[k] = (totalUnits[k] || 0) + cnt;
+    // Clore 结构上不提供分数卡（全量 2846 台 specs.gpu 全是 "Nx MODEL"，0 条小数表述）。
+    // 所以 partial_gpu_rental 字段缺失 **不等于"未知/可能是分数卡"**，它就是整卡——
+    // 把它记成 unknown 会让分母虚增、share 掉到 0.58（2026-11-12 就是这么来的）。
+    // 字段缺失单独计数（fieldMissing），只用于监控我们自己的解析完整度。
     const pr = s?.partial_gpu_rental;
-    if (pr === false || pr === 0) { fracDist['1.0']++; fracUnits.whole += cnt; }
-    else if (pr === true || pr === 1) { fracDist.partial++; fracUnits.partial += cnt; }
-    else { fracDist.null++; fracUnits.unknown += cnt; }
+    if (pr === true || pr === 1) { fracDist.partial++; fracUnits.partial += cnt; }
+    else {
+      if (pr == null) fieldMissing++;
+      fracDist['1.0']++; fracUnits.whole += cnt;
+    }
     const mrl = Number(s.mrl);
     if (Number.isFinite(mrl)) (mrls[k] ||= []).push(mrl);
     const p = usdPerDayOf(s?.price || {}, 'spot', fx);
@@ -143,6 +150,11 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
     };
   }
   const unitsTotal = fracUnits.whole + fracUnits.partial + fracUnits.unknown;
+  // Clore 结构上不提供分数卡（全量 2846 台 specs.gpu 全是 "Nx MODEL"），所以 share 恒为 1.00。
+  // 一旦 <0.999，说明是**我们的解析/归一化出问题**，不是市场变化 —— 必须标出来，不许进结论。
+  // （2026-11-12 用户实测：0.582 是归一化失败量撑大了分母，不是 Clore 优势削弱）
+  const wholeCardShare = unitsTotal ? +(fracUnits.whole / unitsTotal).toFixed(3) : null;
+  const normalizeSuspected = wholeCardShare != null && wholeCardShare < 0.999;
   return { at: new Date().toISOString(), servers: servers.length, models, fracDist, fx,
     fracUnits: { ...fracUnits, total: unitsTotal },
     exhaustive: true,          // 全量拉取，没有配额截断
@@ -150,7 +162,9 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
     rentedSkipped: rented,
     sampledRows: servers.length,
     wholeCardUnits: fracUnits.whole,
-    wholeCardShare: unitsTotal ? +(fracUnits.whole / unitsTotal).toFixed(3) : null,
+    wholeCardShare,
+    normalizeSuspected,          // true → 该值不可用于任何结论（结构恒等 1.00 被打破）
+    partialFieldMissing: fieldMissing,   // 解析完整度指标（Clore 恒无分数卡，缺字段按整卡算）
     filter: { mrlMaxHours, frac: '>=0.99', nGpu: 'all（整机价 ÷ 卡数）', priceKind: 'spot' } };
 }
 /** Clore 侧 countOffers：基于全量快照，exhaustive=true（唯一能给出确定计数的场所） */

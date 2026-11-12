@@ -149,6 +149,8 @@ funnel.supply.vast = {
       // ⚠ Clore 的 share 恒为 1.0 是**结构性平凡**（没有切分机制，分母里不存在分数卡），
       // 跨场所只能比 wholeCardUnits
       wholeCardShare: fu?.total ? +((fu.whole || 0) / fu.total).toFixed(3) : (t ? +((fd['1.0'] || 0) / t).toFixed(3) : null),
+      // Clore 的 share 恒等 1.00（无分数卡机制）；<0.999 只可能是我们的归一化出问题
+      normalizeSuspected: c.normalizeSuspected === true || (fu?.total ? (fu.whole || 0) / fu.total < 0.999 : false),
       exhaustive: c.exhaustive !== false, rentableOnly: c.rentableOnly !== false, sampledRows: c.sampledRows ?? null,
     };
   }
@@ -190,7 +192,7 @@ if (funnel.watchHints.length) {
 }
 const sv = funnel.supply.vast || {}, sc = funnel.supply.clore || {};
 console.log(`供给形态：wholeCardUnits vast ${sv.wholeCardUnits ?? '—'}${sv.exhaustive ? '' : `（采样 ${sv.sampledRows} 行，下界）`} / clore ${sc.wholeCardUnits ?? '—'}${sc.exhaustive === false ? '（采样）' : '（全量）'} → **不可直接相减**`);
-console.log(`wholeCardShare vast ${sv.wholeCardShare ?? '—'} / clore ${sc.wholeCardShare ?? '—'}（clore 1.0 是结构性平凡）`);
+console.log(`wholeCardShare vast ${sv.wholeCardShare ?? '—'} / clore ${sc.normalizeSuspected ? `**${sc.wholeCardShare}（normalizeSuspected，不可用）**` : (sc.wholeCardShare ?? '—')}（clore 恒等 1.00，非平凡值=我们解析出错）`);
 console.log(`型号匹配：gpu(exact) ${funnel.normalized} 条 / normalizeFailed ${funnel.normalizeFailed} 条`);
 
 // 跨场所对照：**滤镜必须变成一列**（2026-11-05 用户判定：脚注是给人看的，列是给机器比的）

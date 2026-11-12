@@ -68,8 +68,17 @@ const candidates = Object.entries(seen)
 const out = {
   at: new Date().toISOString(), needDensity, thresholds, roiReq: +roiReq.toFixed(1),
   cpuLegUsdHr, cpuLegBasis: `${usable} 线程 × $${cpuLeg.ratePerThreadHr ?? 0} × ${cpuLeg.contentionFactor ?? 1}（影子，不参与出价）`,
-  candidates,
+  candidates: candidates.map(c => ({ symbol: c.symbol || c.name, algo: c.algo, stage: c.stage, ageDays: c.ageDays, density: null, threshold: needDensity })),
 };
+
+// --append：每天一行，供 tools/termination-verdict.mjs 判"连续 3 天达标"
+if (process.argv.includes('--append')) {
+  try {
+    fs.mkdirSync('/data/prl-automine/../gpumarket-autominer/data/offerLog', { recursive: true });
+    const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    fs.appendFileSync(`/data/gpumarket-autominer/data/offerLog/newcoin-${day}.jsonl`, JSON.stringify(out) + '\n');
+  } catch { /* 写不进去不影响输出 */ }
+}
 if (process.argv.includes('--json')) { console.log(JSON.stringify(out, null, 2)); process.exit(0); }
 
 if (!candidates.length) {

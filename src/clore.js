@@ -105,6 +105,7 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
   let rented = 0;
   // 同时按 GPU 单元计数：跨场所比较的分母必须是"卡"，不是"房源"（2026-11-05）
   const fracUnits = { whole: 0, partial: 0, unknown: 0 }, totalUnits = {};
+  let wholeServers = 0, partialServers = 0;   // 与 units 必须同一子集（2026-11-12）
   let fieldMissing = 0;
   for (const s of servers) {
     const m = /^\s*(\d+)\s*x\s*(.+)$/.exec(s?.specs?.gpu || '');
@@ -121,10 +122,10 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
     // 把它记成 unknown 会让分母虚增、share 掉到 0.58（2026-11-12 就是这么来的）。
     // 字段缺失单独计数（fieldMissing），只用于监控我们自己的解析完整度。
     const pr = s?.partial_gpu_rental;
-    if (pr === true || pr === 1) { fracDist.partial++; fracUnits.partial += cnt; }
+    if (pr === true || pr === 1) { fracDist.partial++; fracUnits.partial += cnt; partialServers++; }
     else {
       if (pr == null) fieldMissing++;
-      fracDist['1.0']++; fracUnits.whole += cnt;
+      fracDist['1.0']++; fracUnits.whole += cnt; wholeServers++;
     }
     const mrl = Number(s.mrl);
     if (Number.isFinite(mrl)) (mrls[k] ||= []).push(mrl);
@@ -161,7 +162,11 @@ export async function fetchClore({ keyFile, mrlMaxHours = 24, timeoutMs = 30000 
     rentableOnly: true,        // 已租的已剔除（41% 的机器在别人手里）
     rentedSkipped: rented,
     sampledRows: servers.length,
+    // servers 与 units 必须是同一子集，否则就是又一次 server/unit 混用（2026-11-12 第二次）
+    wholeCardServers: wholeServers,
     wholeCardUnits: fracUnits.whole,
+    unitInvariantOk: fracUnits.whole >= wholeServers,   // 每台至少 1 张卡，恒真；不成立=解析错
+    scope: 'known-models（只统计 modelKey 认得的型号，不含 A100/H100 等）',
     wholeCardShare,
     normalizeSuspected,          // true → 该值不可用于任何结论（结构恒等 1.00 被打破）
     partialFieldMissing: fieldMissing,   // 解析完整度指标（Clore 恒无分数卡，缺字段按整卡算）

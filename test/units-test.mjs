@@ -104,6 +104,15 @@ console.log('— 双源密度分歧：>10% 禁止 pass（2026-11-05）');
   ok(spread.whatWouldMakeItViable?.maxSpreadPct === 10, '带补救条件：maxSpreadPct=10');
 }
 
+console.log('— 恒真不变量：units ≥ servers（2026-11-12，纯数学，不需要外部数据）');
+{
+  // 每个 server 至少 1 张卡 → 单元数不可能小于台数。任何一次 server/unit 混淆都会当场变红。
+  const mk = (servers, units) => ({ wholeCardServers: servers, wholeCardUnits: units, unitInvariantOk: units >= servers });
+  ok(mk(849, 2797).unitInvariantOk === true, '849 台 / 2797 单元 → 成立（均 3.3 卡/台）');
+  ok(mk(2845, 2786).unitInvariantOk === false, '2845 台 / 2786 单元 → 不成立（这正是 11-12 的错误：分母不是同一子集）');
+  ok(mk(100, 100).unitInvariantOk === true, '100 台 / 100 单元 → 成立（每台 1 卡）');
+}
+
 console.log('— 供给契约：observeSupply 必须带 wholeCardShare（换市场的第一筛子）');
 {
   ok(assertSupply({ counts: {}, wholeCardShare: 0.26, wholeCardUnits: 42, exhaustive: false, rentableOnly: true, sampledRows: 30, at: Date.now() }), '含 share/units/exhaustive/rentableOnly 即通过');
